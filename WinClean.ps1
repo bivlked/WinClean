@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    WinClean - Ultimate Windows 11 Maintenance Script v1.2
+    WinClean - Ultimate Windows 11 Maintenance Script v1.3
 .DESCRIPTION
     Комплексный скрипт для обновления и очистки Windows 11:
     - Обновление Windows (включая драйверы)
@@ -14,8 +14,11 @@
     - Подробный цветной вывод + лог-файл
 .NOTES
     Author: biv
-    Version: 1.2
+    Version: 1.3
     Requires: PowerShell 7.1+, Windows 11, Administrator rights
+    Changes in 1.3:
+    - CRITICAL FIX: Clear-RecycleBin renamed to Clear-WinCleanRecycleBin to avoid
+      infinite recursion (stack overflow) caused by name collision with built-in cmdlet
     Changes in 1.2:
     - Fixed $script:LogPath scope (logging now works correctly)
     - Fixed Clear-BrowserCaches respecting ReportOnly mode
@@ -879,7 +882,7 @@ function Clear-WindowsUpdateCache {
     }
 }
 
-function Clear-RecycleBin {
+function Clear-WinCleanRecycleBin {
     <#
     .SYNOPSIS
         Empties the Recycle Bin
@@ -892,7 +895,8 @@ function Clear-RecycleBin {
     }
 
     try {
-        Clear-RecycleBin -Force -ErrorAction Stop
+        # Use full cmdlet path to avoid recursion (our function has same name as cmdlet)
+        Microsoft.PowerShell.Management\Clear-RecycleBin -Force -ErrorAction Stop
         Write-Log "Recycle Bin emptied" -Level SUCCESS
     } catch {
         # Fallback to COM method
@@ -1706,7 +1710,7 @@ function Show-Banner {
   ║        ██████╔╝██║  ██║███████╗██║  ██║██║ ╚═╝ ██║                   ║
   ║        ╚═════╝ ╚═╝  ╚═╝╚══════╝╚═╝  ╚═╝╚═╝     ╚═╝                   ║
   ║                                                                      ║
-  ║            Ultimate Windows 11 Maintenance Script v1.2               ║
+  ║            Ultimate Windows 11 Maintenance Script v1.3               ║
   ║                                                                      ║
   ╚══════════════════════════════════════════════════════════════════════╝
 
@@ -1831,7 +1835,7 @@ function Show-FinalStatistics {
 
 function Start-WinClean {
     # Initialize log
-    "WinClean v1.2 - Started at $(Get-Date)" | Out-File -FilePath $LogPath -Encoding utf8
+    "WinClean v1.3 - Started at $(Get-Date)" | Out-File -FilePath $LogPath -Encoding utf8
     "=" * 70 | Out-File -FilePath $LogPath -Append -Encoding utf8
 
     Show-Banner
@@ -1876,7 +1880,7 @@ function Start-WinClean {
             Clear-TempFiles
             Clear-BrowserCaches
             Clear-WindowsUpdateCache
-            Clear-RecycleBin
+            Clear-WinCleanRecycleBin
             Clear-SystemCaches
             Clear-EventLogs
             Clear-DNSCache
