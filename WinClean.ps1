@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    WinClean - Ultimate Windows 11 Maintenance Script v1.9
+    WinClean - Ultimate Windows 11 Maintenance Script v2.0
 .DESCRIPTION
     Комплексный скрипт для обновления и очистки Windows 11:
     - Обновление Windows (включая драйверы)
@@ -14,8 +14,16 @@
     - Подробный цветной вывод + лог-файл
 .NOTES
     Author: biv
-    Version: 1.9
+    Version: 2.0
     Requires: PowerShell 7.1+, Windows 11, Administrator rights
+    Changes in 2.0:
+    - Fixed Test-InternetConnection: uses TcpClient with 3s timeout (no VPN hangs)
+    - Fixed Clear-EventLogs: now checks $LASTEXITCODE for each wevtutil call
+    - Fixed winget ExitCode: strict check (any non-zero = error, not just empty output)
+    - Fixed Storage Sense: uses Get-ScheduledTask (language-independent status)
+    - Fixed Storage Sense: detects actual completion (wasRunning -> Ready transition)
+    - Fixed ReportOnly: no longer installs PSWindowsUpdate/NuGet modules
+    - Removed unused DriverUpdatesCount field from Stats
     Changes in 1.9:
     - Fixed progress bar: TotalSteps now calculated dynamically based on skip flags
     - Fixed winget: source update skipped in ReportOnly mode, added ExitCode check
@@ -104,7 +112,6 @@ $script:Stats = [hashtable]::Synchronized(@{
     TotalFreedBytes      = [long]0
     FreedByCategory      = @{}
     WindowsUpdatesCount  = 0
-    DriverUpdatesCount   = 0
     AppUpdatesCount      = 0
     WarningsCount        = 0
     ErrorsCount          = 0
@@ -244,7 +251,10 @@ function Update-Progress {
 function Test-InternetConnection {
     <#
     .SYNOPSIS
-        Проверяет доступ к интернету через HTTPS-эндпоинты, с ICMP как запасным вариантом
+        Проверяет доступ к интернету через TCP-соединения с таймаутом
+    .DESCRIPTION
+        Использует TcpClient с явным таймаутом (3 сек) вместо Test-NetConnection,
+        который может зависать на 20-30 секунд при VPN или нестабильном соединении
     #>
     $targets = @(
         @{ Host = 'www.microsoft.com'; Port = 443 }
@@ -252,13 +262,20 @@ function Test-InternetConnection {
         @{ Host = 'winget.azureedge.net'; Port = 443 }
     )
 
+    $timeoutMs = 3000  # 3 секунды таймаут на каждое соединение
+
     foreach ($target in $targets) {
         try {
-            $result = Test-NetConnection -ComputerName $target.Host -Port $target.Port `
-                -WarningAction SilentlyContinue -ErrorAction SilentlyContinue
-            if ($result.TcpTestSucceeded) {
+            $tcpClient = New-Object System.Net.Sockets.TcpClient
+            $connect = $tcpClient.BeginConnect($target.Host, $target.Port, $null, $null)
+            $success = $connect.AsyncWaitHandle.WaitOne($timeoutMs, $false)
+
+            if ($success -and $tcpClient.Connected) {
+                $tcpClient.EndConnect($connect)
+                $tcpClient.Close()
                 return $true
             }
+            $tcpClient.Close()
         } catch { }
     }
 
@@ -517,6 +534,12 @@ function Update-WindowsSystem {
         return
     }
 
+    # Early exit for ReportOnly - don't install modules or modify system
+    if ($ReportOnly) {
+        Write-Log "Would check and install: Windows Updates and Drivers" -Level DETAIL
+        return
+    }
+
     if (-not (Test-InternetConnection)) {
         Write-Log "No internet connection - skipping Windows Update" -Level ERROR
         $script:Stats.ErrorsCount++
@@ -608,11 +631,6 @@ function Update-WindowsSystem {
         }
 
         Write-Host ""
-
-        if ($ReportOnly) {
-            Write-Log "Report mode - updates not installed" -Level INFO
-            return
-        }
 
         # Install updates
         Write-Log "Installing updates..." -Level INFO
@@ -716,8 +734,8 @@ function Update-Applications {
         Remove-Item $tempFile -Force -ErrorAction SilentlyContinue
         Remove-Item $tempErrorFile -Force -ErrorAction SilentlyContinue
 
-        # Check if winget command failed
-        if ($process.ExitCode -ne 0 -and -not $output) {
+        # Check if winget command failed (any non-zero exit code is an error)
+        if ($process.ExitCode -ne 0) {
             Write-Log "Winget upgrade check failed (exit code: $($process.ExitCode))" -Level ERROR
             if ($errorOutput) {
                 Write-Log "Error: $errorOutput" -Level ERROR
@@ -1068,14 +1086,25 @@ function Clear-EventLogs {
         }
 
         $clearedCount = 0
+        $failedCount = 0
         foreach ($log in $logs) {
             try {
                 wevtutil cl $log 2>$null
-                $clearedCount++
-            } catch { }
+                if ($LASTEXITCODE -eq 0) {
+                    $clearedCount++
+                } else {
+                    $failedCount++
+                }
+            } catch {
+                $failedCount++
+            }
         }
 
-        Write-Log "Event logs cleared ($clearedCount logs)" -Level SUCCESS
+        if ($failedCount -gt 0) {
+            Write-Log "Event logs cleared: $clearedCount, failed: $failedCount" -Level WARNING
+        } else {
+            Write-Log "Event logs cleared ($clearedCount logs)" -Level SUCCESS
+        }
     } catch {
         Write-Log "Error clearing event logs: $_" -Level WARNING
         $script:Stats.WarningsCount++
@@ -1750,27 +1779,47 @@ function Invoke-StorageSense {
     }
 
     # Try Storage Sense first (Windows 11)
-    $ssTask = "\Microsoft\Windows\DiskCleanup\StorageSense"
-    $taskExists = schtasks /Query /TN $ssTask 2>$null
+    # Use Get-ScheduledTask for language-independent status checking
+    $ssTaskPath = "\Microsoft\Windows\DiskCleanup\"
+    $ssTaskName = "StorageSense"
+    $task = Get-ScheduledTask -TaskPath $ssTaskPath -TaskName $ssTaskName -ErrorAction SilentlyContinue
 
-    if ($LASTEXITCODE -eq 0) {
+    if ($task) {
         Write-Log "Running Storage Sense..." -Level INFO
-        schtasks /Run /TN $ssTask | Out-Null
 
-        # Wait for task to complete with timeout (check status instead of fixed sleep)
+        # Record time before running to compare with LastRunTime
+        $startTime = Get-Date
+        Start-ScheduledTask -TaskPath $ssTaskPath -TaskName $ssTaskName -ErrorAction SilentlyContinue
+
+        # Wait for task to complete with timeout
         $timeout = 120  # 2 minutes max
         $elapsed = 0
         $checkInterval = 5
+        $wasRunning = $false
 
         while ($elapsed -lt $timeout) {
             Start-Sleep -Seconds $checkInterval
             $elapsed += $checkInterval
 
-            # Query task status
-            $taskStatus = schtasks /Query /TN $ssTask /FO CSV 2>$null | ConvertFrom-Csv
-            if ($taskStatus -and $taskStatus.Status -match "Ready|Готово") {
-                Write-Log "Storage Sense completed" -Level SUCCESS
-                break
+            # Get current task state (language-independent: Ready, Running, Disabled)
+            $task = Get-ScheduledTask -TaskPath $ssTaskPath -TaskName $ssTaskName -ErrorAction SilentlyContinue
+            if ($task) {
+                $state = $task.State
+
+                if ($state -eq 'Running') {
+                    $wasRunning = $true
+                } elseif ($wasRunning -and $state -eq 'Ready') {
+                    # Task was running and now finished
+                    Write-Log "Storage Sense completed" -Level SUCCESS
+                    break
+                } elseif (-not $wasRunning -and $elapsed -ge 10) {
+                    # Task didn't start running within 10 seconds - check LastRunTime
+                    $taskInfo = Get-ScheduledTaskInfo -TaskPath $ssTaskPath -TaskName $ssTaskName -ErrorAction SilentlyContinue
+                    if ($taskInfo -and $taskInfo.LastRunTime -gt $startTime) {
+                        Write-Log "Storage Sense completed" -Level SUCCESS
+                        break
+                    }
+                }
             }
         }
 
@@ -1839,7 +1888,7 @@ function Show-Banner {
   ║        ██████╔╝██║  ██║███████╗██║  ██║██║ ╚═╝ ██║                   ║
   ║        ╚═════╝ ╚═╝  ╚═╝╚══════╝╚═╝  ╚═╝╚═╝     ╚═╝                   ║
   ║                                                                      ║
-  ║            Ultimate Windows 11 Maintenance Script v1.9               ║
+  ║            Ultimate Windows 11 Maintenance Script v2.0               ║
   ║                                                                      ║
   ╚══════════════════════════════════════════════════════════════════════╝
 
@@ -1981,7 +2030,7 @@ function Show-FinalStatistics {
 
 function Start-WinClean {
     # Initialize log
-    "WinClean v1.9 - Started at $(Get-Date)" | Out-File -FilePath $script:LogPath -Encoding utf8
+    "WinClean v2.0 - Started at $(Get-Date)" | Out-File -FilePath $script:LogPath -Encoding utf8
     "=" * 70 | Out-File -FilePath $script:LogPath -Append -Encoding utf8
 
     # Calculate TotalSteps dynamically based on skip flags
