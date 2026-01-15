@@ -225,8 +225,25 @@ function Update-Progress {
 function Test-InternetConnection {
     <#
     .SYNOPSIS
-        Tests internet connectivity using multiple DNS servers
+        Проверяет доступ к интернету через HTTPS-эндпоинты, с ICMP как запасным вариантом
     #>
+    $targets = @(
+        @{ Host = 'www.microsoft.com'; Port = 443 }
+        @{ Host = 'api.github.com'; Port = 443 }
+        @{ Host = 'winget.azureedge.net'; Port = 443 }
+    )
+
+    foreach ($target in $targets) {
+        try {
+            $result = Test-NetConnection -ComputerName $target.Host -Port $target.Port `
+                -WarningAction SilentlyContinue -ErrorAction SilentlyContinue
+            if ($result.TcpTestSucceeded) {
+                return $true
+            }
+        } catch { }
+    }
+
+    # Запасной вариант: ICMP (может быть заблокирован в некоторых сетях)
     $dnsServers = @('8.8.8.8', '1.1.1.1', '208.67.222.222')
 
     foreach ($dns in $dnsServers) {
