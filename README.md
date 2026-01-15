@@ -51,7 +51,7 @@
 
 - **One command** does everything
 - **All browsers** cleaned automatically
-- **All dev tools** handled in parallel
+- **Dev tool caches** handled in one run
 - **Docker & WSL** optimized
 - **Deep cleanup** with DISM
 - **Safe by design** — protected paths
@@ -90,7 +90,7 @@
 
 ### 👨‍💻 Developer
 - npm / yarn / pnpm
-- pip / Poetry / uv
+- pip / Composer
 - NuGet / Gradle / Cargo
 - Go build cache
 
@@ -279,6 +279,7 @@ C:\Users\YourName\
 | Browser caches | Browser bookmarks, passwords |
 | `npm-cache` | `node_modules` |
 | `pip\Cache` | Virtual environments |
+| `Composer\cache` | `vendor` |
 | `NuGet\v3-cache` | `\.nuget\packages` |
 | `\.gradle\build-cache` | `\.gradle\caches\modules` |
 
