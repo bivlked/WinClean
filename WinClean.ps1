@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    WinClean - Ultimate Windows 11 Maintenance Script v1.5
+    WinClean - Ultimate Windows 11 Maintenance Script v1.6
 .DESCRIPTION
     Комплексный скрипт для обновления и очистки Windows 11:
     - Обновление Windows (включая драйверы)
@@ -14,8 +14,11 @@
     - Подробный цветной вывод + лог-файл
 .NOTES
     Author: biv
-    Version: 1.5
+    Version: 1.6
     Requires: PowerShell 7.1+, Windows 11, Administrator rights
+    Changes in 1.6:
+    - Added pause at end: window stays open 60 sec or until key press
+      (prevents window from closing before user can read results)
     Changes in 1.5:
     - Fixed visual glitch: clear progress bar before DISM output to prevent overlay
     Changes in 1.4:
@@ -1718,7 +1721,7 @@ function Show-Banner {
   ║        ██████╔╝██║  ██║███████╗██║  ██║██║ ╚═╝ ██║                   ║
   ║        ╚═════╝ ╚═╝  ╚═╝╚══════╝╚═╝  ╚═╝╚═╝     ╚═╝                   ║
   ║                                                                      ║
-  ║            Ultimate Windows 11 Maintenance Script v1.5               ║
+  ║            Ultimate Windows 11 Maintenance Script v1.6               ║
   ║                                                                      ║
   ╚══════════════════════════════════════════════════════════════════════╝
 
@@ -1839,11 +1842,28 @@ function Show-FinalStatistics {
     Write-Host ""
     Write-Host "  Log saved to: $LogPath" -ForegroundColor DarkGray
     Write-Host ""
+
+    # Pause before closing window (for users running from downloaded script)
+    Write-Host "  Press any key to exit (auto-close in 60 seconds)..." -ForegroundColor DarkGray
+
+    $timeout = 60
+    $startTime = Get-Date
+
+    # Clear keyboard buffer
+    while ([Console]::KeyAvailable) { [Console]::ReadKey($true) | Out-Null }
+
+    while ((Get-Date) -lt $startTime.AddSeconds($timeout)) {
+        if ([Console]::KeyAvailable) {
+            [Console]::ReadKey($true) | Out-Null
+            break
+        }
+        Start-Sleep -Milliseconds 100
+    }
 }
 
 function Start-WinClean {
     # Initialize log
-    "WinClean v1.5 - Started at $(Get-Date)" | Out-File -FilePath $LogPath -Encoding utf8
+    "WinClean v1.6 - Started at $(Get-Date)" | Out-File -FilePath $LogPath -Encoding utf8
     "=" * 70 | Out-File -FilePath $LogPath -Append -Encoding utf8
 
     Show-Banner
