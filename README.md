@@ -90,7 +90,7 @@
 
 ### 👨‍💻 Developer
 - npm / yarn / pnpm
-- pip / Poetry / uv
+- pip / Composer
 - NuGet / Gradle / Cargo
 - Go build cache
 
@@ -279,6 +279,7 @@ C:\Users\YourName\
 | Browser caches | Browser bookmarks, passwords |
 | `npm-cache` | `node_modules` |
 | `pip\Cache` | Virtual environments |
+| `Composer\cache` | `vendor` |
 | `NuGet\v3-cache` | `\.nuget\packages` |
 | `\.gradle\build-cache` | `\.gradle\caches\modules` |
 

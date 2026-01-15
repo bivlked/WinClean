@@ -87,7 +87,7 @@
 
 ### 👨‍💻 Разработка
 - npm / yarn / pnpm
-- pip / Poetry / uv
+- pip / Composer
 - NuGet / Gradle / Cargo
 - Go build cache
 
@@ -276,6 +276,7 @@ C:\Users\ВашеИмя\
 | Кэши браузеров | Закладки, пароли браузеров |
 | `npm-cache` | `node_modules` |
 | `pip\Cache` | Виртуальные окружения |
+| `Composer\cache` | `vendor` |
 | `NuGet\v3-cache` | `\.nuget\packages` |
 | `\.gradle\build-cache` | `\.gradle\caches\modules` |
 
