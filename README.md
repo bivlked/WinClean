@@ -51,7 +51,7 @@
 
 - **One command** does everything
 - **All browsers** cleaned automatically
-- **All dev tools** handled in parallel
+- **All dev tools** cleaned automatically
 - **Docker & WSL** optimized
 - **Deep cleanup** with DISM
 - **Safe by design** — protected paths
@@ -90,7 +90,7 @@
 
 ### 👨‍💻 Developer
 - npm / yarn / pnpm
-- pip / Poetry / uv
+- pip / Composer
 - NuGet / Gradle / Cargo
 - Go build cache
 
@@ -230,7 +230,7 @@ Fast cleanup only
 
 | Requirement | Version | Notes |
 |:------------|:--------|:------|
-| **Windows** | 11 | Tested on 23H2/24H2/25H2 |
+| **Windows** | 11 | Tested on 23H2/24H2 |
 | **PowerShell** | 7.1+ | [Download here](https://aka.ms/powershell) |
 | **Rights** | Administrator | Required for system operations |
 

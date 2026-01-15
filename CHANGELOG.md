@@ -60,7 +60,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Windows Update with driver support via PSWindowsUpdate
 - Winget application updates
 - Browser cache cleanup (Edge, Chrome, Firefox, Yandex, Opera, Brave)
-- Developer cache cleanup (npm, pip, NuGet, Gradle, Cargo, Go)
+- Developer cache cleanup (npm, yarn, pnpm, pip, NuGet, Gradle, Cargo, Go, Composer)
 - Docker cleanup and WSL2 VHDX compaction
 - Visual Studio and JetBrains IDE cache cleanup
 - Privacy traces cleanup (DNS cache, Run history, Recent documents)
