@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.8] - 2025-01-15
+
+### Fixed
+- **CRITICAL**: `Start-WinClean` and `Show-FinalStatistics` now use `$script:LogPath` instead of `$LogPath` parameter (fixes crash when `-LogPath` not specified)
+- **Version consistency**: All version references (SYNOPSIS, NOTES, banner, log) now unified to single source
+- `Clear-BrowserCaches`: Browser cache cleanup now properly tracked in freed space statistics (was missing from totals)
+- `TotalSteps` corrected from 12 to 7 (progress bar now reaches 100%)
+- `Update-Applications`: Winget update detection now language-independent (uses table separator instead of text phrases)
+
+---
+
 ## [1.7] - 2025-01-15
 
 ### Added

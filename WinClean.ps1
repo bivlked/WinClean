@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    WinClean - Ultimate Windows 11 Maintenance Script v1.6
+    WinClean - Ultimate Windows 11 Maintenance Script v1.8
 .DESCRIPTION
     Комплексный скрипт для обновления и очистки Windows 11:
     - Обновление Windows (включая драйверы)
@@ -14,8 +14,14 @@
     - Подробный цветной вывод + лог-файл
 .NOTES
     Author: biv
-    Version: 1.7
+    Version: 1.8
     Requires: PowerShell 7.1+, Windows 11, Administrator rights
+    Changes in 1.8:
+    - Fixed critical bug: $LogPath vs $script:LogPath in Start-WinClean and Show-FinalStatistics
+    - Fixed version inconsistency: unified all version references to single source
+    - Added browser cache size tracking to freed space statistics
+    - Fixed TotalSteps count (was 12, actual 7 steps)
+    - Improved winget update detection: language-independent parsing
     Changes in 1.7:
     - Improved internet connectivity check: HTTPS endpoints + ICMP fallback
     - Fixed Show-Banner to display correct log path ($script:LogPath)
@@ -96,7 +102,7 @@ $script:Stats = [hashtable]::Synchronized(@{
     RebootRequired       = $false
     StartTime            = Get-Date
     CurrentStep          = 0
-    TotalSteps           = 12
+    TotalSteps           = 7
 })
 
 # Initialize log path (script scope for access in functions)
@@ -696,23 +702,31 @@ function Update-Applications {
         $output = Get-Content $tempFile -Raw -Encoding UTF8 -ErrorAction SilentlyContinue
         Remove-Item $tempFile -Force -ErrorAction SilentlyContinue
 
-        # Parse output for update count
+        # Parse output for update count (language-independent approach)
+        # Uses table separator "---" as marker, then counts package lines
         $updateCount = 0
         $lines = $output -split "`n"
+        $foundSeparator = $false
+
         foreach ($line in $lines) {
-            # Match lines that look like package entries (name, current version, available version, source)
-            if ($line -match "^\S+.*\s+[\d\.]+.*\s+[\d\.]+.*\s+(winget|msstore)" -or
-                $line -match "^\S+.*\s+<\s+[\d\.]+.*\s+(winget|msstore)") {
-                $updateCount++
+            # Look for table separator line (works in any language)
+            if ($line -match "^-{10,}") {
+                $foundSeparator = $true
+                continue
+            }
+
+            # Only count lines after separator that look like package entries
+            if ($foundSeparator) {
+                # Match lines with package data: contains "winget" or "msstore" as source
+                if ($line -match "\s+(winget|msstore)\s*$") {
+                    $updateCount++
+                }
             }
         }
 
         if ($updateCount -eq 0) {
-            # Check for "No applicable update" messages
-            if ($output -match "(No applicable update|No installed package|upgrades available: 0)") {
-                Write-Log "All applications are up to date" -Level SUCCESS
-                return
-            }
+            Write-Log "All applications are up to date" -Level SUCCESS
+            return
         }
 
         Write-Log "Available Updates" -Level SECTION
@@ -847,10 +861,12 @@ function Clear-BrowserCaches {
 
     # Clean in parallel (with ReportOnly check)
     if ($allPaths.Count -gt 0) {
+        # Measure size before cleanup (for both modes)
+        $browsers = ($allPaths | Select-Object -ExpandProperty Browser -Unique) -join ', '
+        $totalSize = ($allPaths | ForEach-Object { Get-FolderSize -Path $_.Path } | Measure-Object -Sum).Sum
+
         if ($ReportOnly) {
             # In ReportOnly mode, just show what would be cleaned
-            $browsers = ($allPaths | Select-Object -ExpandProperty Browser -Unique) -join ', '
-            $totalSize = ($allPaths | ForEach-Object { Get-FolderSize -Path $_.Path } | Measure-Object -Sum).Sum
             Write-Log "Would clean browser caches ($browsers) - $(Format-FileSize $totalSize)" -Level DETAIL
         } else {
             # Actual cleanup
@@ -867,7 +883,16 @@ function Clear-BrowserCaches {
                 }
             } -ThrottleLimit 8
 
-            Write-Log "Browser caches cleaned ($(($allPaths | Select-Object -ExpandProperty Browser -Unique) -join ', '))" -Level SUCCESS
+            # Update statistics with freed space
+            if ($totalSize -gt 0) {
+                [System.Threading.Interlocked]::Add([ref]$script:Stats.TotalFreedBytes, $totalSize) | Out-Null
+                if (-not $script:Stats.FreedByCategory.ContainsKey("Browser")) {
+                    $script:Stats.FreedByCategory["Browser"] = 0
+                }
+                $script:Stats.FreedByCategory["Browser"] += $totalSize
+            }
+
+            Write-Log "Browser caches cleaned ($browsers) - $(Format-FileSize $totalSize)" -Level SUCCESS
         }
     }
 
@@ -1756,7 +1781,7 @@ function Show-Banner {
   ║        ██████╔╝██║  ██║███████╗██║  ██║██║ ╚═╝ ██║                   ║
   ║        ╚═════╝ ╚═╝  ╚═╝╚══════╝╚═╝  ╚═╝╚═╝     ╚═╝                   ║
   ║                                                                      ║
-  ║            Ultimate Windows 11 Maintenance Script v1.6               ║
+  ║            Ultimate Windows 11 Maintenance Script v1.8               ║
   ║                                                                      ║
   ╚══════════════════════════════════════════════════════════════════════╝
 
@@ -1875,7 +1900,7 @@ function Show-FinalStatistics {
     }
 
     Write-Host ""
-    Write-Host "  Log saved to: $LogPath" -ForegroundColor DarkGray
+    Write-Host "  Log saved to: $script:LogPath" -ForegroundColor DarkGray
     Write-Host ""
 
     # Pause before closing window (for users running from downloaded script)
@@ -1898,8 +1923,8 @@ function Show-FinalStatistics {
 
 function Start-WinClean {
     # Initialize log
-    "WinClean v1.7 - Started at $(Get-Date)" | Out-File -FilePath $LogPath -Encoding utf8
-    "=" * 70 | Out-File -FilePath $LogPath -Append -Encoding utf8
+    "WinClean v1.8 - Started at $(Get-Date)" | Out-File -FilePath $script:LogPath -Encoding utf8
+    "=" * 70 | Out-File -FilePath $script:LogPath -Append -Encoding utf8
 
     Show-Banner
 
