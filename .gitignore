@@ -37,3 +37,7 @@ Desktop.ini
 # Test outputs
 TestResults/
 coverage/
+
+# Old/backup script versions
+*.old*.ps1
+Krasivoe*.ps1
