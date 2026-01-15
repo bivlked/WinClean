@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="https://raw.githubusercontent.com/bivlked/WinClean/main/assets/logo.png" alt="WinClean Logo" width="120" height="120">
+<img src="https://raw.githubusercontent.com/bivlked/WinClean/main/assets/logo.svg" alt="WinClean Logo" width="120" height="120">
 
 # WinClean
 
@@ -83,6 +83,7 @@
 - Temp files (3 locations)
 - Browser caches (6 browsers)
 - Windows caches (8 types)
+- Recycle Bin emptying
 - Windows.old removal
 
 </td>
@@ -119,6 +120,7 @@
 
 ### 🔒 Privacy
 - DNS cache flush
+- Event logs cleanup
 - Run history (Win+R)
 - Explorer history
 - Recent documents

@@ -1,0 +1,53 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 120" width="120" height="120">
+  <defs>
+    <!-- Main gradient - Windows blue -->
+    <linearGradient id="winGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#0078D4;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#005A9E;stop-opacity:1" />
+    </linearGradient>
+    <!-- Shine gradient -->
+    <linearGradient id="shineGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#4FC3F7;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#29B6F6;stop-opacity:1" />
+    </linearGradient>
+    <!-- Clean sparkle gradient -->
+    <linearGradient id="sparkleGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#81C784;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#4CAF50;stop-opacity:1" />
+    </linearGradient>
+  </defs>
+
+  <!-- Background circle -->
+  <circle cx="60" cy="60" r="58" fill="url(#winGrad)" />
+  <circle cx="60" cy="60" r="54" fill="none" stroke="#ffffff" stroke-width="2" opacity="0.3"/>
+
+  <!-- Windows logo - 4 squares -->
+  <!-- Top-left -->
+  <rect x="24" y="28" width="28" height="28" rx="3" fill="#ffffff" opacity="0.95"/>
+  <!-- Top-right -->
+  <rect x="56" y="28" width="32" height="28" rx="3" fill="#ffffff" opacity="0.95"/>
+  <!-- Bottom-left -->
+  <rect x="24" y="60" width="28" height="32" rx="3" fill="#ffffff" opacity="0.95"/>
+  <!-- Bottom-right -->
+  <rect x="56" y="60" width="32" height="32" rx="3" fill="#ffffff" opacity="0.95"/>
+
+  <!-- Clean sparkles -->
+  <!-- Sparkle 1 - top right -->
+  <g transform="translate(92, 18)">
+    <path d="M0,-8 L2,-2 L8,0 L2,2 L0,8 L-2,2 L-8,0 L-2,-2 Z" fill="url(#sparkleGrad)"/>
+  </g>
+
+  <!-- Sparkle 2 - smaller -->
+  <g transform="translate(100, 38)">
+    <path d="M0,-5 L1.5,-1.5 L5,0 L1.5,1.5 L0,5 L-1.5,1.5 L-5,0 L-1.5,-1.5 Z" fill="url(#sparkleGrad)"/>
+  </g>
+
+  <!-- Sparkle 3 - accent -->
+  <g transform="translate(18, 96)">
+    <path d="M0,-6 L1.5,-1.5 L6,0 L1.5,1.5 L0,6 L-1.5,1.5 L-6,0 L-1.5,-1.5 Z" fill="url(#shineGrad)"/>
+  </g>
+
+  <!-- Shine effect on windows -->
+  <rect x="26" y="30" width="8" height="3" rx="1" fill="#4FC3F7" opacity="0.6"/>
+  <rect x="58" y="30" width="10" height="3" rx="1" fill="#4FC3F7" opacity="0.6"/>
+</svg>

@@ -1,5 +1,7 @@
 <div align="center">
 
+<img src="https://raw.githubusercontent.com/bivlked/WinClean/main/assets/logo.svg" alt="WinClean Logo" width="120" height="120">
+
 # WinClean
 
 ### Комплексный скрипт обслуживания Windows 11
@@ -8,6 +10,7 @@
 [![PowerShell 7.1+](https://img.shields.io/badge/PowerShell-7.1%2B-5391FE?logo=powershell&logoColor=white)](https://github.com/PowerShell/PowerShell)
 [![Windows 11](https://img.shields.io/badge/Windows-11-0078D4?logo=windows11&logoColor=white)](https://www.microsoft.com/windows/windows-11)
 [![Лицензия: MIT](https://img.shields.io/badge/Лицензия-MIT-green.svg)](LICENSE)
+[![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](https://github.com/bivlked/WinClean/pulls)
 
 **Автоматическое обслуживание системы: обновления, очистка и оптимизация в одном скрипте**
 
@@ -80,6 +83,7 @@
 - Временные файлы (3 места)
 - Кэши браузеров (6 браузеров)
 - Кэши Windows (8 типов)
+- Очистка корзины
 - Удаление Windows.old
 
 </td>
@@ -116,6 +120,7 @@
 
 ### 🔒 Приватность
 - Очистка DNS кэша
+- Очистка журналов событий
 - История Run (Win+R)
 - История проводника
 - Недавние документы
