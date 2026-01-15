@@ -1737,7 +1737,7 @@ function Show-Banner {
     Write-Host "  System: $osVersion (Build $osBuild)" -ForegroundColor DarkGray
     Write-Host "  PowerShell: $($PSVersionTable.PSVersion)" -ForegroundColor DarkGray
     Write-Host "  Started: $(Get-Date -Format 'dd.MM.yyyy HH:mm:ss')" -ForegroundColor DarkGray
-    Write-Host "  Log: $LogPath" -ForegroundColor DarkGray
+    Write-Host "  Log: $script:LogPath" -ForegroundColor DarkGray
 
     if ($ReportOnly) {
         Write-Host ""
