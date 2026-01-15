@@ -90,7 +90,7 @@
 
 ### 👨‍💻 Developer
 - npm / yarn / pnpm
-- pip / Poetry / uv
+- pip / Composer
 - NuGet / Gradle / Cargo
 - Go build cache
 
@@ -168,7 +168,7 @@ cd WinClean
 | Parameter | Description | Default |
 |:----------|:------------|:-------:|
 | `-SkipUpdates` | Skip Windows and winget updates | `false` |
-| `-SkipCleanup` | Skip all cleanup operations | `false` |
+| `-SkipCleanup` | Skip system and deep cleanup (temp files, Windows caches, DISM, etc.) | `false` |
 | `-SkipRestore` | Skip system restore point creation | `false` |
 | `-SkipDevCleanup` | Skip developer caches (npm, pip, etc.) | `false` |
 | `-SkipDockerCleanup` | Skip Docker/WSL cleanup | `false` |
@@ -178,6 +178,7 @@ cd WinClean
 | `-LogPath` | Custom log file path | Auto |
 
 ---
+> 💡 `-SkipCleanup` does not disable developer, Docker/WSL, or IDE cleanup. Use `-SkipDevCleanup`, `-SkipDockerCleanup`, and `-SkipVSCleanup` for those.
 
 ## 💡 Usage Examples
 
@@ -331,8 +332,9 @@ Every run creates a detailed log:
 **Log contents:**
 - ⏰ Timestamp for each operation
 - ✅ Success / ⚠️ Warning / ❌ Error status
-- 📊 Freed space per category
-- ⏱️ Total execution time
+- 📦 Freed space for cleaned items (when applicable)
+
+> Final statistics (duration, total freed space, disk status) are printed to the console and are not duplicated in the log.
 
 ---
 
