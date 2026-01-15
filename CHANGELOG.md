@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [2.1] - 2025-01-15
+
+### Fixed
+- **Clear-EventLogs precision**: Now uses exact match (`-ne 'Security'`) instead of `-notmatch 'Security'` to only preserve the main Security log (was incorrectly skipping all logs with "Security" in the name)
+- **Browser profile cache cleanup**: Additional Chrome/Edge profiles now get full cache set (Cache, Code Cache, GPUCache, Service Worker) — previously only Cache was cleaned
+- **Update-Applications error tracking**: Now increments `ErrorsCount` when no internet connection (was only logging error without counting)
+- **Roslyn Temp cleanup**: File patterns (`*.roslynobjectin`) now handled correctly using new `Remove-FilesByPattern` function (was passing file paths to directory cleanup function)
+- **winget update count**: Now works with any source, not just `winget|msstore` (supports custom/corporate repositories)
+- **Non-console environment safety**: Added `Test-InteractiveConsole` function to prevent `[Console]::KeyAvailable` exceptions in Scheduled Tasks, ISE, or remote sessions
+- **Telemetry edition detection**: Uses `EditionID` from registry instead of localized `Caption` (works on non-English Windows)
+- **Final statistics box alignment**: Fixed inconsistent line widths causing visual glitches in the output table
+
+### Added
+- `Test-InteractiveConsole` helper function for safe console detection
+- `Remove-FilesByPattern` helper function for cleaning file patterns (vs directories)
+
+---
+
 ## [2.0] - 2025-01-15
 
 ### Fixed

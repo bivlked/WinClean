@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    WinClean - Ultimate Windows 11 Maintenance Script v2.0
+    WinClean - Ultimate Windows 11 Maintenance Script v2.1
 .DESCRIPTION
     Комплексный скрипт для обновления и очистки Windows 11:
     - Обновление Windows (включая драйверы)
@@ -14,8 +14,17 @@
     - Подробный цветной вывод + лог-файл
 .NOTES
     Author: biv
-    Version: 2.0
+    Version: 2.1
     Requires: PowerShell 7.1+, Windows 11, Administrator rights
+    Changes in 2.1:
+    - Fixed Clear-EventLogs: exact match for Security log only (not all logs containing "Security")
+    - Fixed browser cache cleanup: additional profiles now get full cache set (Code Cache, GPUCache, etc.)
+    - Fixed Update-Applications: ErrorsCount++ now incremented when no internet
+    - Fixed Roslyn Temp cleanup: file patterns now handled correctly (not just directories)
+    - Fixed winget update count: works with custom sources (not just winget/msstore)
+    - Fixed interactive prompts: safe defaults in non-console environments (Scheduled Tasks, ISE)
+    - Fixed telemetry edition detection: uses EditionID registry (language-independent)
+    - Fixed final statistics: consistent box width (no visual glitches)
     Changes in 2.0:
     - Fixed Test-InternetConnection: uses TcpClient with 3s timeout (no VPN hangs)
     - Fixed Clear-EventLogs: now checks $LASTEXITCODE for each wevtutil call
@@ -248,6 +257,27 @@ function Update-Progress {
 #                              HELPER FUNCTIONS
 #region ═══════════════════════════════════════════════════════════════════════
 
+function Test-InteractiveConsole {
+    <#
+    .SYNOPSIS
+        Checks if running in an interactive console environment
+    .DESCRIPTION
+        Returns $false for Scheduled Tasks, ISE, remote sessions, etc.
+        Used to safely skip [Console]::KeyAvailable calls that would throw exceptions
+    #>
+    try {
+        # Check if we're in ConsoleHost and have a valid console window
+        if ($Host.Name -ne 'ConsoleHost') {
+            return $false
+        }
+        # Try to access console properties - will throw in non-console environments
+        $null = [Console]::WindowWidth
+        return $true
+    } catch {
+        return $false
+    }
+}
+
 function Test-InternetConnection {
     <#
     .SYNOPSIS
@@ -465,6 +495,64 @@ function Remove-FolderContent {
     } catch {
         Write-Log "Error cleaning $Path`: $_" -Level WARNING
         $script:Stats.WarningsCount++
+    }
+}
+
+function Remove-FilesByPattern {
+    <#
+    .SYNOPSIS
+        Removes files matching a pattern with size tracking
+    .DESCRIPTION
+        Handles file patterns (like *.roslynobjectin) that Remove-FolderContent can't handle
+    #>
+    param(
+        [Parameter(Mandatory)]
+        [string]$Pattern,
+
+        [Parameter(Mandatory)]
+        [string]$Category,
+
+        [string]$Description
+    )
+
+    $files = Get-Item -Path $Pattern -ErrorAction SilentlyContinue | Where-Object { -not $_.PSIsContainer }
+
+    if (-not $files) {
+        return
+    }
+
+    $totalSize = ($files | Measure-Object -Property Length -Sum).Sum
+    $totalSize = [long]($totalSize ?? 0)
+
+    if ($ReportOnly) {
+        if ($totalSize -gt 0 -and $Description) {
+            Write-Log "Would clean: $Description - $(Format-FileSize $totalSize)" -Level DETAIL
+        }
+        return
+    }
+
+    $freedSize = 0
+    foreach ($file in $files) {
+        try {
+            $fileSize = $file.Length
+            Remove-Item -LiteralPath $file.FullName -Force -ErrorAction SilentlyContinue
+            if (-not (Test-Path -LiteralPath $file.FullName)) {
+                $freedSize += $fileSize
+            }
+        } catch { }
+    }
+
+    if ($freedSize -gt 0) {
+        [System.Threading.Interlocked]::Add([ref]$script:Stats.TotalFreedBytes, $freedSize) | Out-Null
+
+        if (-not $script:Stats.FreedByCategory.ContainsKey($Category)) {
+            $script:Stats.FreedByCategory[$Category] = 0
+        }
+        $script:Stats.FreedByCategory[$Category] += $freedSize
+
+        if ($Description) {
+            Write-Log "$Description - $(Format-FileSize $freedSize)" -Level SUCCESS
+        }
     }
 }
 
@@ -690,6 +778,7 @@ function Update-Applications {
 
     if (-not (Test-InternetConnection)) {
         Write-Log "No internet connection - skipping app updates" -Level ERROR
+        $script:Stats.ErrorsCount++
         return
     }
 
@@ -745,7 +834,7 @@ function Update-Applications {
         }
 
         # Parse output for update count (language-independent approach)
-        # Uses table separator "---" as marker, then counts package lines
+        # Uses table separator "---" as marker, then counts all data lines
         $updateCount = 0
         $lines = $output -split "`n"
         $foundSeparator = $false
@@ -757,10 +846,15 @@ function Update-Applications {
                 continue
             }
 
-            # Only count lines after separator that look like package entries
+            # Count lines after separator that look like package entries
+            # Must have multiple columns (name, id, version, available, source)
             if ($foundSeparator) {
-                # Match lines with package data: contains "winget" or "msstore" as source
-                if ($line -match "\s+(winget|msstore)\s*$") {
+                $trimmed = $line.Trim()
+                # Skip empty lines, footer text ("X upgrades available"), and lines with too few columns
+                if ($trimmed -and
+                    $trimmed -notmatch "^\d+\s+(upgrade|обновлен)" -and
+                    $trimmed -notmatch "^(No |Нет )" -and
+                    ($trimmed -split '\s{2,}').Count -ge 3) {
                     $updateCount++
                 }
             }
@@ -882,7 +976,7 @@ function Clear-BrowserCaches {
         }
     }
 
-    # Also check for additional Chrome/Edge profiles
+    # Also check for additional Chrome/Edge profiles (with full cache set)
     foreach ($browser in @("Chrome", "Edge")) {
         $basePath = if ($browser -eq "Chrome") {
             "$env:LOCALAPPDATA\Google\Chrome\User Data"
@@ -893,9 +987,13 @@ function Clear-BrowserCaches {
         if (Test-Path $basePath) {
             Get-ChildItem -Path $basePath -Directory -ErrorAction SilentlyContinue |
                 Where-Object { $_.Name -like "Profile *" } | ForEach-Object {
-                    $profileCache = Join-Path $_.FullName "Cache"
-                    if (Test-Path $profileCache) {
-                        $allPaths += @{ Browser = "$browser Profile"; Path = $profileCache }
+                    # Add same cache types as Default profile (fixed in v2.1)
+                    $profileCacheTypes = @("Cache", "Code Cache", "GPUCache", "Service Worker\CacheStorage")
+                    foreach ($cacheType in $profileCacheTypes) {
+                        $profileCache = Join-Path $_.FullName $cacheType
+                        if (Test-Path $profileCache) {
+                            $allPaths += @{ Browser = "$browser $($_.Name)"; Path = $profileCache }
+                        }
                     }
                 }
         }
@@ -1082,7 +1180,7 @@ function Clear-EventLogs {
         $logs = wevtutil el 2>$null | Where-Object {
             $_ -notmatch 'Analytic' -and
             $_ -notmatch 'Debug' -and
-            $_ -notmatch 'Security'  # Keep Security log
+            $_ -ne 'Security'  # Keep only the main Security log (exact match, fixed in v2.1)
         }
 
         $clearedCount = 0
@@ -1264,8 +1362,9 @@ function Set-WindowsTelemetry {
 
         # AllowTelemetry = 0 (Security - minimum telemetry, only for Enterprise/Education)
         # For other editions, setting to 1 (Basic) is the minimum allowed
-        $osEdition = (Get-CimInstance -ClassName Win32_OperatingSystem).Caption
-        $telemetryLevel = if ($osEdition -match "Enterprise|Education") { 0 } else { 1 }
+        # Use EditionID from registry (language-independent, fixed in v2.1)
+        $editionId = (Get-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion" -Name EditionID -ErrorAction SilentlyContinue).EditionID
+        $telemetryLevel = if ($editionId -match "Enterprise|Education") { 0 } else { 1 }
 
         Set-ItemProperty -Path $dataCollectionKey -Name "AllowTelemetry" -Value $telemetryLevel -Type DWord -Force
         $changesApplied += "Telemetry level set to $telemetryLevel"
@@ -1331,6 +1430,13 @@ function Clear-WindowsOld {
 
     if ($ReportOnly) {
         Write-Log "Would clean: Windows.old - $sizeFormatted" -Level DETAIL
+        return
+    }
+
+    # Check if running in interactive console (fixed in v2.1)
+    if (-not (Test-InteractiveConsole)) {
+        # Non-interactive: skip with safe default (don't delete without confirmation)
+        Write-Log "Non-interactive mode - skipping Windows.old deletion (requires user confirmation)" -Level INFO
         return
     }
 
@@ -1667,23 +1773,33 @@ function Clear-VisualStudio {
     Write-Log "VISUAL STUDIO CLEANUP" -Level TITLE
     Update-Progress -Activity "Visual Studio Cleanup" -Status "Cleaning caches..."
 
-    # VS 2019/2022 caches
-    $vsCaches = @(
+    # VS 2019/2022 caches (directories)
+    $vsCacheDirs = @(
         @{ Path = "$env:LOCALAPPDATA\Microsoft\VisualStudio\*\ComponentModelCache"; Desc = "Component Model Cache" }
         @{ Path = "$env:LOCALAPPDATA\Microsoft\VisualStudio\*\ImageCacheRoot"; Desc = "Image Cache" }
         @{ Path = "$env:LOCALAPPDATA\Microsoft\VisualStudio\*\DesignTimeBuild"; Desc = "Design Time Build" }
-        @{ Path = "$env:APPDATA\Microsoft\VisualStudio\*\*.roslynobjectin"; Desc = "Roslyn Temp" }
         @{ Path = "$env:LOCALAPPDATA\Microsoft\VSCommon\*\SQM"; Desc = "SQM Data" }
         @{ Path = "$env:LOCALAPPDATA\Microsoft\VisualStudio\Packages\_Instances"; Desc = "Package Instances" }
     )
 
+    # VS file patterns (handled separately, fixed in v2.1)
+    $vsFilePatterns = @(
+        @{ Pattern = "$env:APPDATA\Microsoft\VisualStudio\*\*.roslynobjectin"; Desc = "Roslyn Temp" }
+    )
+
     Write-Log "Visual Studio Caches" -Level SECTION
 
-    foreach ($item in $vsCaches) {
+    # Process directory caches
+    foreach ($item in $vsCacheDirs) {
         $paths = Resolve-Path -Path $item.Path -ErrorAction SilentlyContinue
         foreach ($path in $paths) {
             Remove-FolderContent -Path $path.Path -Category "VS" -Description $item.Desc
         }
+    }
+
+    # Process file patterns (fixed in v2.1 - files were not being deleted before)
+    foreach ($item in $vsFilePatterns) {
+        Remove-FilesByPattern -Pattern $item.Pattern -Category "VS" -Description $item.Desc
     }
 
     # MEF Cache
@@ -1888,7 +2004,7 @@ function Show-Banner {
   ║        ██████╔╝██║  ██║███████╗██║  ██║██║ ╚═╝ ██║                   ║
   ║        ╚═════╝ ╚═╝  ╚═╝╚══════╝╚═╝  ╚═╝╚═╝     ╚═╝                   ║
   ║                                                                      ║
-  ║            Ultimate Windows 11 Maintenance Script v2.0               ║
+  ║            Ultimate Windows 11 Maintenance Script v2.1               ║
   ║                                                                      ║
   ╚══════════════════════════════════════════════════════════════════════╝
 
@@ -1926,42 +2042,50 @@ function Show-FinalStatistics {
 
     Write-Progress -Activity "Complete" -Completed
 
+    # Fixed box width: 74 chars total (2 for borders + 72 inner)
+    # Inner content: 4 spaces prefix + 68 chars content
+    $boxWidth = 72  # Inner width
+    $contentWidth = 48  # Width for value column
+
     Write-Host ""
     Write-Host "  ╔══════════════════════════════════════════════════════════════════════╗" -ForegroundColor Cyan
     Write-Host "  ║                         FINAL STATISTICS                             ║" -ForegroundColor Cyan
     Write-Host "  ╠══════════════════════════════════════════════════════════════════════╣" -ForegroundColor Cyan
 
-    # Duration
-    Write-Host "  ║  " -NoNewline -ForegroundColor Cyan
-    Write-Host "Duration:              " -NoNewline -ForegroundColor White
-    Write-Host $elapsedStr.PadRight(47) -NoNewline -ForegroundColor Green
-    Write-Host "║" -ForegroundColor Cyan
-
-    # Updates
-    if ($script:Stats.WindowsUpdatesCount -gt 0 -or $script:Stats.AppUpdatesCount -gt 0) {
+    # Helper function for consistent line formatting
+    function Write-StatLine {
+        param([string]$Label, [string]$Value, [string]$ValueColor = "Green")
+        $labelPadded = $Label.PadRight(20)
+        $valuePadded = $Value.PadRight($contentWidth)
         Write-Host "  ║  " -NoNewline -ForegroundColor Cyan
-        Write-Host "Updates installed:     " -NoNewline -ForegroundColor White
-        $updatesStr = "Windows: $($script:Stats.WindowsUpdatesCount), Apps: $($script:Stats.AppUpdatesCount)"
-        Write-Host $updatesStr.PadRight(47) -NoNewline -ForegroundColor Green
+        Write-Host $labelPadded -NoNewline -ForegroundColor White
+        Write-Host $valuePadded -NoNewline -ForegroundColor $ValueColor
         Write-Host "║" -ForegroundColor Cyan
     }
 
+    # Duration
+    Write-StatLine -Label "Duration:" -Value $elapsedStr
+
+    # Updates
+    if ($script:Stats.WindowsUpdatesCount -gt 0 -or $script:Stats.AppUpdatesCount -gt 0) {
+        $updatesStr = "Windows: $($script:Stats.WindowsUpdatesCount), Apps: $($script:Stats.AppUpdatesCount)"
+        Write-StatLine -Label "Updates installed:" -Value $updatesStr
+    }
+
     # Space freed
-    Write-Host "  ║  " -NoNewline -ForegroundColor Cyan
-    Write-Host "Space freed:           " -NoNewline -ForegroundColor White
     $freedStr = Format-FileSize $script:Stats.TotalFreedBytes
-    Write-Host $freedStr.PadRight(47) -NoNewline -ForegroundColor Green
-    Write-Host "║" -ForegroundColor Cyan
+    Write-StatLine -Label "Space freed:" -Value $freedStr
 
     # Freed by category
     if ($script:Stats.FreedByCategory.Count -gt 0) {
         Write-Host "  ╠──────────────────────────────────────────────────────────────────────╣" -ForegroundColor Cyan
         foreach ($cat in ($script:Stats.FreedByCategory.GetEnumerator() | Sort-Object -Property Value -Descending | Select-Object -First 5)) {
             if ($cat.Value -gt 0) {
-                Write-Host "  ║    " -NoNewline -ForegroundColor Cyan
-                $catName = "$($cat.Key):".PadRight(20)
-                Write-Host $catName -NoNewline -ForegroundColor Gray
-                Write-Host (Format-FileSize $cat.Value).PadRight(45) -NoNewline -ForegroundColor Gray
+                $catLabel = "  $($cat.Key):".PadRight(20)
+                $catValue = (Format-FileSize $cat.Value).PadRight($contentWidth)
+                Write-Host "  ║  " -NoNewline -ForegroundColor Cyan
+                Write-Host $catLabel -NoNewline -ForegroundColor Gray
+                Write-Host $catValue -NoNewline -ForegroundColor Gray
                 Write-Host "║" -ForegroundColor Cyan
             }
         }
@@ -1970,20 +2094,14 @@ function Show-FinalStatistics {
     Write-Host "  ╠══════════════════════════════════════════════════════════════════════╣" -ForegroundColor Cyan
 
     # Disk space
-    Write-Host "  ║  " -NoNewline -ForegroundColor Cyan
-    Write-Host "Free disk space:       " -NoNewline -ForegroundColor White
     $diskStr = "$freeSpace GB / $totalSize GB ($freePercent% free)"
-    Write-Host $diskStr.PadRight(47) -NoNewline -ForegroundColor Yellow
-    Write-Host "║" -ForegroundColor Cyan
+    Write-StatLine -Label "Free disk space:" -Value $diskStr -ValueColor "Yellow"
 
     # Warnings/Errors
     if ($script:Stats.WarningsCount -gt 0 -or $script:Stats.ErrorsCount -gt 0) {
-        Write-Host "  ║  " -NoNewline -ForegroundColor Cyan
-        Write-Host "Warnings/Errors:       " -NoNewline -ForegroundColor White
         $issueStr = "$($script:Stats.WarningsCount) warnings, $($script:Stats.ErrorsCount) errors"
         $issueColor = if ($script:Stats.ErrorsCount -gt 0) { "Red" } else { "Yellow" }
-        Write-Host $issueStr.PadRight(47) -NoNewline -ForegroundColor $issueColor
-        Write-Host "║" -ForegroundColor Cyan
+        Write-StatLine -Label "Warnings/Errors:" -Value $issueStr -ValueColor $issueColor
     }
 
     Write-Host "  ╚══════════════════════════════════════════════════════════════════════╝" -ForegroundColor Cyan
@@ -1993,16 +2111,22 @@ function Show-FinalStatistics {
         Write-Host ""
         Write-Host "  ⚠ " -NoNewline -ForegroundColor Yellow
         Write-Host "Reboot required to complete Windows updates!" -ForegroundColor Yellow
-        Write-Host ""
-        Write-Host "  Reboot now? (y/N): " -NoNewline -ForegroundColor Yellow
 
-        $response = Read-Host
-        if ($response -match "^[YyДд]") {
-            Write-Host "  Rebooting in 10 seconds... Press Ctrl+C to cancel" -ForegroundColor Yellow
-            Start-Sleep -Seconds 10
-            Restart-Computer -Force
+        # Check if interactive console available (fixed in v2.1)
+        if (Test-InteractiveConsole) {
+            Write-Host ""
+            Write-Host "  Reboot now? (y/N): " -NoNewline -ForegroundColor Yellow
+
+            $response = Read-Host
+            if ($response -match "^[YyДд]") {
+                Write-Host "  Rebooting in 10 seconds... Press Ctrl+C to cancel" -ForegroundColor Yellow
+                Start-Sleep -Seconds 10
+                Restart-Computer -Force
+            } else {
+                Write-Host "  Remember to reboot later!" -ForegroundColor Yellow
+            }
         } else {
-            Write-Host "  Remember to reboot later!" -ForegroundColor Yellow
+            Write-Host "  Please reboot manually to complete updates." -ForegroundColor Yellow
         }
     }
 
@@ -2011,26 +2135,31 @@ function Show-FinalStatistics {
     Write-Host ""
 
     # Pause before closing window (for users running from downloaded script)
-    Write-Host "  Press any key to exit (auto-close in 60 seconds)..." -ForegroundColor DarkGray
+    # Only if running in interactive console (fixed in v2.1)
+    if (Test-InteractiveConsole) {
+        Write-Host "  Press any key to exit (auto-close in 60 seconds)..." -ForegroundColor DarkGray
 
-    $timeout = 60
-    $startTime = Get-Date
+        $timeout = 60
+        $startTime = Get-Date
 
-    # Clear keyboard buffer
-    while ([Console]::KeyAvailable) { [Console]::ReadKey($true) | Out-Null }
+        # Clear keyboard buffer
+        while ([Console]::KeyAvailable) { [Console]::ReadKey($true) | Out-Null }
 
-    while ((Get-Date) -lt $startTime.AddSeconds($timeout)) {
-        if ([Console]::KeyAvailable) {
-            [Console]::ReadKey($true) | Out-Null
-            break
+        while ((Get-Date) -lt $startTime.AddSeconds($timeout)) {
+            if ([Console]::KeyAvailable) {
+                [Console]::ReadKey($true) | Out-Null
+                break
+            }
+            Start-Sleep -Milliseconds 100
         }
-        Start-Sleep -Milliseconds 100
+    } else {
+        Write-Host "  Non-interactive mode - exiting automatically." -ForegroundColor DarkGray
     }
 }
 
 function Start-WinClean {
     # Initialize log
-    "WinClean v2.0 - Started at $(Get-Date)" | Out-File -FilePath $script:LogPath -Encoding utf8
+    "WinClean v2.1 - Started at $(Get-Date)" | Out-File -FilePath $script:LogPath -Encoding utf8
     "=" * 70 | Out-File -FilePath $script:LogPath -Append -Encoding utf8
 
     # Calculate TotalSteps dynamically based on skip flags
@@ -2055,14 +2184,20 @@ function Start-WinClean {
         Write-Host "  Reasons: $($pendingReboot.Reasons -join ', ')" -ForegroundColor DarkYellow
         Write-Host ""
         Write-Host "  It is recommended to reboot before running maintenance." -ForegroundColor Gray
-        Write-Host "  Continue anyway? (y/N): " -NoNewline -ForegroundColor Yellow
 
-        $response = Read-Host
-        if ($response -notmatch "^[YyДд]") {
-            Write-Host ""
-            Write-Host "  Operation cancelled. Please reboot and run again." -ForegroundColor Yellow
-            Write-Host ""
-            return
+        # Check if interactive console available (fixed in v2.1)
+        if (Test-InteractiveConsole) {
+            Write-Host "  Continue anyway? (y/N): " -NoNewline -ForegroundColor Yellow
+
+            $response = Read-Host
+            if ($response -notmatch "^[YyДд]") {
+                Write-Host ""
+                Write-Host "  Operation cancelled. Please reboot and run again." -ForegroundColor Yellow
+                Write-Host ""
+                return
+            }
+        } else {
+            Write-Host "  Non-interactive mode - continuing despite pending reboot." -ForegroundColor Yellow
         }
         Write-Host ""
     }
