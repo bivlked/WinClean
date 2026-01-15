@@ -1,82 +1,153 @@
 <div align="center">
 
-# 🧹 WinClean
+<img src="https://raw.githubusercontent.com/bivlked/WinClean/main/assets/logo.png" alt="WinClean Logo" width="120" height="120">
 
-**Ultimate Windows 11 Maintenance Script**
+# WinClean
 
-[![PowerShell 7.1+](https://img.shields.io/badge/PowerShell-7.1%2B-blue?logo=powershell&logoColor=white)](https://github.com/PowerShell/PowerShell)
+### Ultimate Windows 11 Maintenance Script
+
+[![Version](https://img.shields.io/badge/version-1.6-blue.svg)](https://github.com/bivlked/WinClean/releases)
+[![PowerShell 7.1+](https://img.shields.io/badge/PowerShell-7.1%2B-5391FE?logo=powershell&logoColor=white)](https://github.com/PowerShell/PowerShell)
 [![Windows 11](https://img.shields.io/badge/Windows-11-0078D4?logo=windows11&logoColor=white)](https://www.microsoft.com/windows/windows-11)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](https://github.com/bivlked/WinClean/pulls)
 
-*Automated system maintenance: updates, cleanup, and optimization in one script*
+**Automated system maintenance: updates, cleanup, and optimization in one script**
 
-[Features](#-features) • [Quick Start](#-quick-start) • [Parameters](#-parameters) • [Examples](#-examples) • [Safety](#-safety)
+[English](README.md) | [Русский](README_RU.md)
+
+---
+
+[Why WinClean?](#-why-winclean) •
+[Features](#-features) •
+[Quick Start](#-quick-start) •
+[Parameters](#-parameters) •
+[Safety](#%EF%B8%8F-safety) •
+[FAQ](#-faq)
 
 </div>
 
 ---
 
+## 🎯 Why WinClean?
+
+<table>
+<tr>
+<td width="50%">
+
+### 😫 Before WinClean
+
+- Manually run Windows Update
+- Open each browser to clear cache
+- Remember npm/pip/nuget cache locations
+- Forget about Docker cleanup for months
+- Run Disk Cleanup separately
+- Hope you didn't delete something important
+
+</td>
+<td width="50%">
+
+### 😎 With WinClean
+
+- **One command** does everything
+- **All browsers** cleaned automatically
+- **All dev tools** handled in parallel
+- **Docker & WSL** optimized
+- **Deep cleanup** with DISM
+- **Safe by design** — protected paths
+
+</td>
+</tr>
+</table>
+
+> 💡 **Average cleanup result:** 5-20 GB freed, depending on system usage
+
+---
+
 ## ✨ Features
 
-### 🔄 System Updates
-- **Windows Update** — all updates including drivers via PSWindowsUpdate
-- **Microsoft Store apps** — automatic registration of Microsoft Update service
-- **Winget packages** — updates all installed applications
+<table>
+<tr>
+<td width="33%" valign="top">
 
-### 🗑️ Smart Cleanup
-- **Temporary files** — User Temp, Windows Temp, Local Temp
-- **Browser caches** — Edge, Chrome, Firefox, Yandex, Opera, Brave (including profiles)
-- **Windows caches** — Prefetch, Font Cache, Icon Cache, Thumbnail Cache
-- **Windows Update cache** — SoftwareDistribution folder
-- **Previous Windows** — Windows.old with confirmation prompt
+### 🔄 Updates
+- Windows Update (+ drivers)
+- Microsoft Store apps
+- Winget packages
+- PSWindowsUpdate module
 
-### 👨‍💻 Developer Caches
-- **npm / yarn / pnpm** — Node.js package managers
-- **pip / Poetry / uv** — Python package managers
-- **NuGet** — .NET package cache (metadata only, packages preserved)
-- **Gradle** — build caches (dependencies preserved)
-- **Composer** — PHP package manager
+</td>
+<td width="33%" valign="top">
+
+### 🗑️ Cleanup
+- Temp files (3 locations)
+- Browser caches (6 browsers)
+- Windows caches (8 types)
+- Windows.old removal
+
+</td>
+<td width="33%" valign="top">
+
+### 👨‍💻 Developer
+- npm / yarn / pnpm
+- pip / Poetry / uv
+- NuGet / Gradle / Cargo
+- Go build cache
+
+</td>
+</tr>
+<tr>
+<td width="33%" valign="top">
 
 ### 🐳 Docker & WSL
-- **Docker** — unused images, stopped containers, build cache (`docker system prune`)
-- **WSL2** — VHDX disk compaction via diskpart
+- Unused images
+- Stopped containers
+- Build cache
+- WSL2 VHDX compaction
 
-### 🛠️ Visual Studio
-- **Component cache** — outdated components cleanup
-- **MEF cache** — Managed Extensibility Framework cache
-- **Experimental Instances** — debug instances data
+</td>
+<td width="33%" valign="top">
 
-### 🔒 Privacy & Security
-- **DNS cache** — flush DNS resolver cache
-- **Run history** — RunMRU registry cleanup
-- **Explorer history** — typed paths, search history
-- **Recent documents** — Recent folder cleanup
-- **Telemetry** *(optional)* — disable Windows telemetry via Group Policy
+### 🛠️ IDEs
+- Visual Studio caches
+- VS Code caches
+- JetBrains IDEs
+- MEF cache cleanup
 
-### ⚡ Performance
-- **Parallel execution** — `ForEach-Object -Parallel` with throttling
-- **Thread-safe stats** — `[hashtable]::Synchronized` for accurate metrics
-- **Progress tracking** — real-time progress bar with current step
+</td>
+<td width="33%" valign="top">
+
+### 🔒 Privacy
+- DNS cache flush
+- Run history (Win+R)
+- Explorer history
+- Recent documents
+- Telemetry *(optional)*
+
+</td>
+</tr>
+</table>
 
 ---
 
 ## 🚀 Quick Start
 
-### One-Line Install & Run
+### ⚡ One-Line Install & Run
 
 ```powershell
-# Download and run (requires admin rights)
 irm https://raw.githubusercontent.com/bivlked/WinClean/main/WinClean.ps1 -OutFile "$env:TEMP\WinClean.ps1"; Start-Process pwsh -Verb RunAs -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$env:TEMP\WinClean.ps1`""
 ```
+
+<details>
+<summary>📥 Alternative installation methods</summary>
 
 ### Manual Download
 
 ```powershell
-# 1. Download the script
+# Download
 Invoke-WebRequest -Uri "https://raw.githubusercontent.com/bivlked/WinClean/main/WinClean.ps1" -OutFile "WinClean.ps1"
 
-# 2. Run as Administrator
+# Run as Administrator
 .\WinClean.ps1
 ```
 
@@ -88,160 +159,226 @@ cd WinClean
 .\WinClean.ps1
 ```
 
+</details>
+
 ---
 
 ## 📋 Parameters
 
 | Parameter | Description | Default |
-|-----------|-------------|---------|
-| `-SkipUpdates` | Skip Windows and winget updates | `$false` |
-| `-SkipCleanup` | Skip all cleanup operations | `$false` |
-| `-SkipRestore` | Skip system restore point creation | `$false` |
-| `-SkipDevCleanup` | Skip developer caches (npm, pip, nuget) | `$false` |
-| `-SkipDockerCleanup` | Skip Docker/WSL cleanup | `$false` |
-| `-SkipVSCleanup` | Skip Visual Studio cleanup | `$false` |
-| `-DisableTelemetry` | Disable Windows telemetry (Group Policy) | `$false` |
-| `-ReportOnly` | Dry run — show what would be done | `$false` |
-| `-LogPath` | Custom log file path | `$env:TEMP\WinClean_<date>.log` |
+|:----------|:------------|:-------:|
+| `-SkipUpdates` | Skip Windows and winget updates | `false` |
+| `-SkipCleanup` | Skip all cleanup operations | `false` |
+| `-SkipRestore` | Skip system restore point creation | `false` |
+| `-SkipDevCleanup` | Skip developer caches (npm, pip, etc.) | `false` |
+| `-SkipDockerCleanup` | Skip Docker/WSL cleanup | `false` |
+| `-SkipVSCleanup` | Skip Visual Studio cleanup | `false` |
+| `-DisableTelemetry` | Disable Windows telemetry via Group Policy | `false` |
+| `-ReportOnly` | **Dry run** — show what would be done | `false` |
+| `-LogPath` | Custom log file path | Auto |
 
 ---
 
-## 💡 Examples
+## 💡 Usage Examples
 
-### Full Maintenance (Default)
+<table>
+<tr>
+<td width="50%">
+
+### Full Maintenance
 ```powershell
 .\WinClean.ps1
 ```
-Runs all updates and cleanup operations.
+All updates + all cleanup
 
-### Cleanup Only (No Updates)
+</td>
+<td width="50%">
+
+### Cleanup Only
 ```powershell
 .\WinClean.ps1 -SkipUpdates
 ```
-Skips Windows/winget updates, runs cleanup only.
+No updates, just cleanup
 
-### Preview Mode (Dry Run)
+</td>
+</tr>
+<tr>
+<td width="50%">
+
+### Preview Mode
 ```powershell
 .\WinClean.ps1 -ReportOnly
 ```
-Shows what would be cleaned without making changes.
+See what would happen
 
-### Quick Clean (Skip Heavy Operations)
-```powershell
-.\WinClean.ps1 -SkipUpdates -SkipDockerCleanup -SkipVSCleanup
-```
-Fast cleanup: temp files, browser caches, developer caches.
+</td>
+<td width="50%">
 
-### Full Privacy Mode
+### Quick Clean
 ```powershell
-.\WinClean.ps1 -DisableTelemetry
+.\WinClean.ps1 -SkipUpdates -SkipDockerCleanup
 ```
-Complete maintenance plus Windows telemetry disabled.
+Fast cleanup only
 
-### Custom Log Location
-```powershell
-.\WinClean.ps1 -LogPath "C:\Logs\maintenance.log"
-```
+</td>
+</tr>
+</table>
 
 ---
 
 ## 🔧 Requirements
 
 | Requirement | Version | Notes |
-|-------------|---------|-------|
-| **Windows** | 11 | Tested on 23H2/24H2 |
-| **PowerShell** | 7.1+ | [Install PowerShell 7](https://aka.ms/powershell) |
+|:------------|:--------|:------|
+| **Windows** | 11 | Tested on 23H2/24H2/25H2 |
+| **PowerShell** | 7.1+ | [Download here](https://aka.ms/powershell) |
 | **Rights** | Administrator | Required for system operations |
 
-### Optional Dependencies
+<details>
+<summary>📦 Optional dependencies</summary>
 
-| Component | Required For |
-|-----------|--------------|
-| [PSWindowsUpdate](https://www.powershellgallery.com/packages/PSWindowsUpdate) | Windows updates (auto-installed) |
-| [winget](https://aka.ms/getwinget) | Application updates |
-| [Docker Desktop](https://www.docker.com/products/docker-desktop/) | Docker cleanup |
-| [WSL 2](https://aka.ms/wsl2) | WSL disk compaction |
+| Component | Required For | Auto-installed |
+|:----------|:-------------|:--------------:|
+| PSWindowsUpdate | Windows updates | ✅ Yes |
+| winget | App updates | ❌ Manual |
+| Docker Desktop | Docker cleanup | ❌ Manual |
+| WSL 2 | WSL optimization | ❌ Manual |
+
+</details>
 
 ---
 
 ## 🛡️ Safety
 
-### What WinClean Does
+### ✅ What WinClean Does
 
-✅ Creates **restore point** before any changes
-✅ **Preserves** installed packages (NuGet, Maven, npm)
-✅ **Asks confirmation** before deleting Windows.old
-✅ Uses **try/finally** to ensure services restart
-✅ Validates paths against **protected list**
-✅ Supports **ReportOnly** mode for preview
+| Safety Feature | Description |
+|:---------------|:------------|
+| 🔄 **Restore Point** | Created before any changes |
+| 🛡️ **Protected Paths** | System folders never touched |
+| 📦 **Preserves Packages** | NuGet, npm, Maven packages kept |
+| ❓ **Confirmation** | Windows.old asks before deletion |
+| 🔧 **Service Recovery** | Uses try/finally for services |
+| 👁️ **Preview Mode** | `-ReportOnly` shows changes first |
 
-### Protected Paths
+### 🚫 Protected Paths (Never Deleted)
 
-The following paths are never deleted:
-- `$env:SystemRoot` (Windows folder)
-- `$env:ProgramFiles` and `${env:ProgramFiles(x86)}`
-- `$env:USERPROFILE` (User profile folder)
-- `$env:SystemDrive\Users`
+```
+C:\Windows\
+C:\Program Files\
+C:\Program Files (x86)\
+C:\Users\
+C:\Users\YourName\
+```
 
-### What Gets Cleaned (Safe)
+### ✅ Safe to Clean vs 🛡️ Preserved
 
-| Category | Items |
-|----------|-------|
-| Caches | Temporary files, browser caches, font cache |
-| Build | Gradle build-cache, webpack cache |
-| Metadata | NuGet v3-cache, pip http-cache |
-| Logs | Old Windows Update logs, VS telemetry |
-
-### What is Preserved (Never Deleted)
-
-| Category | Items |
-|----------|-------|
-| Packages | `~\.nuget\packages`, `~\.m2\repository` |
-| Dependencies | `node_modules`, `~\.gradle\caches\modules-*` |
-| User Data | Documents, Downloads, Desktop |
+| ✅ Cleaned | 🛡️ Preserved |
+|:-----------|:-------------|
+| `%TEMP%\*` | `Documents`, `Downloads` |
+| Browser caches | Browser bookmarks, passwords |
+| `npm-cache` | `node_modules` |
+| `pip\Cache` | Virtual environments |
+| `NuGet\v3-cache` | `\.nuget\packages` |
+| `\.gradle\build-cache` | `\.gradle\caches\modules` |
 
 ---
 
 ## 📊 Execution Flow
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                    WinClean Execution                       │
-├─────────────────────────────────────────────────────────────┤
-│  1. ✓ Check Administrator Rights                           │
-│  2. ✓ Check Pending Reboot                                  │
-│  3. ✓ Create System Restore Point                          │
-├─────────────────────────────────────────────────────────────┤
-│  4. 🔄 Windows Updates (drivers included)                   │
-│  5. 🔄 Winget Application Updates                          │
-├─────────────────────────────────────────────────────────────┤
-│  6. 🗑️ System Cleanup (temp, caches, browsers)              │
-│  7. 🗑️ Developer Caches (npm, pip, nuget, gradle)           │
-│  8. 🐳 Docker/WSL Cleanup                                   │
-│  9. 🛠️ Visual Studio Cleanup                                │
-├─────────────────────────────────────────────────────────────┤
-│ 10. 🔒 Privacy Cleanup (DNS, history)                       │
-│ 11. ⚙️ Telemetry Settings (if -DisableTelemetry)            │
-├─────────────────────────────────────────────────────────────┤
-│ 12. 📊 Summary Report                                       │
-└─────────────────────────────────────────────────────────────┘
+┌────────────────────────────────────────────────────────────────┐
+│                     WinClean v1.6                              │
+├────────────────────────────────────────────────────────────────┤
+│  PREPARATION                                                   │
+│  ├─ ✓ Check Administrator Rights                               │
+│  ├─ ✓ Check Pending Reboot                                     │
+│  └─ ✓ Create System Restore Point                              │
+├────────────────────────────────────────────────────────────────┤
+│  UPDATES                                                       │
+│  ├─ 🔄 Windows Updates (including drivers)                     │
+│  └─ 🔄 Winget Application Updates                              │
+├────────────────────────────────────────────────────────────────┤
+│  CLEANUP                                                       │
+│  ├─ 🗑️ Temporary Files & Browser Caches                        │
+│  ├─ 🗑️ Developer Caches (npm, pip, nuget, gradle)              │
+│  ├─ 🐳 Docker & WSL Optimization                               │
+│  └─ 🛠️ Visual Studio & IDE Caches                              │
+├────────────────────────────────────────────────────────────────┤
+│  DEEP CLEANUP                                                  │
+│  ├─ 🔧 DISM Component Cleanup                                  │
+│  ├─ 💾 Disk Cleanup (20+ categories)                           │
+│  └─ 📁 Windows.old Removal (with confirmation)                 │
+├────────────────────────────────────────────────────────────────┤
+│  PRIVACY (optional)                                            │
+│  ├─ 🔒 Clear DNS Cache & History                               │
+│  └─ ⚙️ Disable Telemetry (if -DisableTelemetry)                │
+├────────────────────────────────────────────────────────────────┤
+│  📊 SUMMARY REPORT                                             │
+└────────────────────────────────────────────────────────────────┘
 ```
 
 ---
 
 ## 📝 Logging
 
-Every run creates a detailed log file:
+Every run creates a detailed log:
 
 ```
 %TEMP%\WinClean_20250115_143052.log
 ```
 
-Log includes:
-- Timestamp for each operation
-- Success/Warning/Error status
-- Freed space per category
-- Total execution time
+**Log contents:**
+- ⏰ Timestamp for each operation
+- ✅ Success / ⚠️ Warning / ❌ Error status
+- 📊 Freed space per category
+- ⏱️ Total execution time
+
+---
+
+## ❓ FAQ
+
+<details>
+<summary><b>Is it safe to run WinClean?</b></summary>
+
+Yes! WinClean creates a restore point before making changes and never touches protected system paths. Use `-ReportOnly` to preview changes first.
+
+</details>
+
+<details>
+<summary><b>Will it delete my installed programs?</b></summary>
+
+No. WinClean only cleans caches and temporary files. Your installed programs, npm packages, NuGet packages, and user data remain untouched.
+
+</details>
+
+<details>
+<summary><b>How often should I run it?</b></summary>
+
+Monthly is recommended. Heavy developers or users with limited disk space may benefit from weekly runs.
+
+</details>
+
+<details>
+<summary><b>Why does it need Administrator rights?</b></summary>
+
+Required for: Windows Update, system cache cleanup, DISM operations, service management, and creating restore points.
+
+</details>
+
+<details>
+<summary><b>Can I run it on Windows 10?</b></summary>
+
+Primarily designed for Windows 11, but most features work on Windows 10 with PowerShell 7.1+.
+
+</details>
+
+<details>
+<summary><b>What if something goes wrong?</b></summary>
+
+Use the restore point created at the start to roll back. Check the log file for details about what was changed.
+
+</details>
 
 ---
 
@@ -265,7 +402,11 @@ This project is licensed under the MIT License — see the [LICENSE](LICENSE) fi
 
 <div align="center">
 
-**⭐ If you find this useful, please give it a star!**
+### ⭐ Star this repo if you find it useful!
+
+**[Report Bug](https://github.com/bivlked/WinClean/issues)** •
+**[Request Feature](https://github.com/bivlked/WinClean/issues)** •
+**[Changelog](CHANGELOG.md)**
 
 Made with ❤️ for Windows users
 
