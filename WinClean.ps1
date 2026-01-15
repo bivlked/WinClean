@@ -14,8 +14,12 @@
     - Подробный цветной вывод + лог-файл
 .NOTES
     Author: biv
-    Version: 1.6
+    Version: 1.7
     Requires: PowerShell 7.1+, Windows 11, Administrator rights
+    Changes in 1.7:
+    - Improved internet connectivity check: HTTPS endpoints + ICMP fallback
+    - Fixed Show-Banner to display correct log path ($script:LogPath)
+    - Fixed Clear-SystemCaches: ReportOnly mode and size tracking for single files
     Changes in 1.6:
     - Added pause at end: window stays open 60 sec or until key press
       (prevents window from closing before user can read results)
@@ -1894,7 +1898,7 @@ function Show-FinalStatistics {
 
 function Start-WinClean {
     # Initialize log
-    "WinClean v1.6 - Started at $(Get-Date)" | Out-File -FilePath $LogPath -Encoding utf8
+    "WinClean v1.7 - Started at $(Get-Date)" | Out-File -FilePath $LogPath -Encoding utf8
     "=" * 70 | Out-File -FilePath $LogPath -Append -Encoding utf8
 
     Show-Banner

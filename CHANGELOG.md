@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.7] - 2025-01-15
+
+### Added
+- **Improved internet connectivity check**: HTTPS endpoint checks (Microsoft, GitHub, winget) with ICMP fallback
+- More reliable detection when ICMP is blocked but internet is available
+
+### Fixed
+- `Show-Banner`: Display correct log path using `$script:LogPath` instead of parameter
+- `Clear-SystemCaches`: ReportOnly mode now shows file sizes for single file caches (IconCache.db)
+- `Clear-SystemCaches`: Single file cache sizes now counted in total freed statistics
+
+---
+
 ## [1.6] - 2025-01-15
 
 ### Added
