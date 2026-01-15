@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [2.2] - 2025-01-15
+
+### Fixed
+- **TcpClient resource leak**: Now properly closed in `finally` block to prevent socket exhaustion on repeated connection failures
+- **Code region markers**: Fixed 8 misplaced `#region` tags that should have been `#` (plain comment) — now IDE can properly fold code sections
+- **Banner ASCII art**: Changed from "DREAM" to "CLEAN" to match the script name
+
+---
+
 ## [2.1] - 2025-01-15
 
 ### Fixed

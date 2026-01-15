@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    WinClean - Ultimate Windows 11 Maintenance Script v2.1
+    WinClean - Ultimate Windows 11 Maintenance Script v2.2
 .DESCRIPTION
     Комплексный скрипт для обновления и очистки Windows 11:
     - Обновление Windows (включая драйверы)
@@ -14,8 +14,12 @@
     - Подробный цветной вывод + лог-файл
 .NOTES
     Author: biv
-    Version: 2.1
+    Version: 2.2
     Requires: PowerShell 7.1+, Windows 11, Administrator rights
+    Changes in 2.2:
+    - Fixed TcpClient resource leak: now properly closed in finally block (prevents socket exhaustion)
+    - Fixed code region markers: 8 misplaced #region tags corrected for proper IDE navigation
+    - Fixed banner ASCII art: now displays "CLEAN" instead of incorrect "DREAM"
     Changes in 2.1:
     - Fixed Clear-EventLogs: exact match for Security log only (not all logs containing "Security")
     - Fixed browser cache cleanup: additional profiles now get full cache set (Code Cache, GPUCache, etc.)
@@ -109,7 +113,7 @@ param(
 
 #region ═══════════════════════════════════════════════════════════════════════
 #                              INITIALIZATION
-#region ═══════════════════════════════════════════════════════════════════════
+#═══════════════════════════════════════════════════════════════════════════════
 
 # Ensure UTF-8 encoding
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
@@ -153,7 +157,7 @@ $script:ProtectedPaths = @(
 
 #region ═══════════════════════════════════════════════════════════════════════
 #                              LOGGING FUNCTIONS
-#region ═══════════════════════════════════════════════════════════════════════
+#═══════════════════════════════════════════════════════════════════════════════
 
 function Write-Log {
     <#
@@ -255,7 +259,7 @@ function Update-Progress {
 
 #region ═══════════════════════════════════════════════════════════════════════
 #                              HELPER FUNCTIONS
-#region ═══════════════════════════════════════════════════════════════════════
+#═══════════════════════════════════════════════════════════════════════════════
 
 function Test-InteractiveConsole {
     <#
@@ -295,6 +299,7 @@ function Test-InternetConnection {
     $timeoutMs = 3000  # 3 секунды таймаут на каждое соединение
 
     foreach ($target in $targets) {
+        $tcpClient = $null
         try {
             $tcpClient = New-Object System.Net.Sockets.TcpClient
             $connect = $tcpClient.BeginConnect($target.Host, $target.Port, $null, $null)
@@ -302,11 +307,15 @@ function Test-InternetConnection {
 
             if ($success -and $tcpClient.Connected) {
                 $tcpClient.EndConnect($connect)
-                $tcpClient.Close()
                 return $true
             }
-            $tcpClient.Close()
-        } catch { }
+        } catch {
+        } finally {
+            # Always close TcpClient to prevent resource leaks (fixed in v2.2)
+            if ($tcpClient) {
+                $tcpClient.Close()
+            }
+        }
     }
 
     # Запасной вариант: ICMP (может быть заблокирован в некоторых сетях)
@@ -607,7 +616,7 @@ function New-SystemRestorePoint {
 
 #region ═══════════════════════════════════════════════════════════════════════
 #                              UPDATE FUNCTIONS
-#region ═══════════════════════════════════════════════════════════════════════
+#═══════════════════════════════════════════════════════════════════════════════
 
 function Update-WindowsSystem {
     <#
@@ -907,7 +916,7 @@ function Update-Applications {
 
 #region ═══════════════════════════════════════════════════════════════════════
 #                              CLEANUP FUNCTIONS
-#region ═══════════════════════════════════════════════════════════════════════
+#═══════════════════════════════════════════════════════════════════════════════
 
 function Clear-TempFiles {
     <#
@@ -1507,7 +1516,7 @@ function Clear-WindowsOld {
 
 #region ═══════════════════════════════════════════════════════════════════════
 #                         DEVELOPER CLEANUP FUNCTIONS
-#region ═══════════════════════════════════════════════════════════════════════
+#═══════════════════════════════════════════════════════════════════════════════
 
 function Clear-DeveloperCaches {
     <#
@@ -1623,7 +1632,7 @@ function Clear-DeveloperCaches {
 
 #region ═══════════════════════════════════════════════════════════════════════
 #                          DOCKER/WSL CLEANUP FUNCTIONS
-#region ═══════════════════════════════════════════════════════════════════════
+#═══════════════════════════════════════════════════════════════════════════════
 
 function Clear-DockerWSL {
     <#
@@ -1758,7 +1767,7 @@ exit
 
 #region ═══════════════════════════════════════════════════════════════════════
 #                       VISUAL STUDIO CLEANUP FUNCTIONS
-#region ═══════════════════════════════════════════════════════════════════════
+#═══════════════════════════════════════════════════════════════════════════════
 
 function Clear-VisualStudio {
     <#
@@ -1847,7 +1856,7 @@ function Clear-VisualStudio {
 
 #region ═══════════════════════════════════════════════════════════════════════
 #                          SYSTEM CLEANUP FUNCTIONS
-#region ═══════════════════════════════════════════════════════════════════════
+#═══════════════════════════════════════════════════════════════════════════════
 
 function Invoke-DISMCleanup {
     <#
@@ -1988,7 +1997,7 @@ function Invoke-StorageSense {
 
 #region ═══════════════════════════════════════════════════════════════════════
 #                              MAIN EXECUTION
-#region ═══════════════════════════════════════════════════════════════════════
+#═══════════════════════════════════════════════════════════════════════════════
 
 function Show-Banner {
     try { Clear-Host } catch { }
@@ -1997,14 +2006,14 @@ function Show-Banner {
 
   ╔══════════════════════════════════════════════════════════════════════╗
   ║                                                                      ║
-  ║        ██████╗ ██████╗ ███████╗ █████╗ ███╗   ███╗                   ║
-  ║        ██╔══██╗██╔══██╗██╔════╝██╔══██╗████╗ ████║                   ║
-  ║        ██║  ██║██████╔╝█████╗  ███████║██╔████╔██║                   ║
-  ║        ██║  ██║██╔══██╗██╔══╝  ██╔══██║██║╚██╔╝██║                   ║
-  ║        ██████╔╝██║  ██║███████╗██║  ██║██║ ╚═╝ ██║                   ║
-  ║        ╚═════╝ ╚═╝  ╚═╝╚══════╝╚═╝  ╚═╝╚═╝     ╚═╝                   ║
+  ║      ██████╗██╗     ███████╗ █████╗ ███╗   ██╗                       ║
+  ║     ██╔════╝██║     ██╔════╝██╔══██╗████╗  ██║                       ║
+  ║     ██║     ██║     █████╗  ███████║██╔██╗ ██║                       ║
+  ║     ██║     ██║     ██╔══╝  ██╔══██║██║╚██╗██║                       ║
+  ║     ╚██████╗███████╗███████╗██║  ██║██║ ╚████║                       ║
+  ║      ╚═════╝╚══════╝╚══════╝╚═╝  ╚═╝╚═╝  ╚═══╝                       ║
   ║                                                                      ║
-  ║            Ultimate Windows 11 Maintenance Script v2.1               ║
+  ║            Ultimate Windows 11 Maintenance Script v2.2               ║
   ║                                                                      ║
   ╚══════════════════════════════════════════════════════════════════════╝
 
@@ -2159,7 +2168,7 @@ function Show-FinalStatistics {
 
 function Start-WinClean {
     # Initialize log
-    "WinClean v2.1 - Started at $(Get-Date)" | Out-File -FilePath $script:LogPath -Encoding utf8
+    "WinClean v2.2 - Started at $(Get-Date)" | Out-File -FilePath $script:LogPath -Encoding utf8
     "=" * 70 | Out-File -FilePath $script:LogPath -Append -Encoding utf8
 
     # Calculate TotalSteps dynamically based on skip flags
