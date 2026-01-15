@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.9] - 2025-01-15
+
+### Fixed
+- **Progress bar accuracy**: `TotalSteps` now calculated dynamically based on active skip flags (`-SkipUpdates`, `-SkipCleanup`, `-SkipDevCleanup`, etc.)
+- **winget ReportOnly**: `winget source update` now skipped in ReportOnly mode (was modifying system state during dry run)
+- **winget ExitCode**: Added error handling when `winget upgrade` check fails (was showing false "all up to date" on errors)
+- **winget --include-unknown**: Now used consistently in both count check and actual upgrade (count could previously differ from installed)
+- **Browser cache statistics**: Now measures actual freed space by comparing before/after sizes (was reporting estimated size even if files were locked)
+- **Storage Sense completion**: Now polls task status until completion instead of fixed 15-second sleep
+- **DNS cache flush**: Now logs WARNING on unexpected exit code instead of false SUCCESS
+- **WSL/Docker VHDX compaction**: Now finds and compacts all VHDX files directly, regardless of WSL distro list (Docker-only systems now work)
+- **Update-Progress timing**: Moved calls after skip flag checks so progress percentage is accurate
+
+---
+
 ## [1.8] - 2025-01-15
 
 ### Fixed

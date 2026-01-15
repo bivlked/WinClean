@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    WinClean - Ultimate Windows 11 Maintenance Script v1.8
+    WinClean - Ultimate Windows 11 Maintenance Script v1.9
 .DESCRIPTION
     Комплексный скрипт для обновления и очистки Windows 11:
     - Обновление Windows (включая драйверы)
@@ -14,8 +14,17 @@
     - Подробный цветной вывод + лог-файл
 .NOTES
     Author: biv
-    Version: 1.8
+    Version: 1.9
     Requires: PowerShell 7.1+, Windows 11, Administrator rights
+    Changes in 1.9:
+    - Fixed progress bar: TotalSteps now calculated dynamically based on skip flags
+    - Fixed winget: source update skipped in ReportOnly mode, added ExitCode check
+    - Fixed winget: --include-unknown now used consistently for count and upgrade
+    - Fixed browser cache statistics: now measures actual freed space (before/after)
+    - Fixed Storage Sense: now waits for task completion instead of fixed sleep
+    - Fixed DNS flush: logs warning on unexpected result instead of false success
+    - Fixed WSL/Docker VHDX: now compacts all VHDX files regardless of distro list
+    - Moved Update-Progress calls after skip flag checks for accurate progress
     Changes in 1.8:
     - Fixed critical bug: $LogPath vs $script:LogPath in Start-WinClean and Show-FinalStatistics
     - Fixed version inconsistency: unified all version references to single source
@@ -102,7 +111,7 @@ $script:Stats = [hashtable]::Synchronized(@{
     RebootRequired       = $false
     StartTime            = Get-Date
     CurrentStep          = 0
-    TotalSteps           = 7
+    TotalSteps           = 0  # Calculated dynamically in Start-WinClean
 })
 
 # Initialize log path (script scope for access in functions)
@@ -688,19 +697,34 @@ function Update-Applications {
     }
 
     try {
-        # Update sources
-        Write-Log "Updating winget sources..." -Level INFO
-        & $wingetPath source update 2>&1 | Out-Null
+        # Update sources only if not in ReportOnly mode (source update modifies state)
+        if (-not $ReportOnly) {
+            Write-Log "Updating winget sources..." -Level INFO
+            & $wingetPath source update 2>&1 | Out-Null
+        }
 
-        # Get available updates
+        # Get available updates (use --include-unknown to match actual upgrade behavior)
         Write-Log "Checking for app updates..." -Level INFO
 
         $tempFile = [System.IO.Path]::GetTempFileName()
-        $process = Start-Process -FilePath $wingetPath -ArgumentList "upgrade" `
-            -NoNewWindow -RedirectStandardOutput $tempFile -PassThru -Wait
+        $tempErrorFile = [System.IO.Path]::GetTempFileName()
+        $process = Start-Process -FilePath $wingetPath -ArgumentList "upgrade", "--include-unknown" `
+            -NoNewWindow -RedirectStandardOutput $tempFile -RedirectStandardError $tempErrorFile -PassThru -Wait
 
         $output = Get-Content $tempFile -Raw -Encoding UTF8 -ErrorAction SilentlyContinue
+        $errorOutput = Get-Content $tempErrorFile -Raw -Encoding UTF8 -ErrorAction SilentlyContinue
         Remove-Item $tempFile -Force -ErrorAction SilentlyContinue
+        Remove-Item $tempErrorFile -Force -ErrorAction SilentlyContinue
+
+        # Check if winget command failed
+        if ($process.ExitCode -ne 0 -and -not $output) {
+            Write-Log "Winget upgrade check failed (exit code: $($process.ExitCode))" -Level ERROR
+            if ($errorOutput) {
+                Write-Log "Error: $errorOutput" -Level ERROR
+            }
+            $script:Stats.ErrorsCount++
+            return
+        }
 
         # Parse output for update count (language-independent approach)
         # Uses table separator "---" as marker, then counts package lines
@@ -733,14 +757,14 @@ function Update-Applications {
         Write-Host $output
 
         if ($ReportOnly) {
-            Write-Log "Report mode - updates not installed" -Level INFO
+            Write-Log "Report mode - $updateCount updates available but not installed" -Level INFO
             return
         }
 
         Write-Log "Installing $updateCount application updates..." -Level INFO
         Write-Log "This may take several minutes..." -Level INFO
 
-        # Run upgrade
+        # Run upgrade (--include-unknown matches the check above)
         $upgradeArgs = @(
             "upgrade", "--all",
             "--accept-source-agreements",
@@ -861,13 +885,15 @@ function Clear-BrowserCaches {
 
     # Clean in parallel (with ReportOnly check)
     if ($allPaths.Count -gt 0) {
-        # Measure size before cleanup (for both modes)
-        $browsers = ($allPaths | Select-Object -ExpandProperty Browser -Unique) -join ', '
-        $totalSize = ($allPaths | ForEach-Object { Get-FolderSize -Path $_.Path } | Measure-Object -Sum).Sum
+        # Get browser names for logging
+        $browserNames = ($allPaths | Select-Object -ExpandProperty Browser -Unique) -join ', '
+
+        # Measure size before cleanup
+        $sizeBefore = ($allPaths | ForEach-Object { Get-FolderSize -Path $_.Path } | Measure-Object -Sum).Sum
 
         if ($ReportOnly) {
             # In ReportOnly mode, just show what would be cleaned
-            Write-Log "Would clean browser caches ($browsers) - $(Format-FileSize $totalSize)" -Level DETAIL
+            Write-Log "Would clean browser caches ($browserNames) - $(Format-FileSize $sizeBefore)" -Level DETAIL
         } else {
             # Actual cleanup
             $allPaths | ForEach-Object -Parallel {
@@ -883,16 +909,20 @@ function Clear-BrowserCaches {
                 }
             } -ThrottleLimit 8
 
-            # Update statistics with freed space
-            if ($totalSize -gt 0) {
-                [System.Threading.Interlocked]::Add([ref]$script:Stats.TotalFreedBytes, $totalSize) | Out-Null
+            # Measure size after cleanup to get actual freed space
+            $sizeAfter = ($allPaths | ForEach-Object { Get-FolderSize -Path $_.Path } | Measure-Object -Sum).Sum
+            $freedSpace = $sizeBefore - $sizeAfter
+
+            # Update statistics with actual freed space (not estimated)
+            if ($freedSpace -gt 0) {
+                [System.Threading.Interlocked]::Add([ref]$script:Stats.TotalFreedBytes, $freedSpace) | Out-Null
                 if (-not $script:Stats.FreedByCategory.ContainsKey("Browser")) {
                     $script:Stats.FreedByCategory["Browser"] = 0
                 }
-                $script:Stats.FreedByCategory["Browser"] += $totalSize
+                $script:Stats.FreedByCategory["Browser"] += $freedSpace
             }
 
-            Write-Log "Browser caches cleaned ($browsers) - $(Format-FileSize $totalSize)" -Level SUCCESS
+            Write-Log "Browser caches cleaned ($browserNames) - $(Format-FileSize $freedSpace)" -Level SUCCESS
         }
     }
 
@@ -1070,11 +1100,14 @@ function Clear-DNSCache {
     try {
         # Flush DNS cache using ipconfig
         $result = ipconfig /flushdns 2>&1
+        $exitCode = $LASTEXITCODE
 
-        if ($LASTEXITCODE -eq 0 -or $result -match "Successfully flushed|успешно") {
+        if ($exitCode -eq 0 -or $result -match "Successfully flushed|успешно") {
             Write-Log "DNS cache flushed successfully" -Level SUCCESS
         } else {
-            Write-Log "DNS cache flush completed" -Level SUCCESS
+            # Command completed but may have failed - log as warning
+            Write-Log "DNS cache flush returned unexpected result (exit code: $exitCode)" -Level WARNING
+            $script:Stats.WarningsCount++
         }
 
         # Also clear DNS client cache via cmdlet if available
@@ -1346,13 +1379,13 @@ function Clear-DeveloperCaches {
     .SYNOPSIS
         Cleans developer tool caches (npm, pip, nuget, composer, etc.)
     #>
-    Write-Log "DEVELOPER CACHES" -Level TITLE
-    Update-Progress -Activity "Developer Cleanup" -Status "Cleaning caches..."
-
     if ($SkipDevCleanup) {
         Write-Log "Developer cache cleanup skipped (parameter)" -Level INFO
         return
     }
+
+    Write-Log "DEVELOPER CACHES" -Level TITLE
+    Update-Progress -Activity "Developer Cleanup" -Status "Cleaning caches..."
 
     # NPM Cache
     Write-Log "npm Cache" -Level SECTION
@@ -1462,13 +1495,13 @@ function Clear-DockerWSL {
     .SYNOPSIS
         Cleans Docker images, containers, and WSL2 disk
     #>
-    Write-Log "DOCKER & WSL CLEANUP" -Level TITLE
-    Update-Progress -Activity "Docker/WSL Cleanup" -Status "Checking Docker..."
-
     if ($SkipDockerCleanup) {
         Write-Log "Docker/WSL cleanup skipped (parameter)" -Level INFO
         return
     }
+
+    Write-Log "DOCKER & WSL CLEANUP" -Level TITLE
+    Update-Progress -Activity "Docker/WSL Cleanup" -Status "Checking Docker..."
 
     # Docker Cleanup
     $docker = Get-Command docker -ErrorAction SilentlyContinue
@@ -1520,57 +1553,62 @@ function Clear-DockerWSL {
     $wsl = Get-Command wsl -ErrorAction SilentlyContinue
     if ($wsl) {
         try {
-            # WSL outputs UTF-16LE with BOM and null characters - clean them up
-            $wslDistros = (wsl --list --quiet 2>$null) -replace '\x00', '' -replace '^\s+', '' |
-                          Where-Object { $_ -and $_.Trim() -and $_ -notmatch '^(docker-desktop|docker-desktop-data)$' }
+            # Define all possible VHDX locations (including Docker)
+            $wslPaths = @(
+                "$env:LOCALAPPDATA\Packages\*CanonicalGroupLimited*\LocalState"
+                "$env:LOCALAPPDATA\Packages\*MicrosoftCorporationII.WindowsSubsystemForLinux*\LocalState"
+                "$env:LOCALAPPDATA\Docker\wsl\data"
+                "$env:LOCALAPPDATA\Docker\wsl\distro"
+            )
 
-            if ($wslDistros) {
+            # Find all VHDX files first (don't depend on WSL distro list)
+            $vhdxFiles = @()
+            foreach ($pattern in $wslPaths) {
+                $vhdxFiles += Get-ChildItem -Path $pattern -Filter "*.vhdx" -Recurse -ErrorAction SilentlyContinue
+            }
+
+            if ($vhdxFiles.Count -gt 0) {
                 if ($ReportOnly) {
-                    Write-Log "Would optimize WSL2 disks for: $($wslDistros -join ', ')" -Level DETAIL
+                    $totalSize = ($vhdxFiles | Measure-Object -Property Length -Sum).Sum
+                    Write-Log "Would optimize $($vhdxFiles.Count) WSL2/Docker disk(s) - Total: $(Format-FileSize $totalSize)" -Level DETAIL
                 } else {
-                    # Shutdown WSL first
+                    # Shutdown WSL first (this also stops Docker WSL backends)
                     Write-Log "Shutting down WSL..." -Level INFO
                     wsl --shutdown
                     Start-Sleep -Seconds 2
 
-                    # Find and compact VHD files
-                    $wslPaths = @(
-                        "$env:LOCALAPPDATA\Packages\*CanonicalGroupLimited*\LocalState"
-                        "$env:LOCALAPPDATA\Packages\*MicrosoftCorporationII.WindowsSubsystemForLinux*\LocalState"
-                        "$env:LOCALAPPDATA\Docker\wsl\data"
-                    )
+                    # Compact each VHDX file
+                    foreach ($vhdxFile in $vhdxFiles) {
+                        $vhdx = $vhdxFile.FullName
+                        $sizeBefore = $vhdxFile.Length
 
-                    foreach ($pattern in $wslPaths) {
-                        Get-ChildItem -Path $pattern -Filter "*.vhdx" -Recurse -ErrorAction SilentlyContinue | ForEach-Object {
-                            $vhdx = $_.FullName
-                            $sizeBefore = $_.Length
+                        Write-Log "Compacting $($vhdxFile.Name)..." -Level DETAIL
 
-                            Write-Log "Compacting $($_.Name)..." -Level DETAIL
-
-                            try {
-                                # Use diskpart to compact
-                                $diskpartScript = @"
+                        try {
+                            # Use diskpart to compact
+                            $diskpartScript = @"
 select vdisk file="$vhdx"
 compact vdisk
 exit
 "@
-                                $diskpartScript | diskpart | Out-Null
+                            $diskpartScript | diskpart | Out-Null
 
-                                $sizeAfter = (Get-Item $vhdx).Length
-                                $saved = $sizeBefore - $sizeAfter
+                            $sizeAfter = (Get-Item $vhdx).Length
+                            $saved = $sizeBefore - $sizeAfter
 
-                                if ($saved -gt 0) {
-                                    Write-Log "Compacted $($_.Name): $(Format-FileSize $saved) saved" -Level SUCCESS
-                                    [System.Threading.Interlocked]::Add([ref]$script:Stats.TotalFreedBytes, $saved) | Out-Null
-                                }
-                            } catch {
-                                Write-Log "Could not compact $($_.Name): $_" -Level WARNING
+                            if ($saved -gt 0) {
+                                Write-Log "Compacted $($vhdxFile.Name): $(Format-FileSize $saved) saved" -Level SUCCESS
+                                [System.Threading.Interlocked]::Add([ref]$script:Stats.TotalFreedBytes, $saved) | Out-Null
+                            } else {
+                                Write-Log "Compacted $($vhdxFile.Name): no space saved" -Level INFO
                             }
+                        } catch {
+                            Write-Log "Could not compact $($vhdxFile.Name): $_" -Level WARNING
                         }
                     }
                 }
             } else {
-                Write-Log "No WSL distributions found" -Level INFO
+                Write-Log "No WSL2/Docker VHDX files found" -Level INFO
             }
         } catch {
             Write-Log "WSL optimization error: $_" -Level WARNING
@@ -1592,13 +1630,13 @@ function Clear-VisualStudio {
     .SYNOPSIS
         Cleans Visual Studio caches and temporary files
     #>
-    Write-Log "VISUAL STUDIO CLEANUP" -Level TITLE
-    Update-Progress -Activity "Visual Studio Cleanup" -Status "Cleaning caches..."
-
     if ($SkipVSCleanup) {
         Write-Log "Visual Studio cleanup skipped (parameter)" -Level INFO
         return
     }
+
+    Write-Log "VISUAL STUDIO CLEANUP" -Level TITLE
+    Update-Progress -Activity "Visual Studio Cleanup" -Status "Cleaning caches..."
 
     # VS 2019/2022 caches
     $vsCaches = @(
@@ -1718,8 +1756,28 @@ function Invoke-StorageSense {
     if ($LASTEXITCODE -eq 0) {
         Write-Log "Running Storage Sense..." -Level INFO
         schtasks /Run /TN $ssTask | Out-Null
-        Start-Sleep -Seconds 15
-        Write-Log "Storage Sense completed" -Level SUCCESS
+
+        # Wait for task to complete with timeout (check status instead of fixed sleep)
+        $timeout = 120  # 2 minutes max
+        $elapsed = 0
+        $checkInterval = 5
+
+        while ($elapsed -lt $timeout) {
+            Start-Sleep -Seconds $checkInterval
+            $elapsed += $checkInterval
+
+            # Query task status
+            $taskStatus = schtasks /Query /TN $ssTask /FO CSV 2>$null | ConvertFrom-Csv
+            if ($taskStatus -and $taskStatus.Status -match "Ready|Готово") {
+                Write-Log "Storage Sense completed" -Level SUCCESS
+                break
+            }
+        }
+
+        if ($elapsed -ge $timeout) {
+            Write-Log "Storage Sense timed out after $timeout seconds (may still be running)" -Level WARNING
+            $script:Stats.WarningsCount++
+        }
     } else {
         # Fallback to cleanmgr
         Write-Log "Storage Sense task not found, using Disk Cleanup..." -Level INFO
@@ -1781,7 +1839,7 @@ function Show-Banner {
   ║        ██████╔╝██║  ██║███████╗██║  ██║██║ ╚═╝ ██║                   ║
   ║        ╚═════╝ ╚═╝  ╚═╝╚══════╝╚═╝  ╚═╝╚═╝     ╚═╝                   ║
   ║                                                                      ║
-  ║            Ultimate Windows 11 Maintenance Script v1.8               ║
+  ║            Ultimate Windows 11 Maintenance Script v1.9               ║
   ║                                                                      ║
   ╚══════════════════════════════════════════════════════════════════════╝
 
@@ -1923,8 +1981,18 @@ function Show-FinalStatistics {
 
 function Start-WinClean {
     # Initialize log
-    "WinClean v1.8 - Started at $(Get-Date)" | Out-File -FilePath $script:LogPath -Encoding utf8
+    "WinClean v1.9 - Started at $(Get-Date)" | Out-File -FilePath $script:LogPath -Encoding utf8
     "=" * 70 | Out-File -FilePath $script:LogPath -Append -Encoding utf8
+
+    # Calculate TotalSteps dynamically based on skip flags
+    $script:Stats.TotalSteps = 0
+    if (-not $SkipUpdates) { $script:Stats.TotalSteps += 2 }      # Windows Update + App Updates
+    if (-not $SkipCleanup) { $script:Stats.TotalSteps += 2 }      # System Cleanup + Deep Cleanup
+    if (-not $SkipDevCleanup) { $script:Stats.TotalSteps += 1 }   # Developer Caches
+    if (-not $SkipDockerCleanup) { $script:Stats.TotalSteps += 1 } # Docker/WSL
+    if (-not $SkipVSCleanup) { $script:Stats.TotalSteps += 1 }    # Visual Studio
+    # Ensure at least 1 step to avoid division by zero
+    if ($script:Stats.TotalSteps -eq 0) { $script:Stats.TotalSteps = 1 }
 
     Show-Banner
 
