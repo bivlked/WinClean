@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Question / Вопрос
+    url: https://github.com/bivlked/WinClean/discussions
+    about: Ask questions in Discussions / Задавайте вопросы в Discussions
+  - name: Security Issue / Проблема безопасности
+    url: https://github.com/bivlked/WinClean/security/advisories/new
+    about: Report security vulnerabilities privately / Сообщайте об уязвимостях приватно
