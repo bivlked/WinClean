@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    WinClean - Ultimate Windows 11 Maintenance Script v1.3
+    WinClean - Ultimate Windows 11 Maintenance Script v1.4
 .DESCRIPTION
     Комплексный скрипт для обновления и очистки Windows 11:
     - Обновление Windows (включая драйверы)
@@ -14,8 +14,11 @@
     - Подробный цветной вывод + лог-файл
 .NOTES
     Author: biv
-    Version: 1.3
+    Version: 1.4
     Requires: PowerShell 7.1+, Windows 11, Administrator rights
+    Changes in 1.4:
+    - Fixed Clear-PrivacyTraces: added -Recurse to Remove-Item to prevent confirmation
+      prompts when cleaning Recent folder (AutomaticDestinations, CustomDestinations)
     Changes in 1.3:
     - CRITICAL FIX: Clear-RecycleBin renamed to Clear-WinCleanRecycleBin to avoid
       infinite recursion (stack overflow) caused by name collision with built-in cmdlet
@@ -1085,7 +1088,7 @@ function Clear-PrivacyTraces {
         try {
             $recentCount = (Get-ChildItem -Path $recentFolder -Force -ErrorAction SilentlyContinue).Count
             Get-ChildItem -Path $recentFolder -Force -ErrorAction SilentlyContinue | ForEach-Object {
-                Remove-Item -LiteralPath $_.FullName -Force -ErrorAction SilentlyContinue
+                Remove-Item -LiteralPath $_.FullName -Recurse -Force -ErrorAction SilentlyContinue
             }
             if ($recentCount -gt 0) {
                 $clearedItems += "Recent documents ($recentCount items)"
@@ -1710,7 +1713,7 @@ function Show-Banner {
   ║        ██████╔╝██║  ██║███████╗██║  ██║██║ ╚═╝ ██║                   ║
   ║        ╚═════╝ ╚═╝  ╚═╝╚══════╝╚═╝  ╚═╝╚═╝     ╚═╝                   ║
   ║                                                                      ║
-  ║            Ultimate Windows 11 Maintenance Script v1.3               ║
+  ║            Ultimate Windows 11 Maintenance Script v1.4               ║
   ║                                                                      ║
   ╚══════════════════════════════════════════════════════════════════════╝
 
@@ -1835,7 +1838,7 @@ function Show-FinalStatistics {
 
 function Start-WinClean {
     # Initialize log
-    "WinClean v1.3 - Started at $(Get-Date)" | Out-File -FilePath $LogPath -Encoding utf8
+    "WinClean v1.4 - Started at $(Get-Date)" | Out-File -FilePath $LogPath -Encoding utf8
     "=" * 70 | Out-File -FilePath $LogPath -Append -Encoding utf8
 
     Show-Banner
