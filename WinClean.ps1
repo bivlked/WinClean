@@ -947,10 +947,24 @@ function Clear-SystemCaches {
     foreach ($item in $systemPaths) {
         if ($item.File) {
             if (Test-Path -LiteralPath $item.Path -ErrorAction SilentlyContinue) {
-                if (-not $ReportOnly) {
+                $fileSize = (Get-Item -LiteralPath $item.Path -ErrorAction SilentlyContinue).Length
+                $fileSize = [long]($fileSize ?? 0)
+
+                if ($ReportOnly) {
+                    Write-Log "Would clean: $($item.Desc) - $(Format-FileSize $fileSize)" -Level DETAIL
+                } else {
                     Remove-Item -LiteralPath $item.Path -Force -ErrorAction SilentlyContinue
+
+                    if ($fileSize -gt 0) {
+                        [System.Threading.Interlocked]::Add([ref]$script:Stats.TotalFreedBytes, $fileSize) | Out-Null
+                        if (-not $script:Stats.FreedByCategory.ContainsKey("System")) {
+                            $script:Stats.FreedByCategory["System"] = 0
+                        }
+                        $script:Stats.FreedByCategory["System"] += $fileSize
+                    }
+
+                    Write-Log "$($item.Desc) cleaned" -Level DETAIL
                 }
-                Write-Log "$($item.Desc) cleaned" -Level DETAIL
             }
         } else {
             Remove-FolderContent -Path $item.Path -Category "System" -Description $item.Desc
