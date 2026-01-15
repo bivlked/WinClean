@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    WinClean - Ultimate Windows 11 Maintenance Script v1.4
+    WinClean - Ultimate Windows 11 Maintenance Script v1.5
 .DESCRIPTION
     Комплексный скрипт для обновления и очистки Windows 11:
     - Обновление Windows (включая драйверы)
@@ -14,8 +14,10 @@
     - Подробный цветной вывод + лог-файл
 .NOTES
     Author: biv
-    Version: 1.4
+    Version: 1.5
     Requires: PowerShell 7.1+, Windows 11, Administrator rights
+    Changes in 1.5:
+    - Fixed visual glitch: clear progress bar before DISM output to prevent overlay
     Changes in 1.4:
     - Fixed Clear-PrivacyTraces: added -Recurse to Remove-Item to prevent confirmation
       prompts when cleaning Recent folder (AutomaticDestinations, CustomDestinations)
@@ -1606,6 +1608,9 @@ function Invoke-DISMCleanup {
     .SYNOPSIS
         Runs DISM component cleanup
     #>
+    # Clear any existing progress bar before DISM outputs to console
+    Write-Progress -Activity "Cleanup" -Completed
+
     Write-Log "Windows Component Cleanup (DISM)" -Level SECTION
 
     if ($ReportOnly) {
@@ -1713,7 +1718,7 @@ function Show-Banner {
   ║        ██████╔╝██║  ██║███████╗██║  ██║██║ ╚═╝ ██║                   ║
   ║        ╚═════╝ ╚═╝  ╚═╝╚══════╝╚═╝  ╚═╝╚═╝     ╚═╝                   ║
   ║                                                                      ║
-  ║            Ultimate Windows 11 Maintenance Script v1.4               ║
+  ║            Ultimate Windows 11 Maintenance Script v1.5               ║
   ║                                                                      ║
   ╚══════════════════════════════════════════════════════════════════════╝
 
@@ -1838,7 +1843,7 @@ function Show-FinalStatistics {
 
 function Start-WinClean {
     # Initialize log
-    "WinClean v1.4 - Started at $(Get-Date)" | Out-File -FilePath $LogPath -Encoding utf8
+    "WinClean v1.5 - Started at $(Get-Date)" | Out-File -FilePath $LogPath -Encoding utf8
     "=" * 70 | Out-File -FilePath $LogPath -Append -Encoding utf8
 
     Show-Banner
