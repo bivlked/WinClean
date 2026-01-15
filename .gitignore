@@ -1,0 +1,39 @@
+# Logs
+*.log
+logs/
+
+# Temporary files
+*.tmp
+*.temp
+~$*
+
+# PowerShell specific
+*.psm1.bak
+*.psd1.bak
+
+# IDE and editors
+.vscode/
+.idea/
+*.sublime-*
+*.code-workspace
+
+# OS generated files
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+.DS_Store
+.DS_Store?
+._*
+
+# Windows specific
+*.lnk
+
+# Backup files
+*.bak
+*.old
+*.orig
+*.backup
+
+# Test outputs
+TestResults/
+coverage/
