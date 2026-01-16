@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [2.3] - 2025-01-16
+
+### Fixed
+- **Critical: TotalFreedBytes always showed 0**: The "Space freed" counter in final statistics was always displaying 0 bytes regardless of actual cleanup
+  - **Root cause**: `[System.Threading.Interlocked]::Add([ref]$script:Stats.TotalFreedBytes, ...)` doesn't work with hashtable elements in PowerShell — `[ref]` creates a temporary copy instead of referencing the actual hashtable value
+  - **Solution**: Replaced all 6 occurrences with simple `+=` operator — the synchronized hashtable already provides thread-safety for basic operations
+  - **Impact**: All previous versions (2.0-2.2) had this bug; users saw "Space freed: 0 Bytes" even when gigabytes were actually cleaned
+
+---
+
 ## [2.2] - 2025-01-15
 
 ### Fixed

@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    WinClean - Ultimate Windows 11 Maintenance Script v2.2
+    WinClean - Ultimate Windows 11 Maintenance Script v2.3
 .DESCRIPTION
     Комплексный скрипт для обновления и очистки Windows 11:
     - Обновление Windows (включая драйверы)
@@ -14,8 +14,12 @@
     - Подробный цветной вывод + лог-файл
 .NOTES
     Author: biv
-    Version: 2.2
+    Version: 2.3
     Requires: PowerShell 7.1+, Windows 11, Administrator rights
+    Changes in 2.3:
+    - Fixed critical bug: TotalFreedBytes always showed 0 in final statistics
+      Root cause: Interlocked.Add doesn't work with hashtable elements via [ref] in PowerShell
+      Solution: Use simple += operator (synchronized hashtable handles thread-safety)
     Changes in 2.2:
     - Fixed TcpClient resource leak: now properly closed in finally block (prevents socket exhaustion)
     - Fixed code region markers: 8 misplaced #region tags corrected for proper IDE navigation
@@ -120,7 +124,7 @@ param(
 $OutputEncoding = [System.Text.Encoding]::UTF8
 $PSDefaultParameterValues['*:Encoding'] = 'utf8'
 
-# Thread-safe statistics using synchronized hashtable
+# Statistics storage (synchronized hashtable for safe concurrent access)
 $script:Stats = [hashtable]::Synchronized(@{
     TotalFreedBytes      = [long]0
     FreedByCategory      = @{}
@@ -488,8 +492,8 @@ function Remove-FolderContent {
         $freed = $sizeBefore - $sizeAfter
 
         if ($freed -gt 0) {
-            # Thread-safe update
-            [System.Threading.Interlocked]::Add([ref]$script:Stats.TotalFreedBytes, $freed) | Out-Null
+            # Update statistics (synchronized hashtable handles thread-safety)
+            $script:Stats.TotalFreedBytes += $freed
 
             # Update category (not thread-safe, but acceptable for reporting)
             if (-not $script:Stats.FreedByCategory.ContainsKey($Category)) {
@@ -552,7 +556,7 @@ function Remove-FilesByPattern {
     }
 
     if ($freedSize -gt 0) {
-        [System.Threading.Interlocked]::Add([ref]$script:Stats.TotalFreedBytes, $freedSize) | Out-Null
+        $script:Stats.TotalFreedBytes += $freedSize
 
         if (-not $script:Stats.FreedByCategory.ContainsKey($Category)) {
             $script:Stats.FreedByCategory[$Category] = 0
@@ -1040,7 +1044,7 @@ function Clear-BrowserCaches {
 
             # Update statistics with actual freed space (not estimated)
             if ($freedSpace -gt 0) {
-                [System.Threading.Interlocked]::Add([ref]$script:Stats.TotalFreedBytes, $freedSpace) | Out-Null
+                $script:Stats.TotalFreedBytes += $freedSpace
                 if (-not $script:Stats.FreedByCategory.ContainsKey("Browser")) {
                     $script:Stats.FreedByCategory["Browser"] = 0
                 }
@@ -1157,7 +1161,7 @@ function Clear-SystemCaches {
                     Remove-Item -LiteralPath $item.Path -Force -ErrorAction SilentlyContinue
 
                     if ($fileSize -gt 0) {
-                        [System.Threading.Interlocked]::Add([ref]$script:Stats.TotalFreedBytes, $fileSize) | Out-Null
+                        $script:Stats.TotalFreedBytes += $fileSize
                         if (-not $script:Stats.FreedByCategory.ContainsKey("System")) {
                             $script:Stats.FreedByCategory["System"] = 0
                         }
@@ -1497,7 +1501,7 @@ function Clear-WindowsOld {
 
             if (-not (Test-Path $windowsOldPath)) {
                 Write-Log "Windows.old removed - $sizeFormatted freed" -Level SUCCESS
-                [System.Threading.Interlocked]::Add([ref]$script:Stats.TotalFreedBytes, $size) | Out-Null
+                $script:Stats.TotalFreedBytes += $size
                 $script:Stats.FreedByCategory["Windows.old"] = $size
             } else {
                 Write-Log "Could not fully remove Windows.old" -Level WARNING
@@ -1742,7 +1746,7 @@ exit
 
                             if ($saved -gt 0) {
                                 Write-Log "Compacted $($vhdxFile.Name): $(Format-FileSize $saved) saved" -Level SUCCESS
-                                [System.Threading.Interlocked]::Add([ref]$script:Stats.TotalFreedBytes, $saved) | Out-Null
+                                $script:Stats.TotalFreedBytes += $saved
                             } else {
                                 Write-Log "Compacted $($vhdxFile.Name): no space saved" -Level INFO
                             }
@@ -2013,7 +2017,7 @@ function Show-Banner {
   ║     ╚██████╗███████╗███████╗██║  ██║██║ ╚████║                       ║
   ║      ╚═════╝╚══════╝╚══════╝╚═╝  ╚═╝╚═╝  ╚═══╝                       ║
   ║                                                                      ║
-  ║            Ultimate Windows 11 Maintenance Script v2.2               ║
+  ║            Ultimate Windows 11 Maintenance Script v2.3               ║
   ║                                                                      ║
   ╚══════════════════════════════════════════════════════════════════════╝
 
@@ -2168,7 +2172,7 @@ function Show-FinalStatistics {
 
 function Start-WinClean {
     # Initialize log
-    "WinClean v2.2 - Started at $(Get-Date)" | Out-File -FilePath $script:LogPath -Encoding utf8
+    "WinClean v2.3 - Started at $(Get-Date)" | Out-File -FilePath $script:LogPath -Encoding utf8
     "=" * 70 | Out-File -FilePath $script:LogPath -Append -Encoding utf8
 
     # Calculate TotalSteps dynamically based on skip flags
