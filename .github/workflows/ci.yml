@@ -1,0 +1,59 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  lint:
+    name: PSScriptAnalyzer
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Run PSScriptAnalyzer
+        shell: pwsh
+        run: |
+          Set-PSRepository PSGallery -InstallationPolicy Trusted
+          Install-Module PSScriptAnalyzer -Force -Scope CurrentUser
+
+          $results = Invoke-ScriptAnalyzer -Path ./WinClean.ps1 -Severity Error,Warning -ReportSummary
+
+          if ($results) {
+            $results | Format-Table -AutoSize
+            Write-Host ""
+            Write-Host "::error::PSScriptAnalyzer found $($results.Count) issue(s)"
+            exit 1
+          } else {
+            Write-Host "::notice::PSScriptAnalyzer: No issues found!"
+          }
+
+  syntax:
+    name: Syntax Check
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Check PowerShell syntax
+        shell: pwsh
+        run: |
+          $errors = $null
+          $ast = [System.Management.Automation.Language.Parser]::ParseFile(
+            "$PWD/WinClean.ps1",
+            [ref]$null,
+            [ref]$errors
+          )
+
+          if ($errors) {
+            Write-Host "::error::Syntax errors found:"
+            $errors | ForEach-Object { Write-Host "  - $_" }
+            exit 1
+          } else {
+            Write-Host "::notice::Syntax check passed!"
+          }

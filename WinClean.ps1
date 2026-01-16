@@ -1,3 +1,23 @@
+<#PSScriptInfo
+.VERSION 2.9
+.GUID 8f7c3b2a-1d4e-5f6a-9b8c-0d1e2f3a4b5c
+.AUTHOR bivlked
+.COMPANYNAME
+.COPYRIGHT (c) 2025 bivlked. MIT License.
+.TAGS Windows Cleanup Maintenance PowerShell Windows11 DevTools Docker WSL npm pip nuget
+.LICENSEURI https://github.com/bivlked/WinClean/blob/main/LICENSE
+.PROJECTURI https://github.com/bivlked/WinClean
+.ICONURI https://raw.githubusercontent.com/bivlked/WinClean/main/assets/logo.svg
+.EXTERNALMODULEDEPENDENCIES
+.REQUIREDSCRIPTS
+.EXTERNALSCRIPTDEPENDENCIES
+.RELEASENOTES
+    v2.9: Fixed PSWindowsUpdate installation hanging (TLS 1.2, timeouts)
+    v2.8: Fixed Disk Cleanup timeout issues
+    v2.7: UI improvements for final statistics
+.PRIVATEDATA
+#>
+
 <#
 .SYNOPSIS
     WinClean - Ultimate Windows 11 Maintenance Script v2.9

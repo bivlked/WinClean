@@ -7,6 +7,7 @@
 ### Комплексный скрипт обслуживания Windows 11
 
 [![Версия](https://img.shields.io/badge/версия-2.9-blue.svg)](https://github.com/bivlked/WinClean/releases)
+[![CI](https://github.com/bivlked/WinClean/actions/workflows/ci.yml/badge.svg)](https://github.com/bivlked/WinClean/actions/workflows/ci.yml)
 [![PowerShell 7.1+](https://img.shields.io/badge/PowerShell-7.1%2B-5391FE?logo=powershell&logoColor=white)](https://github.com/PowerShell/PowerShell)
 [![Windows 11](https://img.shields.io/badge/Windows-11-0078D4?logo=windows11&logoColor=white)](https://www.microsoft.com/windows/windows-11)
 [![Лицензия: MIT](https://img.shields.io/badge/Лицензия-MIT-green.svg)](LICENSE)
@@ -225,6 +226,22 @@ cd WinClean
 </td>
 </tr>
 </table>
+
+---
+
+## 🎯 Рекомендуемые профили
+
+Выберите подходящий профиль для ваших нужд:
+
+| Профиль | Команда | Для чего |
+|:--------|:--------|:---------|
+| **Просмотр** | `.\WinClean.ps1 -ReportOnly` | Первый запуск — посмотреть, что будет очищено, без изменений |
+| **Безопасный** | `.\WinClean.ps1 -SkipUpdates -SkipDockerCleanup` | Минимум риска — только временные файлы и кэши |
+| **Разработчик** | `.\WinClean.ps1` | Полная очистка — включая npm, pip, nuget, Docker, IDE кэши |
+| **Быстрый** | `.\WinClean.ps1 -SkipUpdates -SkipDevCleanup -SkipVSCleanup` | Быстро — только системная очистка |
+| **Только обновления** | `.\WinClean.ps1 -SkipCleanup` | Только обновления Windows и приложений |
+
+> 💡 **Совет:** Всегда сначала запускайте с `-ReportOnly` для предпросмотра!
 
 ---
 

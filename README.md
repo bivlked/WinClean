@@ -7,6 +7,7 @@
 ### Ultimate Windows 11 Maintenance Script
 
 [![Version](https://img.shields.io/badge/version-2.9-blue.svg)](https://github.com/bivlked/WinClean/releases)
+[![CI](https://github.com/bivlked/WinClean/actions/workflows/ci.yml/badge.svg)](https://github.com/bivlked/WinClean/actions/workflows/ci.yml)
 [![PowerShell 7.1+](https://img.shields.io/badge/PowerShell-7.1%2B-5391FE?logo=powershell&logoColor=white)](https://github.com/PowerShell/PowerShell)
 [![Windows 11](https://img.shields.io/badge/Windows-11-0078D4?logo=windows11&logoColor=white)](https://www.microsoft.com/windows/windows-11)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
@@ -225,6 +226,22 @@ Fast cleanup only
 </td>
 </tr>
 </table>
+
+---
+
+## 🎯 Recommended Profiles
+
+Choose the right profile for your needs:
+
+| Profile | Command | Best For |
+|:--------|:--------|:---------|
+| **Preview** | `.\WinClean.ps1 -ReportOnly` | First run — see what will be cleaned without changes |
+| **Safe** | `.\WinClean.ps1 -SkipUpdates -SkipDockerCleanup` | Minimal risk — only temp files and caches |
+| **Developer** | `.\WinClean.ps1` | Full cleanup — includes npm, pip, nuget, Docker, IDE caches |
+| **Quick** | `.\WinClean.ps1 -SkipUpdates -SkipDevCleanup -SkipVSCleanup` | Fast — system cleanup only, no dev tools |
+| **Updates Only** | `.\WinClean.ps1 -SkipCleanup` | Just Windows and app updates |
+
+> 💡 **Tip:** Always run with `-ReportOnly` first to preview what will be cleaned!
 
 ---
 
