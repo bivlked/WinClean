@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    WinClean - Ultimate Windows 11 Maintenance Script v2.6
+    WinClean - Ultimate Windows 11 Maintenance Script v2.7
 .DESCRIPTION
     Комплексный скрипт для обновления и очистки Windows 11:
     - Обновление Windows (включая драйверы)
@@ -14,8 +14,11 @@
     - Подробный цветной вывод + лог-файл
 .NOTES
     Author: biv
-    Version: 2.6
+    Version: 2.7
     Requires: PowerShell 7.1+, Windows 11, Administrator rights
+    Changes in 2.7:
+    - Fixed UI: header frame (╔═╗║║) now uses Cyan like the rest of the frame
+    - Status text (COMPLETED SUCCESSFULLY) remains colored (Green/Yellow/Red) for visual feedback
     Changes in 2.6:
     - Fixed UI: final statistics frame now uses consistent Cyan color throughout
     - Fixed UI: added 2-space gap between label and value (prevents "installed:Windows:" merging)
@@ -2047,7 +2050,7 @@ function Show-Banner {
   ║     ╚██████╗███████╗███████╗██║  ██║██║ ╚████║                       ║
   ║      ╚═════╝╚══════╝╚══════╝╚═╝  ╚═╝╚═╝  ╚═══╝                       ║
   ║                                                                      ║
-  ║            Ultimate Windows 11 Maintenance Script v2.6               ║
+  ║            Ultimate Windows 11 Maintenance Script v2.7               ║
   ║                                                                      ║
   ╚══════════════════════════════════════════════════════════════════════╝
 
@@ -2098,14 +2101,17 @@ function Show-FinalStatistics {
 
     Write-Host ""
 
-    # Header with status-dependent color
+    # Header with Cyan frame, status-colored text
     $titlePadding = [math]::Max(0, $boxWidth - $statusText.Length)
     $leftPad = [math]::Floor($titlePadding / 2)
     $rightPad = $titlePadding - $leftPad
-    $centeredTitle = (" " * $leftPad) + $statusText + (" " * $rightPad)
 
-    Write-Host "  ╔$("═" * $boxWidth)╗" -ForegroundColor $headerColor
-    Write-Host "  ║$centeredTitle║" -ForegroundColor $headerColor
+    Write-Host "  ╔$("═" * $boxWidth)╗" -ForegroundColor Cyan
+    Write-Host "  ║" -NoNewline -ForegroundColor Cyan
+    Write-Host (" " * $leftPad) -NoNewline
+    Write-Host $statusText -NoNewline -ForegroundColor $headerColor
+    Write-Host (" " * $rightPad) -NoNewline
+    Write-Host "║" -ForegroundColor Cyan
     Write-Host "  ╠$("═" * $boxWidth)╣" -ForegroundColor Cyan
 
     # Helper function for consistent line formatting with icons
@@ -2219,7 +2225,7 @@ function Show-FinalStatistics {
 
 function Start-WinClean {
     # Initialize log
-    "WinClean v2.6 - Started at $(Get-Date)" | Out-File -FilePath $script:LogPath -Encoding utf8
+    "WinClean v2.7 - Started at $(Get-Date)" | Out-File -FilePath $script:LogPath -Encoding utf8
     "=" * 70 | Out-File -FilePath $script:LogPath -Append -Encoding utf8
 
     # Calculate TotalSteps dynamically based on skip flags
