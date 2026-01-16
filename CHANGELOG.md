@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [2.5] - 2025-01-16
+
+### Fixed
+- **UI: Subsection lines width**: Gray subsection lines (`└────`) now extend to match TITLE frame width (70 characters instead of 67)
+- **UI: Final statistics alignment**: Replaced emoji icons (⏱🗑💾) with ASCII characters (`>`) to fix border misalignment caused by emoji taking 2 visual positions
+- **UI: Write-StatLine formula**: Corrected width calculation formula (`-5` → `-3`) for proper value padding
+
+---
+
 ## [2.4] - 2025-01-16
 
 ### Improved
@@ -15,7 +24,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **UI: Subsections preserved**: Original `┌─ Title` / `└────` style kept for subsections
 - **UI: Enhanced final statistics**:
   - Header color reflects status: Green (success), Yellow (warnings), Red (errors)
-  - Status icons for each metric (⏱ duration, ↑ updates, 🗑 freed, 💾 disk)
+  - Status indicators for each metric (duration, updates, freed space, disk)
   - Space freed highlighting: Green >1GB, Yellow >100MB, White otherwise
   - Disk space warning: Red <10%, Yellow <20%
 

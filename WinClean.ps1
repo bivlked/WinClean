@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    WinClean - Ultimate Windows 11 Maintenance Script v2.4
+    WinClean - Ultimate Windows 11 Maintenance Script v2.5
 .DESCRIPTION
     Комплексный скрипт для обновления и очистки Windows 11:
     - Обновление Windows (включая драйверы)
@@ -14,8 +14,12 @@
     - Подробный цветной вывод + лог-файл
 .NOTES
     Author: biv
-    Version: 2.4
+    Version: 2.5
     Requires: PowerShell 7.1+, Windows 11, Administrator rights
+    Changes in 2.5:
+    - Fixed UI: subsection gray lines now match TITLE frame width (70 chars)
+    - Fixed UI: final statistics window alignment (emoji replaced with ASCII)
+    - Fixed UI: Write-StatLine width formula corrected (-5 → -3)
     Changes in 2.4:
     - UI improvements: consistent left indent (2 spaces) throughout the script
     - UI improvements: major sections now have full frame (like banner)
@@ -234,7 +238,7 @@ function Write-Log {
             Write-Host ""
             Write-Host "$indent┌─ " -NoNewline -ForegroundColor DarkGray
             Write-Host $Message -ForegroundColor $tagColors.Message
-            Write-Host "$indent└$("─" * 67)" -ForegroundColor DarkGray
+            Write-Host "$indent└$("─" * 70)" -ForegroundColor DarkGray
         }
         'DETAIL' {
             # Detail line with vertical bar
@@ -2038,7 +2042,7 @@ function Show-Banner {
   ║     ╚██████╗███████╗███████╗██║  ██║██║ ╚████║                       ║
   ║      ╚═════╝╚══════╝╚══════╝╚═╝  ╚═╝╚═╝  ╚═══╝                       ║
   ║                                                                      ║
-  ║            Ultimate Windows 11 Maintenance Script v2.4               ║
+  ║            Ultimate Windows 11 Maintenance Script v2.5               ║
   ║                                                                      ║
   ╚══════════════════════════════════════════════════════════════════════╝
 
@@ -2108,7 +2112,7 @@ function Show-FinalStatistics {
             [string]$ValueColor = "Green"
         )
         $labelWidth = 18
-        $valueWidth = $boxWidth - $labelWidth - 5  # 5 = icon(2) + spaces(3)
+        $valueWidth = $boxWidth - $labelWidth - 3  # 3 = icon(1) + spaces(2)
 
         $labelPadded = $Label.PadRight($labelWidth)
         $valuePadded = $Value.PadRight($valueWidth)
@@ -2121,7 +2125,7 @@ function Show-FinalStatistics {
     }
 
     # Duration
-    Write-StatLine -Icon "⏱" -Label "Duration:" -Value $elapsedStr -IconColor "DarkGray" -ValueColor "White"
+    Write-StatLine -Icon ">" -Label "Duration:" -Value $elapsedStr -IconColor "DarkGray" -ValueColor "White"
 
     # Updates
     $totalUpdates = $script:Stats.WindowsUpdatesCount + $script:Stats.AppUpdatesCount
@@ -2133,7 +2137,7 @@ function Show-FinalStatistics {
     # Space freed (highlight if significant)
     $freedStr = Format-FileSize $script:Stats.TotalFreedBytes
     $freedColor = if ($script:Stats.TotalFreedBytes -gt 1GB) { "Green" } elseif ($script:Stats.TotalFreedBytes -gt 100MB) { "Yellow" } else { "White" }
-    Write-StatLine -Icon "🗑" -Label "Space freed:" -Value $freedStr -IconColor $freedColor -ValueColor $freedColor
+    Write-StatLine -Icon ">" -Label "Space freed:" -Value $freedStr -IconColor $freedColor -ValueColor $freedColor
 
     # Freed by category (if any)
     if ($script:Stats.FreedByCategory.Count -gt 0) {
@@ -2152,7 +2156,7 @@ function Show-FinalStatistics {
     # Disk space
     $diskStr = "$freeSpace GB / $totalSize GB ($freePercent% free)"
     $diskColor = if ($freePercent -lt 10) { "Red" } elseif ($freePercent -lt 20) { "Yellow" } else { "White" }
-    Write-StatLine -Icon "💾" -Label "Disk space:" -Value $diskStr -IconColor $diskColor -ValueColor $diskColor
+    Write-StatLine -Icon ">" -Label "Disk space:" -Value $diskStr -IconColor $diskColor -ValueColor $diskColor
 
     # Warnings/Errors (if any)
     if ($hasWarnings -or $hasErrors) {
@@ -2207,7 +2211,7 @@ function Show-FinalStatistics {
 
 function Start-WinClean {
     # Initialize log
-    "WinClean v2.4 - Started at $(Get-Date)" | Out-File -FilePath $script:LogPath -Encoding utf8
+    "WinClean v2.5 - Started at $(Get-Date)" | Out-File -FilePath $script:LogPath -Encoding utf8
     "=" * 70 | Out-File -FilePath $script:LogPath -Append -Encoding utf8
 
     # Calculate TotalSteps dynamically based on skip flags

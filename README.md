@@ -6,7 +6,7 @@
 
 ### Ultimate Windows 11 Maintenance Script
 
-[![Version](https://img.shields.io/badge/version-2.4-blue.svg)](https://github.com/bivlked/WinClean/releases)
+[![Version](https://img.shields.io/badge/version-2.5-blue.svg)](https://github.com/bivlked/WinClean/releases)
 [![PowerShell 7.1+](https://img.shields.io/badge/PowerShell-7.1%2B-5391FE?logo=powershell&logoColor=white)](https://github.com/PowerShell/PowerShell)
 [![Windows 11](https://img.shields.io/badge/Windows-11-0078D4?logo=windows11&logoColor=white)](https://www.microsoft.com/windows/windows-11)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
@@ -291,7 +291,7 @@ C:\Users\YourName\
 
 ```
 ┌────────────────────────────────────────────────────────────────┐
-│                     WinClean v2.2                              │
+│                     WinClean v2.5                              │
 ├────────────────────────────────────────────────────────────────┤
 │  PREPARATION                                                   │
 │  ├─ ✓ Check Administrator Rights                               │
