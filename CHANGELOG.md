@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [2.9] - 2025-01-17
+
+### Fixed
+- **PSWindowsUpdate installation hangs**: Script could hang indefinitely when installing PSWindowsUpdate module
+  - Added TLS 1.2 enforcement at script start (required by PowerShell Gallery)
+  - Added `Test-PSGalleryConnection` function to pre-check PowerShell Gallery availability
+  - Added `Install-ModuleWithTimeout` function with 120-second timeout
+  - Added `Install-PackageProviderWithTimeout` function with 60-second timeout for NuGet
+  - Improved error messages with manual installation instructions
+  - Clear Write-Progress before module installation to prevent UI artifacts
+
+### Added
+- `Test-PSGalleryConnection` helper function for PSGallery availability check
+- `Install-ModuleWithTimeout` helper function for timeout-wrapped module installation
+- `Install-PackageProviderWithTimeout` helper function for timeout-wrapped provider installation
+
+---
+
 ## [2.8] - 2025-01-16
 
 ### Fixed

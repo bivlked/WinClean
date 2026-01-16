@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    WinClean - Ultimate Windows 11 Maintenance Script v2.8
+    WinClean - Ultimate Windows 11 Maintenance Script v2.9
 .DESCRIPTION
     Комплексный скрипт для обновления и очистки Windows 11:
     - Обновление Windows (включая драйверы)
@@ -14,8 +14,15 @@
     - Подробный цветной вывод + лог-файл
 .NOTES
     Author: biv
-    Version: 2.8
+    Version: 2.9
     Requires: PowerShell 7.1+, Windows 11, Administrator rights
+    Changes in 2.9:
+    - Fixed PSWindowsUpdate installation hanging: added TLS 1.2 enforcement
+    - Added Test-PSGalleryConnection function: pre-checks PowerShell Gallery availability
+    - Added Install-ModuleWithTimeout function: 120-second timeout for Install-Module
+    - Added Install-PackageProviderWithTimeout function: 60-second timeout for NuGet provider
+    - Improved error messages with manual installation instructions
+    - Clear Write-Progress before module installation to prevent UI artifacts
     Changes in 2.8:
     - Fixed Disk Cleanup timeout: reduced from 10 minutes to 7 minutes
     - Fixed Disk Cleanup: replaced -NoNewWindow with -WindowStyle Hidden (more reliable)
@@ -371,6 +378,143 @@ function Test-InternetConnection {
     return $false
 }
 
+function Test-PSGalleryConnection {
+    <#
+    .SYNOPSIS
+        Проверяет доступность PowerShell Gallery перед установкой модулей
+    .DESCRIPTION
+        Использует Invoke-WebRequest с коротким таймаутом для проверки доступности
+        powershellgallery.com. Более специфичная проверка чем общий Test-InternetConnection.
+    .OUTPUTS
+        [bool] $true если PowerShell Gallery доступен, $false в противном случае
+    #>
+    try {
+        # Check PSGallery API endpoint (faster than main page)
+        $response = Invoke-WebRequest -Uri "https://www.powershellgallery.com/api/v2" `
+            -TimeoutSec 10 -UseBasicParsing -ErrorAction Stop
+        return $response.StatusCode -eq 200
+    } catch {
+        return $false
+    }
+}
+
+function Install-ModuleWithTimeout {
+    <#
+    .SYNOPSIS
+        Устанавливает PowerShell модуль с таймаутом
+    .DESCRIPTION
+        Использует Background Job для установки модуля с возможностью прервать
+        операцию по таймауту. Решает проблему бесконечного зависания Install-Module.
+    .PARAMETER ModuleName
+        Имя модуля для установки
+    .PARAMETER TimeoutSeconds
+        Таймаут в секундах (по умолчанию 120)
+    .OUTPUTS
+        [bool] $true если модуль успешно установлен, $false при ошибке/таймауте
+    #>
+    param(
+        [Parameter(Mandatory)]
+        [string]$ModuleName,
+
+        [int]$TimeoutSeconds = 120
+    )
+
+    $job = Start-Job -ScriptBlock {
+        param($moduleName)
+        # Set TLS 1.2 in the job process as well
+        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+        Install-Module -Name $moduleName -Force -Scope CurrentUser -AllowClobber -SkipPublisherCheck -ErrorAction Stop
+    } -ArgumentList $ModuleName
+
+    $completed = Wait-Job $job -Timeout $TimeoutSeconds
+
+    if ($completed) {
+        $jobState = $job.State
+        $jobError = $null
+
+        try {
+            Receive-Job $job -ErrorAction Stop
+        } catch {
+            $jobError = $_
+        }
+
+        Remove-Job $job -Force
+
+        if ($jobState -eq 'Completed' -and -not $jobError) {
+            return $true
+        } else {
+            if ($jobError) {
+                Write-Log "Module installation failed: $jobError" -Level ERROR
+            }
+            return $false
+        }
+    } else {
+        # Timeout - kill the job
+        Stop-Job $job -ErrorAction SilentlyContinue
+        Remove-Job $job -Force
+        Write-Log "Module installation timed out after $TimeoutSeconds seconds" -Level ERROR
+        return $false
+    }
+}
+
+function Install-PackageProviderWithTimeout {
+    <#
+    .SYNOPSIS
+        Устанавливает PackageProvider с таймаутом
+    .DESCRIPTION
+        Аналогично Install-ModuleWithTimeout, но для Install-PackageProvider
+    .PARAMETER ProviderName
+        Имя провайдера (обычно NuGet)
+    .PARAMETER TimeoutSeconds
+        Таймаут в секундах (по умолчанию 60)
+    .OUTPUTS
+        [bool] $true если провайдер успешно установлен, $false при ошибке/таймауте
+    #>
+    param(
+        [Parameter(Mandatory)]
+        [string]$ProviderName,
+
+        [string]$MinimumVersion = "2.8.5.201",
+
+        [int]$TimeoutSeconds = 60
+    )
+
+    $job = Start-Job -ScriptBlock {
+        param($providerName, $minVersion)
+        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+        Install-PackageProvider -Name $providerName -MinimumVersion $minVersion -Force -ErrorAction Stop
+    } -ArgumentList $ProviderName, $MinimumVersion
+
+    $completed = Wait-Job $job -Timeout $TimeoutSeconds
+
+    if ($completed) {
+        $jobState = $job.State
+        $jobError = $null
+
+        try {
+            Receive-Job $job -ErrorAction Stop | Out-Null
+        } catch {
+            $jobError = $_
+        }
+
+        Remove-Job $job -Force
+
+        if ($jobState -eq 'Completed' -and -not $jobError) {
+            return $true
+        } else {
+            if ($jobError) {
+                Write-Log "Package provider installation failed: $jobError" -Level ERROR
+            }
+            return $false
+        }
+    } else {
+        Stop-Job $job -ErrorAction SilentlyContinue
+        Remove-Job $job -Force
+        Write-Log "Package provider installation timed out after $TimeoutSeconds seconds" -Level ERROR
+        return $false
+    }
+}
+
 function Test-PendingReboot {
     <#
     .SYNOPSIS
@@ -707,15 +851,41 @@ function Update-WindowsSystem {
     try {
         # Install PSWindowsUpdate if needed
         if (-not (Get-Module -ListAvailable -Name PSWindowsUpdate)) {
-            Write-Log "Installing PSWindowsUpdate module..." -Level INFO
+            # Clear any lingering progress bar before module installation
+            Write-Progress -Activity "Windows Update" -Completed -ErrorAction SilentlyContinue
 
-            # Ensure NuGet provider
-            $nuget = Get-PackageProvider -Name NuGet -ErrorAction SilentlyContinue
-            if (-not $nuget -or $nuget.Version -lt [version]"2.8.5.201") {
-                Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Force -ErrorAction Stop | Out-Null
+            # Check PowerShell Gallery availability first (v2.9)
+            Write-Log "Checking PowerShell Gallery availability..." -Level INFO
+            if (-not (Test-PSGalleryConnection)) {
+                Write-Log "PowerShell Gallery is unavailable" -Level ERROR
+                Write-Log "Please check your internet connection or install PSWindowsUpdate manually:" -Level INFO
+                Write-Log "  Install-Module PSWindowsUpdate -Force -Scope CurrentUser" -Level INFO
+                $script:Stats.ErrorsCount++
+                return
             }
 
-            Install-Module PSWindowsUpdate -Force -Scope CurrentUser -AllowClobber -SkipPublisherCheck -ErrorAction Stop
+            Write-Log "Installing PSWindowsUpdate module..." -Level INFO
+
+            # Ensure NuGet provider with timeout (v2.9)
+            $nuget = Get-PackageProvider -Name NuGet -ErrorAction SilentlyContinue
+            if (-not $nuget -or $nuget.Version -lt [version]"2.8.5.201") {
+                Write-Log "Installing NuGet provider..." -Level INFO
+                if (-not (Install-PackageProviderWithTimeout -ProviderName "NuGet" -TimeoutSeconds 60)) {
+                    Write-Log "Failed to install NuGet provider - Windows Update skipped" -Level ERROR
+                    Write-Log "Try manual installation: Install-PackageProvider -Name NuGet -Force" -Level INFO
+                    $script:Stats.ErrorsCount++
+                    return
+                }
+                Write-Log "NuGet provider installed" -Level SUCCESS
+            }
+
+            # Install PSWindowsUpdate module with timeout (v2.9)
+            if (-not (Install-ModuleWithTimeout -ModuleName "PSWindowsUpdate" -TimeoutSeconds 120)) {
+                Write-Log "Failed to install PSWindowsUpdate - Windows Update skipped" -Level ERROR
+                Write-Log "Try manual installation: Install-Module PSWindowsUpdate -Force -Scope CurrentUser" -Level INFO
+                $script:Stats.ErrorsCount++
+                return
+            }
             Write-Log "PSWindowsUpdate installed" -Level SUCCESS
         }
 
@@ -2068,7 +2238,7 @@ function Show-Banner {
   ║     ╚██████╗███████╗███████╗██║  ██║██║ ╚████║                       ║
   ║      ╚═════╝╚══════╝╚══════╝╚═╝  ╚═╝╚═╝  ╚═══╝                       ║
   ║                                                                      ║
-  ║            Ultimate Windows 11 Maintenance Script v2.8               ║
+  ║            Ultimate Windows 11 Maintenance Script v2.9               ║
   ║                                                                      ║
   ╚══════════════════════════════════════════════════════════════════════╝
 
@@ -2243,8 +2413,12 @@ function Show-FinalStatistics {
 
 function Start-WinClean {
     # Initialize log
-    "WinClean v2.8 - Started at $(Get-Date)" | Out-File -FilePath $script:LogPath -Encoding utf8
+    "WinClean v2.9 - Started at $(Get-Date)" | Out-File -FilePath $script:LogPath -Encoding utf8
     "=" * 70 | Out-File -FilePath $script:LogPath -Append -Encoding utf8
+
+    # Enable TLS 1.2 for all HTTPS connections (required by PowerShell Gallery, NuGet, etc.)
+    # This must be set before any network operations
+    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
     # Calculate TotalSteps dynamically based on skip flags
     $script:Stats.TotalSteps = 0
