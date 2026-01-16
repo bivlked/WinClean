@@ -32,7 +32,7 @@ If applicable, add screenshots.
 
 - **Windows Version**: [e.g., Windows 11 23H2 Build 22631]
 - **PowerShell Version**: [e.g., 7.4.1]
-- **WinClean Version**: [e.g., 2.2]
+- **WinClean Version**: [e.g., 2.8]
 
 ## Log Output / Вывод лога
 

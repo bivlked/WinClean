@@ -17,7 +17,7 @@
     Version: 2.8
     Requires: PowerShell 7.1+, Windows 11, Administrator rights
     Changes in 2.8:
-    - Fixed Disk Cleanup timeout: reduced from 10 minutes to 5 minutes
+    - Fixed Disk Cleanup timeout: reduced from 10 minutes to 7 minutes
     - Fixed Disk Cleanup: replaced -NoNewWindow with -WindowStyle Hidden (more reliable)
     - Added progress logging every minute while Disk Cleanup is running
     - Replaced Wait-Process with explicit HasExited loop for better control
@@ -2024,7 +2024,7 @@ function Invoke-StorageSense {
         $cleanmgr = Start-Process -FilePath "cleanmgr.exe" -ArgumentList "/sagerun:$sageset" `
             -WindowStyle Hidden -PassThru
 
-        $maxWait = 300  # 5 minutes max (was 10 minutes)
+        $maxWait = 420  # 7 minutes max (was 10 minutes)
         $elapsed = 0
         $checkInterval = 10
 
