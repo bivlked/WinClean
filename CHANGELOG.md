@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [2.8] - 2025-01-16
+
+### Fixed
+- **Disk Cleanup hangs**: Improved cleanmgr.exe handling to prevent long waits after cleanup completes
+  - Reduced timeout from 10 minutes to 5 minutes
+  - Replaced `-NoNewWindow` with `-WindowStyle Hidden` for more reliable operation
+  - Added explicit `HasExited` loop instead of `Wait-Process` for better control
+  - Added progress logging every minute ("Disk Cleanup still running... (60 seconds)")
+
+---
+
 ## [2.7] - 2025-01-16
 
 ### Fixed

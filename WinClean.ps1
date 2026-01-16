@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    WinClean - Ultimate Windows 11 Maintenance Script v2.7
+    WinClean - Ultimate Windows 11 Maintenance Script v2.8
 .DESCRIPTION
     Комплексный скрипт для обновления и очистки Windows 11:
     - Обновление Windows (включая драйверы)
@@ -14,8 +14,13 @@
     - Подробный цветной вывод + лог-файл
 .NOTES
     Author: biv
-    Version: 2.7
+    Version: 2.8
     Requires: PowerShell 7.1+, Windows 11, Administrator rights
+    Changes in 2.8:
+    - Fixed Disk Cleanup timeout: reduced from 10 minutes to 5 minutes
+    - Fixed Disk Cleanup: replaced -NoNewWindow with -WindowStyle Hidden (more reliable)
+    - Added progress logging every minute while Disk Cleanup is running
+    - Replaced Wait-Process with explicit HasExited loop for better control
     Changes in 2.7:
     - Fixed UI: header frame (╔═╗║║) now uses Cyan like the rest of the frame
     - Status text (COMPLETED SUCCESSFULLY) remains colored (Green/Yellow/Red) for visual feedback
@@ -2015,15 +2020,28 @@ function Invoke-StorageSense {
             }
         }
 
-        # Run cleanmgr with timeout
+        # Run cleanmgr with progress feedback and reasonable timeout
         $cleanmgr = Start-Process -FilePath "cleanmgr.exe" -ArgumentList "/sagerun:$sageset" `
-            -NoNewWindow -PassThru
+            -WindowStyle Hidden -PassThru
 
-        $cleanmgr | Wait-Process -Timeout 600 -ErrorAction SilentlyContinue
+        $maxWait = 300  # 5 minutes max (was 10 minutes)
+        $elapsed = 0
+        $checkInterval = 10
+
+        while (-not $cleanmgr.HasExited -and $elapsed -lt $maxWait) {
+            Start-Sleep -Seconds $checkInterval
+            $elapsed += $checkInterval
+
+            # Log progress every minute
+            if ($elapsed % 60 -eq 0) {
+                Write-Log "Disk Cleanup still running... ($elapsed seconds)" -Level INFO
+            }
+        }
 
         if (-not $cleanmgr.HasExited) {
             $cleanmgr | Stop-Process -Force -ErrorAction SilentlyContinue
-            Write-Log "Disk Cleanup timed out" -Level WARNING
+            Write-Log "Disk Cleanup timed out after $maxWait seconds" -Level WARNING
+            $script:Stats.WarningsCount++
         } else {
             Write-Log "Disk Cleanup completed" -Level SUCCESS
         }
@@ -2050,7 +2068,7 @@ function Show-Banner {
   ║     ╚██████╗███████╗███████╗██║  ██║██║ ╚████║                       ║
   ║      ╚═════╝╚══════╝╚══════╝╚═╝  ╚═╝╚═╝  ╚═══╝                       ║
   ║                                                                      ║
-  ║            Ultimate Windows 11 Maintenance Script v2.7               ║
+  ║            Ultimate Windows 11 Maintenance Script v2.8               ║
   ║                                                                      ║
   ╚══════════════════════════════════════════════════════════════════════╝
 
@@ -2225,7 +2243,7 @@ function Show-FinalStatistics {
 
 function Start-WinClean {
     # Initialize log
-    "WinClean v2.7 - Started at $(Get-Date)" | Out-File -FilePath $script:LogPath -Encoding utf8
+    "WinClean v2.8 - Started at $(Get-Date)" | Out-File -FilePath $script:LogPath -Encoding utf8
     "=" * 70 | Out-File -FilePath $script:LogPath -Append -Encoding utf8
 
     # Calculate TotalSteps dynamically based on skip flags
