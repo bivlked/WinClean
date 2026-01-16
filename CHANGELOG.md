@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [2.4] - 2025-01-16
+
+### Improved
+- **UI: Consistent left indent**: All output now has 2-space left margin, matching the banner style
+- **UI: Major section frames**: TITLE sections (WINDOWS UPDATE, SYSTEM CLEANUP, etc.) now have full box frames like the banner, in Magenta color
+- **UI: Subsections preserved**: Original `┌─ Title` / `└────` style kept for subsections
+- **UI: Enhanced final statistics**:
+  - Header color reflects status: Green (success), Yellow (warnings), Red (errors)
+  - Status icons for each metric (⏱ duration, ↑ updates, 🗑 freed, 💾 disk)
+  - Space freed highlighting: Green >1GB, Yellow >100MB, White otherwise
+  - Disk space warning: Red <10%, Yellow <20%
+
+### Changed
+- **Removed auto-close timeout**: Window now waits indefinitely for keypress instead of 60-second timeout — users won't miss results if distracted
+
+---
+
 ## [2.3] - 2025-01-16
 
 ### Fixed

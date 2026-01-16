@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    WinClean - Ultimate Windows 11 Maintenance Script v2.3
+    WinClean - Ultimate Windows 11 Maintenance Script v2.4
 .DESCRIPTION
     Комплексный скрипт для обновления и очистки Windows 11:
     - Обновление Windows (включая драйверы)
@@ -14,8 +14,15 @@
     - Подробный цветной вывод + лог-файл
 .NOTES
     Author: biv
-    Version: 2.3
+    Version: 2.4
     Requires: PowerShell 7.1+, Windows 11, Administrator rights
+    Changes in 2.4:
+    - UI improvements: consistent left indent (2 spaces) throughout the script
+    - UI improvements: major sections now have full frame (like banner)
+    - UI improvements: subsections keep original style (┌─ Title / └────)
+    - UI improvements: enhanced final statistics with status icons and colors
+    - UI improvements: header color reflects completion status (green/yellow/red)
+    - Removed 60-second auto-close timeout - window now waits indefinitely for keypress
     Changes in 2.3:
     - Fixed critical bug: TotalFreedBytes always showed 0 in final statistics
       Root cause: Interlocked.Add doesn't work with hashtable elements via [ref] in PowerShell
@@ -181,6 +188,10 @@ function Write-Log {
         [switch]$NoLog
     )
 
+    # Consistent left indent for all output (matches banner style)
+    $indent = "  "
+    $boxWidth = 70  # Inner width for framed sections
+
     $timestamp = (Get-Date).ToString('HH:mm:ss')
     $logMessage = "[$timestamp] [$Level] $Message"
 
@@ -206,25 +217,35 @@ function Write-Log {
 
     switch ($Level) {
         'TITLE' {
+            # Full frame for major sections (like banner style, but Magenta)
+            $titleText = $Message.ToUpper()
+            $padding = [math]::Max(0, $boxWidth - $titleText.Length)
+            $leftPad = [math]::Floor($padding / 2)
+            $rightPad = $padding - $leftPad
+            $centeredTitle = (" " * $leftPad) + $titleText + (" " * $rightPad)
+
             Write-Host ""
-            Write-Host ("═" * 70) -ForegroundColor $tagColors.Tag
-            Write-Host "  $Message" -ForegroundColor $tagColors.Message
-            Write-Host ("═" * 70) -ForegroundColor $tagColors.Tag
-            Write-Host ""
+            Write-Host "$indent╔$("═" * $boxWidth)╗" -ForegroundColor $tagColors.Tag
+            Write-Host "$indent║$centeredTitle║" -ForegroundColor $tagColors.Tag
+            Write-Host "$indent╚$("═" * $boxWidth)╝" -ForegroundColor $tagColors.Tag
         }
         'SECTION' {
+            # Subsection header (keep original style with indent)
             Write-Host ""
-            Write-Host "┌─ " -NoNewline -ForegroundColor DarkGray
+            Write-Host "$indent┌─ " -NoNewline -ForegroundColor DarkGray
             Write-Host $Message -ForegroundColor $tagColors.Message
-            Write-Host "└" -NoNewline -ForegroundColor DarkGray
-            Write-Host ("─" * 65) -ForegroundColor DarkGray
+            Write-Host "$indent└$("─" * 67)" -ForegroundColor DarkGray
         }
         'DETAIL' {
-            Write-Host "   │ " -NoNewline -ForegroundColor DarkGray
+            # Detail line with vertical bar
+            Write-Host "$indent  │ " -NoNewline -ForegroundColor DarkGray
             Write-Host $Message -ForegroundColor $tagColors.Message -NoNewline:$NoNewLine
             if (-not $NoNewLine) { Write-Host "" }
         }
         default {
+            # Standard log line with timestamp and tag
+            Write-Host $indent -NoNewline
+
             if (-not $NoTimestamp) {
                 Write-Host "[$timestamp] " -NoNewline -ForegroundColor DarkGray
             }
@@ -2017,7 +2038,7 @@ function Show-Banner {
   ║     ╚██████╗███████╗███████╗██║  ██║██║ ╚████║                       ║
   ║      ╚═════╝╚══════╝╚══════╝╚═╝  ╚═╝╚═╝  ╚═══╝                       ║
   ║                                                                      ║
-  ║            Ultimate Windows 11 Maintenance Script v2.3               ║
+  ║            Ultimate Windows 11 Maintenance Script v2.4               ║
   ║                                                                      ║
   ╚══════════════════════════════════════════════════════════════════════╝
 
@@ -2055,69 +2076,93 @@ function Show-FinalStatistics {
 
     Write-Progress -Activity "Complete" -Completed
 
-    # Fixed box width: 74 chars total (2 for borders + 72 inner)
-    # Inner content: 4 spaces prefix + 68 chars content
-    $boxWidth = 72  # Inner width
-    $contentWidth = 48  # Width for value column
+    # Box dimensions
+    $boxWidth = 70  # Inner width (matches banner)
+
+    # Determine overall status
+    $hasErrors = $script:Stats.ErrorsCount -gt 0
+    $hasWarnings = $script:Stats.WarningsCount -gt 0
+    $statusIcon = if ($hasErrors) { "✗" } elseif ($hasWarnings) { "⚠" } else { "✓" }
+    $statusText = if ($hasErrors) { "COMPLETED WITH ERRORS" } elseif ($hasWarnings) { "COMPLETED WITH WARNINGS" } else { "COMPLETED SUCCESSFULLY" }
+    $headerColor = if ($hasErrors) { "Red" } elseif ($hasWarnings) { "Yellow" } else { "Green" }
 
     Write-Host ""
-    Write-Host "  ╔══════════════════════════════════════════════════════════════════════╗" -ForegroundColor Cyan
-    Write-Host "  ║                         FINAL STATISTICS                             ║" -ForegroundColor Cyan
-    Write-Host "  ╠══════════════════════════════════════════════════════════════════════╣" -ForegroundColor Cyan
 
-    # Helper function for consistent line formatting
+    # Header with status-dependent color
+    $titlePadding = [math]::Max(0, $boxWidth - $statusText.Length)
+    $leftPad = [math]::Floor($titlePadding / 2)
+    $rightPad = $titlePadding - $leftPad
+    $centeredTitle = (" " * $leftPad) + $statusText + (" " * $rightPad)
+
+    Write-Host "  ╔$("═" * $boxWidth)╗" -ForegroundColor $headerColor
+    Write-Host "  ║$centeredTitle║" -ForegroundColor $headerColor
+    Write-Host "  ╠$("═" * $boxWidth)╣" -ForegroundColor Cyan
+
+    # Helper function for consistent line formatting with icons
     function Write-StatLine {
-        param([string]$Label, [string]$Value, [string]$ValueColor = "Green")
-        $labelPadded = $Label.PadRight(20)
-        $valuePadded = $Value.PadRight($contentWidth)
-        Write-Host "  ║  " -NoNewline -ForegroundColor Cyan
+        param(
+            [string]$Icon,
+            [string]$Label,
+            [string]$Value,
+            [string]$IconColor = "Cyan",
+            [string]$ValueColor = "Green"
+        )
+        $labelWidth = 18
+        $valueWidth = $boxWidth - $labelWidth - 5  # 5 = icon(2) + spaces(3)
+
+        $labelPadded = $Label.PadRight($labelWidth)
+        $valuePadded = $Value.PadRight($valueWidth)
+
+        Write-Host "  ║ " -NoNewline -ForegroundColor Cyan
+        Write-Host "$Icon " -NoNewline -ForegroundColor $IconColor
         Write-Host $labelPadded -NoNewline -ForegroundColor White
         Write-Host $valuePadded -NoNewline -ForegroundColor $ValueColor
         Write-Host "║" -ForegroundColor Cyan
     }
 
     # Duration
-    Write-StatLine -Label "Duration:" -Value $elapsedStr
+    Write-StatLine -Icon "⏱" -Label "Duration:" -Value $elapsedStr -IconColor "DarkGray" -ValueColor "White"
 
     # Updates
-    if ($script:Stats.WindowsUpdatesCount -gt 0 -or $script:Stats.AppUpdatesCount -gt 0) {
+    $totalUpdates = $script:Stats.WindowsUpdatesCount + $script:Stats.AppUpdatesCount
+    if ($totalUpdates -gt 0) {
         $updatesStr = "Windows: $($script:Stats.WindowsUpdatesCount), Apps: $($script:Stats.AppUpdatesCount)"
-        Write-StatLine -Label "Updates installed:" -Value $updatesStr
+        Write-StatLine -Icon "↑" -Label "Updates installed:" -Value $updatesStr -IconColor "Green" -ValueColor "Green"
     }
 
-    # Space freed
+    # Space freed (highlight if significant)
     $freedStr = Format-FileSize $script:Stats.TotalFreedBytes
-    Write-StatLine -Label "Space freed:" -Value $freedStr
+    $freedColor = if ($script:Stats.TotalFreedBytes -gt 1GB) { "Green" } elseif ($script:Stats.TotalFreedBytes -gt 100MB) { "Yellow" } else { "White" }
+    Write-StatLine -Icon "🗑" -Label "Space freed:" -Value $freedStr -IconColor $freedColor -ValueColor $freedColor
 
-    # Freed by category
+    # Freed by category (if any)
     if ($script:Stats.FreedByCategory.Count -gt 0) {
-        Write-Host "  ╠──────────────────────────────────────────────────────────────────────╣" -ForegroundColor Cyan
+        Write-Host "  ╟$("─" * $boxWidth)╢" -ForegroundColor DarkGray
         foreach ($cat in ($script:Stats.FreedByCategory.GetEnumerator() | Sort-Object -Property Value -Descending | Select-Object -First 5)) {
             if ($cat.Value -gt 0) {
-                $catLabel = "  $($cat.Key):".PadRight(20)
-                $catValue = (Format-FileSize $cat.Value).PadRight($contentWidth)
-                Write-Host "  ║  " -NoNewline -ForegroundColor Cyan
-                Write-Host $catLabel -NoNewline -ForegroundColor Gray
-                Write-Host $catValue -NoNewline -ForegroundColor Gray
-                Write-Host "║" -ForegroundColor Cyan
+                $catLabel = "  $($cat.Key):"
+                $catValue = Format-FileSize $cat.Value
+                Write-StatLine -Icon " " -Label $catLabel -Value $catValue -ValueColor "DarkGray"
             }
         }
     }
 
-    Write-Host "  ╠══════════════════════════════════════════════════════════════════════╣" -ForegroundColor Cyan
+    Write-Host "  ╠$("═" * $boxWidth)╣" -ForegroundColor Cyan
 
     # Disk space
     $diskStr = "$freeSpace GB / $totalSize GB ($freePercent% free)"
-    Write-StatLine -Label "Free disk space:" -Value $diskStr -ValueColor "Yellow"
+    $diskColor = if ($freePercent -lt 10) { "Red" } elseif ($freePercent -lt 20) { "Yellow" } else { "White" }
+    Write-StatLine -Icon "💾" -Label "Disk space:" -Value $diskStr -IconColor $diskColor -ValueColor $diskColor
 
-    # Warnings/Errors
-    if ($script:Stats.WarningsCount -gt 0 -or $script:Stats.ErrorsCount -gt 0) {
+    # Warnings/Errors (if any)
+    if ($hasWarnings -or $hasErrors) {
         $issueStr = "$($script:Stats.WarningsCount) warnings, $($script:Stats.ErrorsCount) errors"
-        $issueColor = if ($script:Stats.ErrorsCount -gt 0) { "Red" } else { "Yellow" }
-        Write-StatLine -Label "Warnings/Errors:" -Value $issueStr -ValueColor $issueColor
+        $issueIcon = if ($hasErrors) { "✗" } else { "⚠" }
+        $issueColor = if ($hasErrors) { "Red" } else { "Yellow" }
+        Write-StatLine -Icon $issueIcon -Label "Issues:" -Value $issueStr -IconColor $issueColor -ValueColor $issueColor
     }
 
-    Write-Host "  ╚══════════════════════════════════════════════════════════════════════╝" -ForegroundColor Cyan
+    Write-Host "  ╚$("═" * $boxWidth)╝" -ForegroundColor Cyan
 
     # Reboot notification
     if ($script:Stats.RebootRequired) {
@@ -2125,7 +2170,6 @@ function Show-FinalStatistics {
         Write-Host "  ⚠ " -NoNewline -ForegroundColor Yellow
         Write-Host "Reboot required to complete Windows updates!" -ForegroundColor Yellow
 
-        # Check if interactive console available (fixed in v2.1)
         if (Test-InteractiveConsole) {
             Write-Host ""
             Write-Host "  Reboot now? (y/N): " -NoNewline -ForegroundColor Yellow
@@ -2144,27 +2188,18 @@ function Show-FinalStatistics {
     }
 
     Write-Host ""
-    Write-Host "  Log saved to: $script:LogPath" -ForegroundColor DarkGray
+    Write-Host "  Log: $script:LogPath" -ForegroundColor DarkGray
     Write-Host ""
 
-    # Pause before closing window (for users running from downloaded script)
-    # Only if running in interactive console (fixed in v2.1)
+    # Wait for keypress before closing (no timeout - window stays open)
     if (Test-InteractiveConsole) {
-        Write-Host "  Press any key to exit (auto-close in 60 seconds)..." -ForegroundColor DarkGray
+        Write-Host "  Press any key to exit..." -ForegroundColor DarkGray
 
-        $timeout = 60
-        $startTime = Get-Date
-
-        # Clear keyboard buffer
+        # Clear keyboard buffer first
         while ([Console]::KeyAvailable) { [Console]::ReadKey($true) | Out-Null }
 
-        while ((Get-Date) -lt $startTime.AddSeconds($timeout)) {
-            if ([Console]::KeyAvailable) {
-                [Console]::ReadKey($true) | Out-Null
-                break
-            }
-            Start-Sleep -Milliseconds 100
-        }
+        # Wait indefinitely for keypress
+        [Console]::ReadKey($true) | Out-Null
     } else {
         Write-Host "  Non-interactive mode - exiting automatically." -ForegroundColor DarkGray
     }
@@ -2172,7 +2207,7 @@ function Show-FinalStatistics {
 
 function Start-WinClean {
     # Initialize log
-    "WinClean v2.3 - Started at $(Get-Date)" | Out-File -FilePath $script:LogPath -Encoding utf8
+    "WinClean v2.4 - Started at $(Get-Date)" | Out-File -FilePath $script:LogPath -Encoding utf8
     "=" * 70 | Out-File -FilePath $script:LogPath -Append -Encoding utf8
 
     # Calculate TotalSteps dynamically based on skip flags
