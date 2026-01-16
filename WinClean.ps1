@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    WinClean - Ultimate Windows 11 Maintenance Script v2.5
+    WinClean - Ultimate Windows 11 Maintenance Script v2.6
 .DESCRIPTION
     Комплексный скрипт для обновления и очистки Windows 11:
     - Обновление Windows (включая драйверы)
@@ -14,8 +14,13 @@
     - Подробный цветной вывод + лог-файл
 .NOTES
     Author: biv
-    Version: 2.5
+    Version: 2.6
     Requires: PowerShell 7.1+, Windows 11, Administrator rights
+    Changes in 2.6:
+    - Fixed UI: final statistics frame now uses consistent Cyan color throughout
+    - Fixed UI: added 2-space gap between label and value (prevents "installed:Windows:" merging)
+    - Fixed UI: category names (Temp, System) now right-aligned with PadLeft to match main labels
+    - Refactored: $labelWidth moved to parent scope for reuse in category alignment
     Changes in 2.5:
     - Fixed UI: subsection gray lines now match TITLE frame width (70 chars)
     - Fixed UI: final statistics window alignment (emoji replaced with ASCII)
@@ -2042,7 +2047,7 @@ function Show-Banner {
   ║     ╚██████╗███████╗███████╗██║  ██║██║ ╚████║                       ║
   ║      ╚═════╝╚══════╝╚══════╝╚═╝  ╚═╝╚═╝  ╚═══╝                       ║
   ║                                                                      ║
-  ║            Ultimate Windows 11 Maintenance Script v2.5               ║
+  ║            Ultimate Windows 11 Maintenance Script v2.6               ║
   ║                                                                      ║
   ╚══════════════════════════════════════════════════════════════════════╝
 
@@ -2081,7 +2086,8 @@ function Show-FinalStatistics {
     Write-Progress -Activity "Complete" -Completed
 
     # Box dimensions
-    $boxWidth = 70  # Inner width (matches banner)
+    $boxWidth = 70    # Inner width (matches banner)
+    $labelWidth = 18  # Width for label column (e.g., "Updates installed:")
 
     # Determine overall status
     $hasErrors = $script:Stats.ErrorsCount -gt 0
@@ -2111,15 +2117,16 @@ function Show-FinalStatistics {
             [string]$IconColor = "Cyan",
             [string]$ValueColor = "Green"
         )
-        $labelWidth = 18
-        $valueWidth = $boxWidth - $labelWidth - 3  # 3 = icon(1) + spaces(2)
+        # $labelWidth is inherited from parent scope (18)
+        # Layout: space(1) + icon(1) + space(1) + label(18) + gap(2) + value(47) = 70
+        $valueWidth = $boxWidth - $labelWidth - 5  # 5 = icon(1) + spaces(2) + gap(2)
 
         $labelPadded = $Label.PadRight($labelWidth)
         $valuePadded = $Value.PadRight($valueWidth)
 
         Write-Host "  ║ " -NoNewline -ForegroundColor Cyan
         Write-Host "$Icon " -NoNewline -ForegroundColor $IconColor
-        Write-Host $labelPadded -NoNewline -ForegroundColor White
+        Write-Host "$labelPadded  " -NoNewline -ForegroundColor White  # 2 spaces after label
         Write-Host $valuePadded -NoNewline -ForegroundColor $ValueColor
         Write-Host "║" -ForegroundColor Cyan
     }
@@ -2141,10 +2148,11 @@ function Show-FinalStatistics {
 
     # Freed by category (if any)
     if ($script:Stats.FreedByCategory.Count -gt 0) {
-        Write-Host "  ╟$("─" * $boxWidth)╢" -ForegroundColor DarkGray
+        Write-Host "  ╟$("─" * $boxWidth)╢" -ForegroundColor Cyan
         foreach ($cat in ($script:Stats.FreedByCategory.GetEnumerator() | Sort-Object -Property Value -Descending | Select-Object -First 5)) {
             if ($cat.Value -gt 0) {
-                $catLabel = "  $($cat.Key):"
+                # Right-align category name so colon aligns with "Updates installed:"
+                $catLabel = "$($cat.Key):".PadLeft($labelWidth)
                 $catValue = Format-FileSize $cat.Value
                 Write-StatLine -Icon " " -Label $catLabel -Value $catValue -ValueColor "DarkGray"
             }
@@ -2211,7 +2219,7 @@ function Show-FinalStatistics {
 
 function Start-WinClean {
     # Initialize log
-    "WinClean v2.5 - Started at $(Get-Date)" | Out-File -FilePath $script:LogPath -Encoding utf8
+    "WinClean v2.6 - Started at $(Get-Date)" | Out-File -FilePath $script:LogPath -Encoding utf8
     "=" * 70 | Out-File -FilePath $script:LogPath -Append -Encoding utf8
 
     # Calculate TotalSteps dynamically based on skip flags

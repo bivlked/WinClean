@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [2.6] - 2025-01-16
+
+### Fixed
+- **UI: Frame color consistency**: All parts of the final statistics frame now use Cyan color (separator line between main stats and categories was DarkGray)
+- **UI: Label/value spacing**: Added 2-space gap between label and value to prevent merging (e.g., "installed:Windows:" → "installed:  Windows:")
+- **UI: Category alignment**: Category names (Temp, System, etc.) now right-aligned using `PadLeft` so colons align with "Updates installed:"
+
+### Improved
+- **Code structure**: Moved `$labelWidth` to parent scope for reuse in both `Write-StatLine` and category formatting
+
+---
+
 ## [2.5] - 2025-01-16
 
 ### Fixed
