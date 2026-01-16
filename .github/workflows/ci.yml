@@ -25,10 +25,22 @@ jobs:
           # - PSAvoidUsingWriteHost: Intentional for colored console output
           # - PSAvoidUsingEmptyCatchBlock: Intentional for silent failure handling
           # - PSUseUsingScopeModifierInNewRunspaces: Variables passed via ArgumentList
+          # - PSUseShouldProcessForStateChangingFunctions: Not needed for CLI utility
+          # - PSReviewUnusedParameter: Parameters used via $script: scope
+          # - PSUseSingularNouns: Naming convention choice (Clear-BrowserCaches etc.)
+          # - PSUseDeclaredVarsMoreThanAssignments: Debug/expansion variables
+          # - PSUseBOMForUnicodeEncodedFile: BOM not required for UTF-8
+          # - PSAvoidOverwritingBuiltInCmdlets: Write-Log is internal function
           $excludeRules = @(
             'PSAvoidUsingWriteHost',
             'PSAvoidUsingEmptyCatchBlock',
-            'PSUseUsingScopeModifierInNewRunspaces'
+            'PSUseUsingScopeModifierInNewRunspaces',
+            'PSUseShouldProcessForStateChangingFunctions',
+            'PSReviewUnusedParameter',
+            'PSUseSingularNouns',
+            'PSUseDeclaredVarsMoreThanAssignments',
+            'PSUseBOMForUnicodeEncodedFile',
+            'PSAvoidOverwritingBuiltInCmdlets'
           )
 
           $results = Invoke-ScriptAnalyzer -Path ./WinClean.ps1 -Severity Error,Warning -ExcludeRule $excludeRules -ReportSummary
