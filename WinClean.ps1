@@ -1,5 +1,5 @@
 <#PSScriptInfo
-.VERSION 2.11
+.VERSION 2.12
 .GUID 8f7c3b2a-1d4e-5f6a-9b8c-0d1e2f3a4b5c
 .AUTHOR bivlked
 .COMPANYNAME
@@ -12,6 +12,7 @@
 .REQUIREDSCRIPTS
 .EXTERNALSCRIPTDEPENDENCIES
 .RELEASENOTES
+    v2.12: PS 7.4+ compatibility, improved statistics (Docker/WSL/RecycleBin), ReportOnly accuracy
     v2.11: Added timeouts for winget/DISM operations, fixed version display, improved reliability
     v2.10: Added auto-update check at startup (checks PSGallery for new version)
     v2.9: Fixed PSWindowsUpdate installation hanging (TLS 1.2, timeouts)
@@ -21,7 +22,7 @@
 
 <#
 .SYNOPSIS
-    WinClean - Ultimate Windows 11 Maintenance Script v2.11
+    WinClean - Ultimate Windows 11 Maintenance Script v2.12
 .DESCRIPTION
     Комплексный скрипт для обновления и очистки Windows 11:
     - Обновление Windows (включая драйверы)
@@ -35,8 +36,13 @@
     - Подробный цветной вывод + лог-файл
 .NOTES
     Author: biv
-    Version: 2.11
+    Version: 2.12
     Requires: PowerShell 7.1+, Windows 11, Administrator rights
+    Changes in 2.12:
+    - Fixed PS 7.4+ compatibility (removed deprecated -UseBasicParsing)
+    - Fixed DISM ReportOnly to show /ResetBase and warning
+    - Fixed AppUpdatesCount to only count successful updates
+    - Added statistics for Docker, WSL, Recycle Bin, npm cache
     Changes in 2.11:
     - Fixed version display bugs (banner and log showed v2.9 instead of current version)
     - Added timeouts for winget/DISM operations to prevent script hangs
@@ -210,7 +216,7 @@ if (-not $LogPath) {
 }
 
 # Script version (single source of truth for version checking)
-$script:Version = "2.11"
+$script:Version = "2.12"
 
 # Protected paths that should never be deleted
 $script:ProtectedPaths = @(
@@ -426,8 +432,9 @@ function Test-PSGalleryConnection {
     #>
     try {
         # Check PSGallery API endpoint (faster than main page)
+        # Note: -UseBasicParsing removed - it was deprecated in PS 6.0 and removed in PS 7.4+
         $response = Invoke-WebRequest -Uri "https://www.powershellgallery.com/api/v2" `
-            -TimeoutSec 10 -UseBasicParsing -ErrorAction Stop
+            -TimeoutSec 10 -ErrorAction Stop
         return $response.StatusCode -eq 200
     } catch {
         return $false
@@ -763,6 +770,38 @@ function Format-FileSize {
     if ($Bytes -ge 1MB) { return "{0:N2} MB" -f ($Bytes / 1MB) }
     if ($Bytes -ge 1KB) { return "{0:N2} KB" -f ($Bytes / 1KB) }
     return "$Bytes B"
+}
+
+function ConvertFrom-HumanReadableSize {
+    <#
+    .SYNOPSIS
+        Converts human-readable size string to bytes (inverse of Format-FileSize)
+    .EXAMPLE
+        ConvertFrom-HumanReadableSize "2.5 GB"  # Returns 2684354560
+        ConvertFrom-HumanReadableSize "512MB"   # Returns 536870912
+    #>
+    param([string]$SizeString)
+
+    if (-not $SizeString) { return 0 }
+
+    # Handle formats: "2.5 GB", "2.5GB", "512 MB", "100.5MB"
+    if ($SizeString -match '^([\d.,]+)\s*([KMGT]?B)$') {
+        $value = [double]($Matches[1] -replace ',', '.')
+        $unit = $Matches[2].ToUpper()
+
+        $multiplier = switch ($unit) {
+            'B'  { 1 }
+            'KB' { 1KB }
+            'MB' { 1MB }
+            'GB' { 1GB }
+            'TB' { 1TB }
+            default { 1 }
+        }
+
+        return [long]($value * $multiplier)
+    }
+
+    return 0
 }
 
 function Test-PathProtected {
@@ -1301,11 +1340,11 @@ function Update-Applications {
             return
         }
 
-        $script:Stats.AppUpdatesCount = $updateCount
-
         if ($upgradeProcess.ExitCode -eq 0) {
+            $script:Stats.AppUpdatesCount = $updateCount
             Write-Log "Application updates completed successfully" -Level SUCCESS
         } else {
+            # Don't count as successful updates if winget returned an error
             Write-Log "Application updates completed with code: $($upgradeProcess.ExitCode)" -Level WARNING
             $script:Stats.WarningsCount++
         }
@@ -1496,22 +1535,68 @@ function Clear-WindowsUpdateCache {
     }
 }
 
+function Get-RecycleBinSize {
+    <#
+    .SYNOPSIS
+        Gets the total size of items in the Recycle Bin
+    #>
+    $totalSize = [long]0
+    try {
+        $shell = New-Object -ComObject Shell.Application
+        $recycleBin = $shell.Namespace(0xA)
+        foreach ($item in $recycleBin.Items()) {
+            try {
+                # Try ExtendedProperty first (more reliable)
+                $itemSize = $item.ExtendedProperty("System.Size")
+                if ($itemSize) {
+                    $totalSize += [long]$itemSize
+                }
+            } catch {
+                # Ignore errors for individual items
+            }
+        }
+    } catch {
+        # Return 0 if we can't access recycle bin
+    }
+    return $totalSize
+}
+
 function Clear-WinCleanRecycleBin {
     <#
     .SYNOPSIS
-        Empties the Recycle Bin
+        Empties the Recycle Bin with size tracking
     #>
     Write-Log "Recycle Bin" -Level SECTION
 
+    # Measure size before cleanup
+    $sizeBefore = Get-RecycleBinSize
+
     if ($ReportOnly) {
-        Write-Log "Would clean: Recycle Bin" -Level DETAIL
+        if ($sizeBefore -gt 0) {
+            Write-Log "Would clean: Recycle Bin - $(Format-FileSize $sizeBefore)" -Level DETAIL
+        } else {
+            Write-Log "Recycle Bin is empty" -Level DETAIL
+        }
+        return
+    }
+
+    if ($sizeBefore -eq 0) {
+        Write-Log "Recycle Bin is already empty" -Level INFO
         return
     }
 
     try {
         # Use full cmdlet path to explicitly call the built-in cmdlet
         Microsoft.PowerShell.Management\Clear-RecycleBin -Force -ErrorAction Stop
-        Write-Log "Recycle Bin emptied" -Level SUCCESS
+
+        # Update statistics
+        $script:Stats.TotalFreedBytes += $sizeBefore
+        if (-not $script:Stats.FreedByCategory.ContainsKey("Recycle Bin")) {
+            $script:Stats.FreedByCategory["Recycle Bin"] = 0
+        }
+        $script:Stats.FreedByCategory["Recycle Bin"] += $sizeBefore
+
+        Write-Log "Recycle Bin emptied - $(Format-FileSize $sizeBefore)" -Level SUCCESS
     } catch {
         # Fallback to COM method
         try {
@@ -1524,7 +1609,14 @@ function Clear-WinCleanRecycleBin {
                 Remove-Item -LiteralPath $_.Path -Recurse -Force -ErrorAction SilentlyContinue
             }
 
-            Write-Log "Recycle Bin emptied ($count items)" -Level SUCCESS
+            # Update statistics even for fallback method
+            $script:Stats.TotalFreedBytes += $sizeBefore
+            if (-not $script:Stats.FreedByCategory.ContainsKey("Recycle Bin")) {
+                $script:Stats.FreedByCategory["Recycle Bin"] = 0
+            }
+            $script:Stats.FreedByCategory["Recycle Bin"] += $sizeBefore
+
+            Write-Log "Recycle Bin emptied ($count items) - $(Format-FileSize $sizeBefore)" -Level SUCCESS
         } catch {
             Write-Log "Could not empty Recycle Bin: $_" -Level WARNING
             $script:Stats.WarningsCount++
@@ -1948,8 +2040,21 @@ function Clear-DeveloperCaches {
             $npm = Get-Command npm -ErrorAction SilentlyContinue
             if ($npm) {
                 try {
+                    $sizeBefore = Get-FolderSize $npmCache
                     & npm cache clean --force 2>&1 | Out-Null
-                    Write-Log "npm cache cleaned (via npm)" -Level SUCCESS
+                    $sizeAfter = Get-FolderSize $npmCache
+                    $freed = $sizeBefore - $sizeAfter
+
+                    if ($freed -gt 0) {
+                        $script:Stats.TotalFreedBytes += $freed
+                        if (-not $script:Stats.FreedByCategory.ContainsKey("Developer")) {
+                            $script:Stats.FreedByCategory["Developer"] = 0
+                        }
+                        $script:Stats.FreedByCategory["Developer"] += $freed
+                        Write-Log "npm cache cleaned - $(Format-FileSize $freed)" -Level SUCCESS
+                    } else {
+                        Write-Log "npm cache cleaned (via npm)" -Level SUCCESS
+                    }
                 } catch {
                     Remove-FolderContent -Path $npmCache -Category "Developer" -Description "npm cache"
                 }
@@ -2076,9 +2181,20 @@ function Clear-DockerWSL {
                     Write-Log "Running docker system prune..." -Level INFO
                     $result = docker system prune -f 2>&1
 
-                    # Parse reclaimed space
-                    if ($result -match "reclaimed\s+([\d.]+\s*[KMGT]?B)") {
-                        Write-Log "Docker cleanup: $($Matches[1]) reclaimed" -Level SUCCESS
+                    # Parse reclaimed space and add to statistics
+                    if ($result -match "reclaimed\s+([\d.,]+\s*[KMGT]?B)") {
+                        $reclaimedStr = $Matches[1]
+                        $reclaimedBytes = ConvertFrom-HumanReadableSize $reclaimedStr
+
+                        Write-Log "Docker cleanup: $reclaimedStr reclaimed" -Level SUCCESS
+
+                        if ($reclaimedBytes -gt 0) {
+                            $script:Stats.TotalFreedBytes += $reclaimedBytes
+                            if (-not $script:Stats.FreedByCategory.ContainsKey("Docker")) {
+                                $script:Stats.FreedByCategory["Docker"] = 0
+                            }
+                            $script:Stats.FreedByCategory["Docker"] += $reclaimedBytes
+                        }
                     } else {
                         Write-Log "Docker cleanup completed" -Level SUCCESS
                     }
@@ -2151,6 +2267,10 @@ exit
                             if ($saved -gt 0) {
                                 Write-Log "Compacted $($vhdxFile.Name): $(Format-FileSize $saved) saved" -Level SUCCESS
                                 $script:Stats.TotalFreedBytes += $saved
+                                if (-not $script:Stats.FreedByCategory.ContainsKey("WSL")) {
+                                    $script:Stats.FreedByCategory["WSL"] = 0
+                                }
+                                $script:Stats.FreedByCategory["WSL"] += $saved
                             } else {
                                 Write-Log "Compacted $($vhdxFile.Name): no space saved" -Level INFO
                             }
@@ -2277,7 +2397,8 @@ function Invoke-DISMCleanup {
     Write-Log "Windows Component Cleanup (DISM)" -Level SECTION
 
     if ($ReportOnly) {
-        Write-Log "Would run: DISM /Online /Cleanup-Image /StartComponentCleanup" -Level DETAIL
+        Write-Log "Would run: DISM /Online /Cleanup-Image /StartComponentCleanup /ResetBase" -Level DETAIL
+        Write-Log "Note: /ResetBase removes ability to uninstall updates" -Level WARNING
         return
     }
 

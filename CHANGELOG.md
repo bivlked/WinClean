@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [2.12] - 2026-01-17
+
+### Fixed
+- **PowerShell 7.4+ compatibility**: Removed deprecated `-UseBasicParsing` parameter from `Invoke-WebRequest`
+  - This parameter was removed in PS 7.4 and caused errors during PSGallery connectivity check
+  - Now works correctly on all PowerShell 7.x versions
+
+- **DISM ReportOnly accuracy**: ReportOnly mode now correctly shows `/ResetBase` flag
+  - Added warning that `/ResetBase` removes ability to uninstall updates
+  - Previously the preview message didn't include `/ResetBase` which was misleading
+
+- **AppUpdatesCount accuracy**: Fixed inflated statistics when winget fails
+  - `AppUpdatesCount` is now only incremented when `winget upgrade` succeeds (exit code 0)
+  - Previously showed available updates count even when installation failed
+
+### Added
+- **Improved space freed statistics**:
+  - Docker cleanup: Now parses `docker system prune` output and adds reclaimed space to statistics
+  - WSL compaction: Now tracks freed space by category ("WSL")
+  - Recycle Bin: Now measures size before cleanup and shows in both ReportOnly preview and results
+  - npm cache: Now tracks size freed via `npm cache clean --force`
+
+- **New helper functions**:
+  - `ConvertFrom-HumanReadableSize`: Converts strings like "2.5 GB" to bytes (inverse of `Format-FileSize`)
+  - `Get-RecycleBinSize`: Measures total size of Recycle Bin items via Shell.Application COM
+
+### Improved
+- **ReportOnly mode**: Recycle Bin now shows actual size instead of generic "Would clean: Recycle Bin"
+
+---
+
 ## [2.11] - 2026-01-17
 
 ### Fixed
