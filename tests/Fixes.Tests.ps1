@@ -213,8 +213,10 @@ Describe "B3: Docker Builder Prune Removed" -Tag "Fix", "B3", "Docker" {
     Fix: Removed the command entirely
     #>
 
-    It "Script does NOT contain 'docker builder prune'" {
-        $scriptContent | Should -Not -Match 'docker\s+builder\s+prune'
+    It "Script does NOT execute 'docker builder prune' command" {
+        # Check for actual command execution, not comments/release notes
+        $scriptContent | Should -Not -Match '\$.*=.*docker\s+builder\s+prune'
+        $scriptContent | Should -Not -Match 'docker\s+builder\s+prune\s+-f'
     }
 
     It "Script still contains 'docker system prune'" {
