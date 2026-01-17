@@ -123,9 +123,11 @@ $script:ProtectedPaths = @(...)    # Защищённые пути (никогд
 ### Публикация в PSGallery
 
 ```powershell
-# API ключ хранится отдельно (не в репозитории!)
-Publish-PSResource -Path .\WinClean.ps1 -Repository PSGallery -ApiKey $key
+# API ключ хранится в переменной окружения PSGALLERY_API_KEY (User scope)
+Publish-PSResource -Path .\WinClean.ps1 -Repository PSGallery -ApiKey $env:PSGALLERY_API_KEY
 ```
+
+**Где хранится ключ:** переменная окружения `PSGALLERY_API_KEY` (User scope)
 
 ### Стиль кода
 
