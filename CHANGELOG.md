@@ -7,6 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [2.13] - 2026-01-18
+
+### Fixed
+- **Docker statistics parsing**: Fixed regex to support both "reclaimed X" and "Total reclaimed space: X" output formats
+  - Docker cleanup now correctly reports freed space in all Docker versions
+
+- **Event logs WarningsCount**: Fixed missing `WarningsCount++` when some event logs fail to clear
+  - Previously the warning was logged but not counted in final statistics
+
+- **Windows Update false success**: Added null-check for `Install-WindowsUpdate` results
+  - Prevents misleading "All 0 updates installed successfully" when module returns null
+
+- **Temp files deduplication**: Fixed duplicate processing when `$env:TEMP` equals `$env:LOCALAPPDATA\Temp`
+  - Paths are now normalized and deduplicated before cleanup
+
+- **Browser cache negative values**: Fixed potential negative freed space calculation
+  - Uses `[math]::Max(0, ...)` to prevent incorrect statistics when browser recreates files during cleanup
+
+### Improved
+- **Get-FolderSize performance**: Added `-File` flag to `Get-ChildItem` to skip directories
+  - Significantly faster on large directory trees
+
+- **Docker cleanup efficiency**: Removed redundant `docker builder prune -f` command
+  - Build cache is already cleaned by `docker system prune -f`
+
+- **Recycle Bin size fallback**: Added `GetDetailsOf` fallback when `ExtendedProperty("System.Size")` is unavailable
+  - More reliable size calculation across different Windows configurations
+
+- **Disk Cleanup registry cleanup**: StateFlags9999 are now removed from registry after cleanmgr execution
+  - Uses `try/finally` to ensure cleanup even if cleanmgr times out
+
+---
+
 ## [2.12] - 2026-01-17
 
 ### Fixed

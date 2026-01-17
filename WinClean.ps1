@@ -1,5 +1,5 @@
 <#PSScriptInfo
-.VERSION 2.12
+.VERSION 2.13
 .GUID 8f7c3b2a-1d4e-5f6a-9b8c-0d1e2f3a4b5c
 .AUTHOR bivlked
 .COMPANYNAME
@@ -12,17 +12,17 @@
 .REQUIREDSCRIPTS
 .EXTERNALSCRIPTDEPENDENCIES
 .RELEASENOTES
+    v2.13: Statistics accuracy fixes, efficiency improvements, registry cleanup
     v2.12: PS 7.4+ compatibility, improved statistics (Docker/WSL/RecycleBin), ReportOnly accuracy
     v2.11: Added timeouts for winget/DISM operations, fixed version display, improved reliability
     v2.10: Added auto-update check at startup (checks PSGallery for new version)
     v2.9: Fixed PSWindowsUpdate installation hanging (TLS 1.2, timeouts)
-    v2.8: Fixed Disk Cleanup timeout issues
 .PRIVATEDATA
 #>
 
 <#
 .SYNOPSIS
-    WinClean - Ultimate Windows 11 Maintenance Script v2.12
+    WinClean - Ultimate Windows 11 Maintenance Script v2.13
 .DESCRIPTION
     Комплексный скрипт для обновления и очистки Windows 11:
     - Обновление Windows (включая драйверы)
@@ -36,8 +36,18 @@
     - Подробный цветной вывод + лог-файл
 .NOTES
     Author: biv
-    Version: 2.12
+    Version: 2.13
     Requires: PowerShell 7.1+, Windows 11, Administrator rights
+    Changes in 2.13:
+    - Fixed Docker prune output parsing (supports "Total reclaimed space:" format)
+    - Fixed WarningsCount not incrementing for event log failures
+    - Fixed false "success" when Windows Update returns null results
+    - Optimized Get-FolderSize with -File flag for better performance
+    - Fixed temp path deduplication to avoid duplicate cleanups
+    - Removed redundant docker builder prune (already included in system prune)
+    - Fixed potential negative freed space in browser cache statistics
+    - Added fallback for Recycle Bin size calculation via GetDetailsOf
+    - Added registry cleanup for Disk Cleanup StateFlags after execution
     Changes in 2.12:
     - Fixed PS 7.4+ compatibility (removed deprecated -UseBasicParsing)
     - Fixed DISM ReportOnly to show /ResetBase and warning
@@ -216,7 +226,7 @@ if (-not $LogPath) {
 }
 
 # Script version (single source of truth for version checking)
-$script:Version = "2.12"
+$script:Version = "2.13"
 
 # Protected paths that should never be deleted
 $script:ProtectedPaths = @(
@@ -751,7 +761,7 @@ function Get-FolderSize {
     }
 
     try {
-        $size = (Get-ChildItem -LiteralPath $Path -Recurse -Force -ErrorAction SilentlyContinue |
+        $size = (Get-ChildItem -LiteralPath $Path -Recurse -Force -File -ErrorAction SilentlyContinue |
                  Measure-Object -Property Length -Sum -ErrorAction SilentlyContinue).Sum
         return [long]($size ?? 0)
     } catch {
@@ -1164,6 +1174,13 @@ function Update-WindowsSystem {
 
         $results = Install-WindowsUpdate @installParams
 
+        # Handle null/empty results (possible silent error)
+        if (-not $results) {
+            Write-Log "Windows Update returned no results (possible error)" -Level WARNING
+            $script:Stats.WarningsCount++
+            return
+        }
+
         # Count installed updates
         $installed = @($results | Where-Object { $_.Result -in @('Installed', 'Downloaded') }).Count
         $failed = @($results | Where-Object { $_.Result -eq 'Failed' }).Count
@@ -1368,11 +1385,15 @@ function Clear-TempFiles {
     #>
     Write-Log "Temporary Files" -Level SECTION
 
+    # Define temp paths and remove duplicates (e.g., $env:TEMP often equals $env:LOCALAPPDATA\Temp)
     $tempPaths = @(
         @{ Path = $env:TEMP; Desc = "User Temp" }
         @{ Path = "$env:SystemRoot\Temp"; Desc = "Windows Temp" }
         @{ Path = "$env:LOCALAPPDATA\Temp"; Desc = "Local Temp" }
-    )
+    ) | ForEach-Object {
+        $_.Path = [System.IO.Path]::GetFullPath($_.Path)
+        $_
+    } | Group-Object Path | ForEach-Object { $_.Group[0] }
 
     foreach ($item in $tempPaths) {
         Remove-FolderContent -Path $item.Path -Category "Temp" -Description $item.Desc
@@ -1480,7 +1501,8 @@ function Clear-BrowserCaches {
             # Measure size after cleanup to get actual freed space
             $sizeAfter = ($allPaths | ForEach-Object { Get-FolderSize -Path $_.Path } | Measure-Object -Sum).Sum
             $sizeAfter = [long]($sizeAfter ?? 0)  # Ensure non-null value
-            $freedSpace = $sizeBefore - $sizeAfter
+            # Protect against negative values (can happen if browser recreates files during cleanup)
+            $freedSpace = [math]::Max(0, $sizeBefore - $sizeAfter)
 
             # Update statistics with actual freed space (not estimated)
             if ($freedSpace -gt 0) {
@@ -1489,9 +1511,10 @@ function Clear-BrowserCaches {
                     $script:Stats.FreedByCategory["Browser"] = 0
                 }
                 $script:Stats.FreedByCategory["Browser"] += $freedSpace
+                Write-Log "Browser caches cleaned ($browserNames) - $(Format-FileSize $freedSpace)" -Level SUCCESS
+            } else {
+                Write-Log "Browser caches cleaned ($browserNames)" -Level SUCCESS
             }
-
-            Write-Log "Browser caches cleaned ($browserNames) - $(Format-FileSize $freedSpace)" -Level SUCCESS
         }
     }
 
@@ -1550,6 +1573,12 @@ function Get-RecycleBinSize {
                 $itemSize = $item.ExtendedProperty("System.Size")
                 if ($itemSize) {
                     $totalSize += [long]$itemSize
+                } else {
+                    # Fallback: try GetDetailsOf (index 2 = Size column)
+                    $sizeStr = $recycleBin.GetDetailsOf($item, 2)
+                    if ($sizeStr) {
+                        $totalSize += ConvertFrom-HumanReadableSize $sizeStr
+                    }
                 }
             } catch {
                 # Ignore errors for individual items
@@ -1706,6 +1735,7 @@ function Clear-EventLogs {
 
         if ($failedCount -gt 0) {
             Write-Log "Event logs cleared: $clearedCount, failed: $failedCount" -Level WARNING
+            $script:Stats.WarningsCount++
         } else {
             Write-Log "Event logs cleared ($clearedCount logs)" -Level SUCCESS
         }
@@ -2182,7 +2212,8 @@ function Clear-DockerWSL {
                     $result = docker system prune -f 2>&1
 
                     # Parse reclaimed space and add to statistics
-                    if ($result -match "reclaimed\s+([\d.,]+\s*[KMGT]?B)") {
+                    # Supports both "reclaimed 1.23GB" and "Total reclaimed space: 1.23GB" formats
+                    if ($result -match "reclaimed\s+(?:space:\s*)?([\d.,]+\s*[KMGT]?B)") {
                         $reclaimedStr = $Matches[1]
                         $reclaimedBytes = ConvertFrom-HumanReadableSize $reclaimedStr
 
@@ -2199,9 +2230,7 @@ function Clear-DockerWSL {
                         Write-Log "Docker cleanup completed" -Level SUCCESS
                     }
 
-                    # Also clean build cache
-                    docker builder prune -f 2>&1 | Out-Null
-                    Write-Log "Docker build cache cleaned" -Level SUCCESS
+                    # Note: docker system prune -f already includes build cache cleanup
 
                 } catch {
                     Write-Log "Docker cleanup error: $_" -Level WARNING
@@ -2515,37 +2544,48 @@ function Invoke-StorageSense {
             "Windows Upgrade Log Files", "Windows ESD installation files"
         )
 
-        foreach ($category in $categories) {
-            $categoryPath = Join-Path $regPath $category
-            if (Test-Path $categoryPath) {
-                Set-ItemProperty -Path $categoryPath -Name "StateFlags$sageset" -Value 2 -Type DWord -Force -ErrorAction SilentlyContinue
+        try {
+            # Set StateFlags for cleanup categories
+            foreach ($category in $categories) {
+                $categoryPath = Join-Path $regPath $category
+                if (Test-Path $categoryPath) {
+                    Set-ItemProperty -Path $categoryPath -Name "StateFlags$sageset" -Value 2 -Type DWord -Force -ErrorAction SilentlyContinue
+                }
             }
-        }
 
-        # Run cleanmgr with progress feedback and reasonable timeout
-        $cleanmgr = Start-Process -FilePath "cleanmgr.exe" -ArgumentList "/sagerun:$sageset" `
-            -WindowStyle Hidden -PassThru
+            # Run cleanmgr with progress feedback and reasonable timeout
+            $cleanmgr = Start-Process -FilePath "cleanmgr.exe" -ArgumentList "/sagerun:$sageset" `
+                -WindowStyle Hidden -PassThru
 
-        $maxWait = 420  # 7 minutes max (was 10 minutes)
-        $elapsed = 0
-        $checkInterval = 10
+            $maxWait = 420  # 7 minutes max (was 10 minutes)
+            $elapsed = 0
+            $checkInterval = 10
 
-        while (-not $cleanmgr.HasExited -and $elapsed -lt $maxWait) {
-            Start-Sleep -Seconds $checkInterval
-            $elapsed += $checkInterval
+            while (-not $cleanmgr.HasExited -and $elapsed -lt $maxWait) {
+                Start-Sleep -Seconds $checkInterval
+                $elapsed += $checkInterval
 
-            # Log progress every minute
-            if ($elapsed % 60 -eq 0) {
-                Write-Log "Disk Cleanup still running... ($elapsed seconds)" -Level INFO
+                # Log progress every minute
+                if ($elapsed % 60 -eq 0) {
+                    Write-Log "Disk Cleanup still running... ($elapsed seconds)" -Level INFO
+                }
             }
-        }
 
-        if (-not $cleanmgr.HasExited) {
-            $cleanmgr | Stop-Process -Force -ErrorAction SilentlyContinue
-            Write-Log "Disk Cleanup timed out after $maxWait seconds" -Level WARNING
-            $script:Stats.WarningsCount++
-        } else {
-            Write-Log "Disk Cleanup completed" -Level SUCCESS
+            if (-not $cleanmgr.HasExited) {
+                $cleanmgr | Stop-Process -Force -ErrorAction SilentlyContinue
+                Write-Log "Disk Cleanup timed out after $maxWait seconds" -Level WARNING
+                $script:Stats.WarningsCount++
+            } else {
+                Write-Log "Disk Cleanup completed" -Level SUCCESS
+            }
+        } finally {
+            # Cleanup: remove StateFlags to avoid leaving traces in registry
+            foreach ($category in $categories) {
+                $categoryPath = Join-Path $regPath $category
+                if (Test-Path $categoryPath) {
+                    Remove-ItemProperty -Path $categoryPath -Name "StateFlags$sageset" -Force -ErrorAction SilentlyContinue
+                }
+            }
         }
     }
 }
