@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [2.10] - 2026-01-17
+
+### Added
+- **Auto-update check at startup**: Script now checks PowerShell Gallery for newer version
+  - Runs after reboot check, before main operations
+  - Shows current vs available version with visual comparison
+  - Prompts user to update if newer version available
+  - Performs update via `Update-Script` if user confirms
+  - Shows manual installation instructions if script was downloaded manually (not via PSGallery)
+  - Respects `-ReportOnly` mode (informs but doesn't update)
+  - Gracefully skips in non-interactive environments
+
+### Technical
+- `Test-ScriptUpdate` function: compares `$script:Version` with PSGallery version
+- `Invoke-ScriptUpdate` function: handles UI, user prompt, and update execution
+- Uses existing `Test-PSGalleryConnection` for connectivity check
+
+---
+
 ## [2.9] - 2026-01-17
 
 ### Fixed

@@ -1,5 +1,5 @@
 <#PSScriptInfo
-.VERSION 2.9
+.VERSION 2.10
 .GUID 8f7c3b2a-1d4e-5f6a-9b8c-0d1e2f3a4b5c
 .AUTHOR bivlked
 .COMPANYNAME
@@ -12,6 +12,7 @@
 .REQUIREDSCRIPTS
 .EXTERNALSCRIPTDEPENDENCIES
 .RELEASENOTES
+    v2.10: Added auto-update check at startup (checks PSGallery for new version)
     v2.9: Fixed PSWindowsUpdate installation hanging (TLS 1.2, timeouts)
     v2.8: Fixed Disk Cleanup timeout issues
     v2.7: UI improvements for final statistics
@@ -20,7 +21,7 @@
 
 <#
 .SYNOPSIS
-    WinClean - Ultimate Windows 11 Maintenance Script v2.9
+    WinClean - Ultimate Windows 11 Maintenance Script v2.10
 .DESCRIPTION
     Комплексный скрипт для обновления и очистки Windows 11:
     - Обновление Windows (включая драйверы)
@@ -34,8 +35,15 @@
     - Подробный цветной вывод + лог-файл
 .NOTES
     Author: biv
-    Version: 2.9
+    Version: 2.10
     Requires: PowerShell 7.1+, Windows 11, Administrator rights
+    Changes in 2.10:
+    - Added auto-update check: script checks PSGallery for newer version at startup
+    - Added Test-ScriptUpdate function: compares local version with PSGallery
+    - Added Invoke-ScriptUpdate function: prompts user and performs update if confirmed
+    - Update check runs after reboot check, before main operations
+    - Shows manual update instructions if script was downloaded manually (not via PSGallery)
+    - Respects ReportOnly mode and non-interactive environments
     Changes in 2.9:
     - Fixed PSWindowsUpdate installation hanging: added TLS 1.2 enforcement
     - Added Test-PSGalleryConnection function: pre-checks PowerShell Gallery availability
@@ -195,6 +203,9 @@ if (-not $LogPath) {
 } else {
     $script:LogPath = $LogPath
 }
+
+# Script version (single source of truth for version checking)
+$script:Version = "2.10"
 
 # Protected paths that should never be deleted
 $script:ProtectedPaths = @(
@@ -415,6 +426,135 @@ function Test-PSGalleryConnection {
         return $response.StatusCode -eq 200
     } catch {
         return $false
+    }
+}
+
+function Test-ScriptUpdate {
+    <#
+    .SYNOPSIS
+        Проверяет наличие обновлений WinClean в PowerShell Gallery
+    .DESCRIPTION
+        Сравнивает текущую версию скрипта с последней версией в PowerShell Gallery.
+        Проверяет, был ли скрипт установлен через PSGallery (для возможности автообновления).
+    .OUTPUTS
+        [hashtable] с информацией об обновлении или $null если обновление не требуется
+    #>
+    # Check if we can reach PSGallery
+    if (-not (Test-PSGalleryConnection)) {
+        return $null
+    }
+
+    try {
+        $currentVersion = [Version]$script:Version
+
+        # Query PSGallery for latest version
+        $galleryScript = Find-Script -Name "WinClean" -Repository PSGallery -ErrorAction Stop
+        $latestVersion = [Version]$galleryScript.Version
+
+        if ($latestVersion -gt $currentVersion) {
+            # Check if installed via PSGallery (for auto-update capability)
+            $installedScript = Get-InstalledScript -Name "WinClean" -ErrorAction SilentlyContinue
+
+            return @{
+                CurrentVersion = $currentVersion.ToString()
+                LatestVersion  = $latestVersion.ToString()
+                IsInstalled    = $null -ne $installedScript
+                ReleaseNotes   = $galleryScript.ReleaseNotes
+            }
+        }
+    } catch {
+        # Silently fail - update check is not critical
+        Write-Log "Update check failed: $_" -Level WARNING
+    }
+
+    return $null
+}
+
+function Invoke-ScriptUpdate {
+    <#
+    .SYNOPSIS
+        Предлагает пользователю обновить WinClean и выполняет обновление при подтверждении
+    .PARAMETER UpdateInfo
+        Хэштаблица с информацией об обновлении от Test-ScriptUpdate
+    #>
+    param(
+        [Parameter(Mandatory)]
+        [hashtable]$UpdateInfo
+    )
+
+    Write-Host ""
+    Write-Host "  ╔══════════════════════════════════════════════════════════════════╗" -ForegroundColor Cyan
+    Write-Host "  ║                      " -NoNewline -ForegroundColor Cyan
+    Write-Host "UPDATE AVAILABLE" -NoNewline -ForegroundColor Yellow
+    Write-Host "                         ║" -ForegroundColor Cyan
+    Write-Host "  ╚══════════════════════════════════════════════════════════════════╝" -ForegroundColor Cyan
+    Write-Host ""
+    Write-Host "  Current version: " -NoNewline -ForegroundColor Gray
+    Write-Host "v$($UpdateInfo.CurrentVersion)" -ForegroundColor White
+    Write-Host "  Latest version:  " -NoNewline -ForegroundColor Gray
+    Write-Host "v$($UpdateInfo.LatestVersion)" -NoNewline -ForegroundColor Green
+    Write-Host " (new)" -ForegroundColor DarkGreen
+    Write-Host ""
+
+    Write-Log "Update available: v$($UpdateInfo.CurrentVersion) -> v$($UpdateInfo.LatestVersion)" -Level INFO
+
+    # In ReportOnly mode, just inform and continue
+    if ($ReportOnly) {
+        Write-Host "  ReportOnly mode - skipping update" -ForegroundColor DarkGray
+        Write-Host ""
+        return
+    }
+
+    # Check if interactive console is available
+    if (-not (Test-InteractiveConsole)) {
+        Write-Host "  Non-interactive mode - skipping update prompt" -ForegroundColor DarkGray
+        Write-Host "  To update manually: Update-Script -Name WinClean" -ForegroundColor Gray
+        Write-Host ""
+        return
+    }
+
+    if ($UpdateInfo.IsInstalled) {
+        # Installed via PSGallery - can auto-update
+        Write-Host "  Update now? (" -NoNewline -ForegroundColor Gray
+        Write-Host "Y" -NoNewline -ForegroundColor Green
+        Write-Host "/n): " -NoNewline -ForegroundColor Gray
+
+        $response = Read-Host
+        if ($response -eq '' -or $response -imatch '^[YyДд]') {
+            Write-Host ""
+            Write-Host "  Updating WinClean..." -ForegroundColor Cyan
+
+            try {
+                Update-Script -Name WinClean -Force -ErrorAction Stop
+                Write-Log "Update successful" -Level SUCCESS
+                Write-Host ""
+                Write-Host "  ✓ Update complete!" -ForegroundColor Green
+                Write-Host "  Please run WinClean again to use the new version." -ForegroundColor Gray
+                Write-Host ""
+                Write-Host "  Press any key to exit..." -ForegroundColor DarkGray
+                $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
+                exit 0
+            } catch {
+                Write-Log "Update failed: $_" -Level ERROR
+                Write-Host "  ✗ Update failed: $_" -ForegroundColor Red
+                Write-Host "  Continuing with current version..." -ForegroundColor Yellow
+                Write-Host ""
+            }
+        } else {
+            Write-Log "Update skipped by user" -Level INFO
+            Write-Host "  Update skipped. Continuing with current version..." -ForegroundColor DarkGray
+            Write-Host ""
+        }
+    } else {
+        # Not installed via PSGallery - show manual instructions
+        Write-Host "  WinClean was not installed via PowerShell Gallery." -ForegroundColor Yellow
+        Write-Host "  To enable auto-updates, install with:" -ForegroundColor Gray
+        Write-Host ""
+        Write-Host "    Install-Script -Name WinClean -Scope CurrentUser -Force" -ForegroundColor White
+        Write-Host ""
+        Write-Host "  Press any key to continue with current version..." -ForegroundColor DarkGray
+        $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
+        Write-Host ""
     }
 }
 
@@ -2478,6 +2618,12 @@ function Start-WinClean {
             Write-Host "  Non-interactive mode - continuing despite pending reboot." -ForegroundColor Yellow
         }
         Write-Host ""
+    }
+
+    # Check for script updates
+    $updateInfo = Test-ScriptUpdate
+    if ($updateInfo) {
+        Invoke-ScriptUpdate -UpdateInfo $updateInfo
     }
 
     try {
