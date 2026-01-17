@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [2.11] - 2026-01-17
+
+### Fixed
+- **Version display bugs**: Fixed hardcoded version strings that showed v2.9 instead of current version
+  - Banner now uses dynamic `$script:Version` variable
+  - Log file header now uses dynamic version
+  - Removed outdated version comments from code
+
+- **Outdated comment**: Updated comment in `Clear-WinCleanRecycleBin` that incorrectly stated name collision issue
+
+### Added
+- **Operation timeouts to prevent script hangs**:
+  - `winget upgrade --include-unknown` (check): 5-minute timeout
+  - `winget upgrade --all` (install): 20-minute timeout
+  - `winget source update`: 2-minute timeout (via background job)
+  - `DISM /StartComponentCleanup`: 15-minute timeout
+  - `Storage Sense`: Added force stop when timeout exceeded
+
+### Improved
+- **Docker detection**: `$LASTEXITCODE` now captured immediately after command execution
+- **Browser cache statistics**: Added null-coalescing to prevent calculation errors
+- **PowerShell path**: Removed hardcoded path, now uses system PATH lookup
+- **Code quality**: Added explanatory comments to intentionally empty catch blocks
+
+---
+
 ## [2.10] - 2026-01-17
 
 ### Added

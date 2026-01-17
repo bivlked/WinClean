@@ -1,5 +1,5 @@
 <#PSScriptInfo
-.VERSION 2.10
+.VERSION 2.11
 .GUID 8f7c3b2a-1d4e-5f6a-9b8c-0d1e2f3a4b5c
 .AUTHOR bivlked
 .COMPANYNAME
@@ -12,16 +12,16 @@
 .REQUIREDSCRIPTS
 .EXTERNALSCRIPTDEPENDENCIES
 .RELEASENOTES
+    v2.11: Added timeouts for winget/DISM operations, fixed version display, improved reliability
     v2.10: Added auto-update check at startup (checks PSGallery for new version)
     v2.9: Fixed PSWindowsUpdate installation hanging (TLS 1.2, timeouts)
     v2.8: Fixed Disk Cleanup timeout issues
-    v2.7: UI improvements for final statistics
 .PRIVATEDATA
 #>
 
 <#
 .SYNOPSIS
-    WinClean - Ultimate Windows 11 Maintenance Script v2.10
+    WinClean - Ultimate Windows 11 Maintenance Script v2.11
 .DESCRIPTION
     Комплексный скрипт для обновления и очистки Windows 11:
     - Обновление Windows (включая драйверы)
@@ -35,8 +35,13 @@
     - Подробный цветной вывод + лог-файл
 .NOTES
     Author: biv
-    Version: 2.10
+    Version: 2.11
     Requires: PowerShell 7.1+, Windows 11, Administrator rights
+    Changes in 2.11:
+    - Fixed version display bugs (banner and log showed v2.9 instead of current version)
+    - Added timeouts for winget/DISM operations to prevent script hangs
+    - Added force stop for Storage Sense when timeout exceeded
+    - Improved Docker detection and browser cache statistics reliability
     Changes in 2.10:
     - Added auto-update check: script checks PSGallery for newer version at startup
     - Added Test-ScriptUpdate function: compares local version with PSGallery
@@ -205,7 +210,7 @@ if (-not $LogPath) {
 }
 
 # Script version (single source of truth for version checking)
-$script:Version = "2.10"
+$script:Version = "2.11"
 
 # Protected paths that should never be deleted
 $script:ProtectedPaths = @(
@@ -942,7 +947,8 @@ function New-SystemRestorePoint {
             }
 "@
 
-        $result = & "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" `
+        # Use Windows PowerShell 5.1 (Checkpoint-Computer not available in PS7)
+        $result = & powershell.exe `
             -NoProfile -NoLogo -ExecutionPolicy Bypass -Command $scriptBlock 2>&1
 
         if ($result -like "SUCCESS*") {
@@ -1014,7 +1020,7 @@ function Update-WindowsSystem {
             # Clear any lingering progress bar before module installation
             Write-Progress -Activity "Windows Update" -Completed -ErrorAction SilentlyContinue
 
-            # Check PowerShell Gallery availability first (v2.9)
+            # Check PowerShell Gallery availability first
             Write-Log "Checking PowerShell Gallery availability..." -Level INFO
             if (-not (Test-PSGalleryConnection)) {
                 Write-Log "PowerShell Gallery is unavailable" -Level ERROR
@@ -1026,7 +1032,7 @@ function Update-WindowsSystem {
 
             Write-Log "Installing PSWindowsUpdate module..." -Level INFO
 
-            # Ensure NuGet provider with timeout (v2.9)
+            # Ensure NuGet provider with timeout
             $nuget = Get-PackageProvider -Name NuGet -ErrorAction SilentlyContinue
             if (-not $nuget -or $nuget.Version -lt [version]"2.8.5.201") {
                 Write-Log "Installing NuGet provider..." -Level INFO
@@ -1039,7 +1045,7 @@ function Update-WindowsSystem {
                 Write-Log "NuGet provider installed" -Level SUCCESS
             }
 
-            # Install PSWindowsUpdate module with timeout (v2.9)
+            # Install PSWindowsUpdate module with timeout
             if (-not (Install-ModuleWithTimeout -ModuleName "PSWindowsUpdate" -TimeoutSeconds 120)) {
                 Write-Log "Failed to install PSWindowsUpdate - Windows Update skipped" -Level ERROR
                 Write-Log "Try manual installation: Install-Module PSWindowsUpdate -Force -Scope CurrentUser" -Level INFO
@@ -1188,7 +1194,14 @@ function Update-Applications {
         # Update sources only if not in ReportOnly mode (source update modifies state)
         if (-not $ReportOnly) {
             Write-Log "Updating winget sources..." -Level INFO
-            & $wingetPath source update 2>&1 | Out-Null
+            # Run with timeout to prevent hanging
+            $job = Start-Job -ScriptBlock { param($path) & $path source update 2>&1 } -ArgumentList $wingetPath
+            $completed = $job | Wait-Job -Timeout 120  # 2 minutes timeout
+            if (-not $completed) {
+                $job | Stop-Job
+                Write-Log "Winget source update timed out" -Level WARNING
+            }
+            $job | Remove-Job -Force -ErrorAction SilentlyContinue
         }
 
         # Get available updates (use --include-unknown to match actual upgrade behavior)
@@ -1197,7 +1210,17 @@ function Update-Applications {
         $tempFile = [System.IO.Path]::GetTempFileName()
         $tempErrorFile = [System.IO.Path]::GetTempFileName()
         $process = Start-Process -FilePath $wingetPath -ArgumentList "upgrade", "--include-unknown" `
-            -NoNewWindow -RedirectStandardOutput $tempFile -RedirectStandardError $tempErrorFile -PassThru -Wait
+            -NoNewWindow -RedirectStandardOutput $tempFile -RedirectStandardError $tempErrorFile -PassThru
+
+        # Wait with timeout (5 minutes for check operation)
+        $timeoutMs = 300000
+        if (-not $process.WaitForExit($timeoutMs)) {
+            $process.Kill()
+            Write-Log "Winget upgrade check timed out after 5 minutes" -Level WARNING
+            $script:Stats.WarningsCount++
+            Remove-Item $tempFile, $tempErrorFile -Force -ErrorAction SilentlyContinue
+            return
+        }
 
         $output = Get-Content $tempFile -Raw -Encoding UTF8 -ErrorAction SilentlyContinue
         $errorOutput = Get-Content $tempErrorFile -Raw -Encoding UTF8 -ErrorAction SilentlyContinue
@@ -1267,7 +1290,16 @@ function Update-Applications {
         )
 
         $upgradeProcess = Start-Process -FilePath $wingetPath -ArgumentList $upgradeArgs `
-            -NoNewWindow -PassThru -Wait
+            -NoNewWindow -PassThru
+
+        # Wait with timeout (20 minutes for upgrade operation - can take long with many updates)
+        $timeoutMs = 1200000
+        if (-not $upgradeProcess.WaitForExit($timeoutMs)) {
+            $upgradeProcess.Kill()
+            Write-Log "Winget upgrade timed out after 20 minutes" -Level WARNING
+            $script:Stats.WarningsCount++
+            return
+        }
 
         $script:Stats.AppUpdatesCount = $updateCount
 
@@ -1408,6 +1440,7 @@ function Clear-BrowserCaches {
 
             # Measure size after cleanup to get actual freed space
             $sizeAfter = ($allPaths | ForEach-Object { Get-FolderSize -Path $_.Path } | Measure-Object -Sum).Sum
+            $sizeAfter = [long]($sizeAfter ?? 0)  # Ensure non-null value
             $freedSpace = $sizeBefore - $sizeAfter
 
             # Update statistics with actual freed space (not estimated)
@@ -1476,7 +1509,7 @@ function Clear-WinCleanRecycleBin {
     }
 
     try {
-        # Use full cmdlet path to avoid recursion (our function has same name as cmdlet)
+        # Use full cmdlet path to explicitly call the built-in cmdlet
         Microsoft.PowerShell.Management\Clear-RecycleBin -Force -ErrorAction Stop
         Write-Log "Recycle Bin emptied" -Level SUCCESS
     } catch {
@@ -2028,8 +2061,11 @@ function Clear-DockerWSL {
         $dockerRunning = $false
         try {
             $dockerInfo = docker info 2>&1
-            $dockerRunning = $LASTEXITCODE -eq 0
-        } catch { }
+            $exitCode = $LASTEXITCODE  # Capture immediately after command
+            $dockerRunning = $exitCode -eq 0
+        } catch {
+            # Docker command failed to execute (not installed or path issue)
+        }
 
         if ($dockerRunning) {
             if ($ReportOnly) {
@@ -2250,7 +2286,16 @@ function Invoke-DISMCleanup {
     try {
         $dismProcess = Start-Process -FilePath "$env:SystemRoot\System32\Dism.exe" `
             -ArgumentList "/Online", "/Cleanup-Image", "/StartComponentCleanup", "/ResetBase" `
-            -NoNewWindow -PassThru -Wait
+            -NoNewWindow -PassThru
+
+        # Wait with timeout (15 minutes for DISM operation)
+        $timeoutMs = 900000
+        if (-not $dismProcess.WaitForExit($timeoutMs)) {
+            $dismProcess.Kill()
+            Write-Log "DISM cleanup timed out after 15 minutes" -Level WARNING
+            $script:Stats.WarningsCount++
+            return
+        }
 
         switch ($dismProcess.ExitCode) {
             0       { Write-Log "DISM cleanup completed successfully" -Level SUCCESS }
@@ -2321,7 +2366,13 @@ function Invoke-StorageSense {
         }
 
         if ($elapsed -ge $timeout) {
-            Write-Log "Storage Sense timed out after $timeout seconds (may still be running)" -Level WARNING
+            Write-Log "Storage Sense timed out after $timeout seconds" -Level WARNING
+            # Force stop the task if still running
+            $task = Get-ScheduledTask -TaskPath $ssTaskPath -TaskName $ssTaskName -ErrorAction SilentlyContinue
+            if ($task -and $task.State -eq 'Running') {
+                Stop-ScheduledTask -TaskPath $ssTaskPath -TaskName $ssTaskName -ErrorAction SilentlyContinue
+                Write-Log "Storage Sense task stopped" -Level INFO
+            }
             $script:Stats.WarningsCount++
         }
     } else {
@@ -2398,7 +2449,7 @@ function Show-Banner {
   ║     ╚██████╗███████╗███████╗██║  ██║██║ ╚████║                       ║
   ║      ╚═════╝╚══════╝╚══════╝╚═╝  ╚═╝╚═╝  ╚═══╝                       ║
   ║                                                                      ║
-  ║            Ultimate Windows 11 Maintenance Script v2.9               ║
+  ║            Ultimate Windows 11 Maintenance Script v$($script:Version)              ║
   ║                                                                      ║
   ╚══════════════════════════════════════════════════════════════════════╝
 
@@ -2573,7 +2624,7 @@ function Show-FinalStatistics {
 
 function Start-WinClean {
     # Initialize log
-    "WinClean v2.9 - Started at $(Get-Date)" | Out-File -FilePath $script:LogPath -Encoding utf8
+    "WinClean v$($script:Version) - Started at $(Get-Date)" | Out-File -FilePath $script:LogPath -Encoding utf8
     "=" * 70 | Out-File -FilePath $script:LogPath -Append -Encoding utf8
 
     # Enable TLS 1.2 for all HTTPS connections (required by PowerShell Gallery, NuGet, etc.)
