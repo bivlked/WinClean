@@ -7,11 +7,11 @@
 ### Комплексный скрипт обслуживания Windows 11
 
 [![Версия](https://img.shields.io/badge/версия-2.9-blue.svg)](https://github.com/bivlked/WinClean/releases)
+[![PSGallery](https://img.shields.io/powershellgallery/v/WinClean?label=PSGallery&logo=powershell&logoColor=white)](https://www.powershellgallery.com/packages/WinClean)
 [![CI](https://github.com/bivlked/WinClean/actions/workflows/ci.yml/badge.svg)](https://github.com/bivlked/WinClean/actions/workflows/ci.yml)
 [![PowerShell 7.1+](https://img.shields.io/badge/PowerShell-7.1%2B-5391FE?logo=powershell&logoColor=white)](https://github.com/PowerShell/PowerShell)
 [![Windows 11](https://img.shields.io/badge/Windows-11-0078D4?logo=windows11&logoColor=white)](https://www.microsoft.com/windows/windows-11)
 [![Лицензия: MIT](https://img.shields.io/badge/Лицензия-MIT-green.svg)](LICENSE)
-[![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](https://github.com/bivlked/WinClean/pulls)
 
 **Автоматическое обслуживание системы: обновления, очистка и оптимизация в одном скрипте**
 
@@ -135,14 +135,25 @@
 
 ## 🚀 Быстрый старт
 
-### ⚡ Установка и запуск одной командой
+### 📦 Установка из PowerShell Gallery (Рекомендуется)
 
 ```powershell
-irm https://raw.githubusercontent.com/bivlked/WinClean/main/WinClean.ps1 -OutFile "$env:TEMP\WinClean.ps1"; Start-Process pwsh -Verb RunAs -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$env:TEMP\WinClean.ps1`""
+Install-Script -Name WinClean -Scope CurrentUser
+```
+
+Затем запустите от имени администратора:
+```powershell
+WinClean.ps1
 ```
 
 <details>
 <summary>📥 Альтернативные способы установки</summary>
+
+### ⚡ Скачать и запустить одной командой
+
+```powershell
+irm https://raw.githubusercontent.com/bivlked/WinClean/main/WinClean.ps1 -OutFile "$env:TEMP\WinClean.ps1"; Start-Process pwsh -Verb RunAs -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$env:TEMP\WinClean.ps1`""
+```
 
 ### Ручная загрузка
 
@@ -345,7 +356,7 @@ C:\Users\ВашеИмя\
 Каждый запуск создаёт подробный лог:
 
 ```
-%TEMP%\WinClean_20250115_143052.log
+%TEMP%\WinClean_20260117_143052.log
 ```
 
 **Содержимое лога:**

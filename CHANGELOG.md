@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-## [2.9] - 2025-01-17
+## [2.9] - 2026-01-17
 
 ### Fixed
 - **PSWindowsUpdate installation hangs**: Script could hang indefinitely when installing PSWindowsUpdate module
@@ -25,7 +25,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-## [2.8] - 2025-01-16
+## [2.8] - 2026-01-16
 
 ### Fixed
 - **Disk Cleanup hangs**: Improved cleanmgr.exe handling to prevent long waits after cleanup completes
@@ -36,7 +36,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-## [2.7] - 2025-01-16
+## [2.7] - 2026-01-16
 
 ### Fixed
 - **UI: Header frame color**: Top border (╔═╗) and side borders (║) of header now use Cyan like the rest of the frame
@@ -44,7 +44,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-## [2.6] - 2025-01-16
+## [2.6] - 2026-01-16
 
 ### Fixed
 - **UI: Frame color consistency**: All parts of the final statistics frame now use Cyan color (separator line between main stats and categories was DarkGray)
@@ -56,7 +56,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-## [2.5] - 2025-01-16
+## [2.5] - 2026-01-16
 
 ### Fixed
 - **UI: Subsection lines width**: Gray subsection lines (`└────`) now extend to match TITLE frame width (70 characters instead of 67)
@@ -65,7 +65,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-## [2.4] - 2025-01-16
+## [2.4] - 2026-01-16
 
 ### Improved
 - **UI: Consistent left indent**: All output now has 2-space left margin, matching the banner style
@@ -82,7 +82,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-## [2.3] - 2025-01-16
+## [2.3] - 2026-01-16
 
 ### Fixed
 - **Critical: TotalFreedBytes always showed 0**: The "Space freed" counter in final statistics was always displaying 0 bytes regardless of actual cleanup
@@ -92,7 +92,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-## [2.2] - 2025-01-15
+## [2.2] - 2026-01-15
 
 ### Fixed
 - **TcpClient resource leak**: Now properly closed in `finally` block to prevent socket exhaustion on repeated connection failures
@@ -101,7 +101,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-## [2.1] - 2025-01-15
+## [2.1] - 2026-01-15
 
 ### Fixed
 - **Clear-EventLogs precision**: Now uses exact match (`-ne 'Security'`) instead of `-notmatch 'Security'` to only preserve the main Security log (was incorrectly skipping all logs with "Security" in the name)
@@ -119,7 +119,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-## [2.0] - 2025-01-15
+## [2.0] - 2026-01-15
 
 ### Fixed
 - **Test-InternetConnection timeout**: Now uses `TcpClient` with 3-second timeout instead of `Test-NetConnection` (fixes VPN/unstable connection hangs)
@@ -134,7 +134,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-## [1.9] - 2025-01-15
+## [1.9] - 2026-01-15
 
 ### Fixed
 - **Progress bar accuracy**: `TotalSteps` now calculated dynamically based on active skip flags (`-SkipUpdates`, `-SkipCleanup`, `-SkipDevCleanup`, etc.)
@@ -149,7 +149,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-## [1.8] - 2025-01-15
+## [1.8] - 2026-01-15
 
 ### Fixed
 - **CRITICAL**: `Start-WinClean` and `Show-FinalStatistics` now use `$script:LogPath` instead of `$LogPath` parameter (fixes crash when `-LogPath` not specified)
@@ -160,7 +160,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-## [1.7] - 2025-01-15
+## [1.7] - 2026-01-15
 
 ### Added
 - **Improved internet connectivity check**: HTTPS endpoint checks (Microsoft, GitHub, winget) with ICMP fallback
@@ -173,7 +173,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-## [1.6] - 2025-01-15
+## [1.6] - 2026-01-15
 
 ### Added
 - Pause at end of execution: window stays open 60 seconds or until any key is pressed
@@ -184,21 +184,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-## [1.5] - 2025-01-15
+## [1.5] - 2026-01-15
 
 ### Fixed
 - Progress bar now properly cleared before DISM cleanup to prevent visual overlap
 
 ---
 
-## [1.4] - 2025-01-15
+## [1.4] - 2026-01-15
 
 ### Fixed
 - `Clear-PrivacyTraces`: Added `-Recurse` to `Remove-Item` to prevent confirmation prompts when cleaning Recent folder (AutomaticDestinations, CustomDestinations subfolders)
 
 ---
 
-## [1.3] - 2025-01-15
+## [1.3] - 2026-01-15
 
 ### Fixed
 - **CRITICAL**: Renamed `Clear-RecycleBin` to `Clear-WinCleanRecycleBin` to avoid infinite recursion (stack overflow) caused by name collision with built-in PowerShell cmdlet
@@ -206,7 +206,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-## [1.2] - 2025-01-15
+## [1.2] - 2026-01-15
 
 ### Fixed
 - `$script:LogPath` scope issue - logging now works correctly throughout the script
@@ -219,7 +219,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-## [1.1] - 2025-01-14
+## [1.1] - 2026-01-14
 
 ### Added
 - Initial public release

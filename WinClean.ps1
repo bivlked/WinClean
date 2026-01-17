@@ -3,7 +3,7 @@
 .GUID 8f7c3b2a-1d4e-5f6a-9b8c-0d1e2f3a4b5c
 .AUTHOR bivlked
 .COMPANYNAME
-.COPYRIGHT (c) 2025 bivlked. MIT License.
+.COPYRIGHT (c) 2026 bivlked. MIT License.
 .TAGS Windows Cleanup Maintenance PowerShell Windows11 DevTools Docker WSL npm pip nuget
 .LICENSEURI https://github.com/bivlked/WinClean/blob/main/LICENSE
 .PROJECTURI https://github.com/bivlked/WinClean

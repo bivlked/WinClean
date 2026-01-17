@@ -7,11 +7,11 @@
 ### Ultimate Windows 11 Maintenance Script
 
 [![Version](https://img.shields.io/badge/version-2.9-blue.svg)](https://github.com/bivlked/WinClean/releases)
+[![PSGallery](https://img.shields.io/powershellgallery/v/WinClean?label=PSGallery&logo=powershell&logoColor=white)](https://www.powershellgallery.com/packages/WinClean)
 [![CI](https://github.com/bivlked/WinClean/actions/workflows/ci.yml/badge.svg)](https://github.com/bivlked/WinClean/actions/workflows/ci.yml)
 [![PowerShell 7.1+](https://img.shields.io/badge/PowerShell-7.1%2B-5391FE?logo=powershell&logoColor=white)](https://github.com/PowerShell/PowerShell)
 [![Windows 11](https://img.shields.io/badge/Windows-11-0078D4?logo=windows11&logoColor=white)](https://www.microsoft.com/windows/windows-11)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
-[![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](https://github.com/bivlked/WinClean/pulls)
 
 **Automated system maintenance: updates, cleanup, and optimization in one script**
 
@@ -135,14 +135,25 @@
 
 ## 🚀 Quick Start
 
-### ⚡ One-Line Install & Run
+### 📦 Install from PowerShell Gallery (Recommended)
 
 ```powershell
-irm https://raw.githubusercontent.com/bivlked/WinClean/main/WinClean.ps1 -OutFile "$env:TEMP\WinClean.ps1"; Start-Process pwsh -Verb RunAs -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$env:TEMP\WinClean.ps1`""
+Install-Script -Name WinClean -Scope CurrentUser
+```
+
+Then run as Administrator:
+```powershell
+WinClean.ps1
 ```
 
 <details>
 <summary>📥 Alternative installation methods</summary>
+
+### ⚡ One-Line Download & Run
+
+```powershell
+irm https://raw.githubusercontent.com/bivlked/WinClean/main/WinClean.ps1 -OutFile "$env:TEMP\WinClean.ps1"; Start-Process pwsh -Verb RunAs -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$env:TEMP\WinClean.ps1`""
+```
 
 ### Manual Download
 
@@ -345,7 +356,7 @@ C:\Users\YourName\
 Every run creates a detailed log:
 
 ```
-%TEMP%\WinClean_20250115_143052.log
+%TEMP%\WinClean_20260117_143052.log
 ```
 
 **Log contents:**
