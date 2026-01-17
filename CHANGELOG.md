@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [2.13] - 2026-01-18
 
+### Added
+- **Pester test suite**: Comprehensive testing framework for CI/CD
+  - `tests/Helpers.Tests.ps1`: 52 unit tests for helper functions (Format-FileSize, ConvertFrom-HumanReadableSize, Get-FolderSize, Test-PathProtected, etc.)
+  - `tests/Fixes.Tests.ps1`: 42 validation tests for all v2.13 fixes
+  - CI workflow updated with Pester job (runs after lint and syntax checks)
+  - **94 tests total**, all passing ✅
+
 ### Fixed
 - **Docker statistics parsing**: Fixed regex to support both "reclaimed X" and "Total reclaimed space: X" output formats
   - Docker cleanup now correctly reports freed space in all Docker versions

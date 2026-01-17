@@ -93,12 +93,40 @@ function Verb-Noun {
 
 ### Testing
 
-Before submitting a PR:
+WinClean uses **Pester** for automated testing. Before submitting a PR:
+
+#### Run Pester Tests
+
+```powershell
+# Install Pester (if not installed)
+Install-Module Pester -Force -Scope CurrentUser -MinimumVersion 5.0
+
+# Run all tests
+Invoke-Pester ./tests -Output Detailed
+
+# Run specific test file
+Invoke-Pester ./tests/Helpers.Tests.ps1
+Invoke-Pester ./tests/Fixes.Tests.ps1
+```
+
+#### Test Structure
+
+- `tests/Helpers.Tests.ps1` — Unit tests for helper functions (safe, no system changes)
+- `tests/Fixes.Tests.ps1` — Validation tests for bug fixes (code inspection)
+
+#### Manual Testing
 
 1. Run with `-ReportOnly` to verify no unintended changes
 2. Test on a clean Windows 11 installation if possible
 3. Test with various skip flags (`-SkipUpdates`, `-SkipCleanup`, etc.)
 4. Verify logging works correctly
+
+#### CI/CD
+
+All PRs automatically run:
+- PSScriptAnalyzer (linting)
+- Syntax check
+- Pester tests (94 tests)
 
 ### Commit Messages
 
@@ -171,12 +199,40 @@ Follow [Conventional Commits](https://www.conventionalcommits.org/):
 
 ### Тестирование
 
-Перед отправкой PR:
+WinClean использует **Pester** для автоматического тестирования. Перед отправкой PR:
+
+#### Запуск Pester тестов
+
+```powershell
+# Установить Pester (если не установлен)
+Install-Module Pester -Force -Scope CurrentUser -MinimumVersion 5.0
+
+# Запустить все тесты
+Invoke-Pester ./tests -Output Detailed
+
+# Запустить конкретный файл тестов
+Invoke-Pester ./tests/Helpers.Tests.ps1
+Invoke-Pester ./tests/Fixes.Tests.ps1
+```
+
+#### Структура тестов
+
+- `tests/Helpers.Tests.ps1` — Unit-тесты вспомогательных функций (безопасные, без изменений системы)
+- `tests/Fixes.Tests.ps1` — Валидационные тесты исправлений (проверка кода)
+
+#### Ручное тестирование
 
 1. Запустите с `-ReportOnly` для проверки
 2. Протестируйте на чистой установке Windows 11
 3. Проверьте с различными флагами пропуска
 4. Убедитесь, что логирование работает корректно
+
+#### CI/CD
+
+Все PR автоматически проходят:
+- PSScriptAnalyzer (линтинг)
+- Проверка синтаксиса
+- Pester тесты (94 теста)
 
 ---
 
