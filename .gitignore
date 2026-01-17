@@ -34,6 +34,12 @@ Desktop.ini
 *.orig
 *.backup
 
+# Claude local instructions (personal notes)
+CLAUDE.local.md
+
+# Documentation drafts (not for public repo)
+docs/
+
 # Test outputs
 TestResults/
 coverage/
