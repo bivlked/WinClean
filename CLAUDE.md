@@ -7,7 +7,7 @@
 
 ## 1. О проекте
 
-**WinClean** — комплексный PowerShell скрипт для автоматического обслуживания Windows 11.
+**WinClean** - комплексный PowerShell скрипт для автоматического обслуживания Windows 11.
 
 | Параметр | Значение |
 |----------|----------|
@@ -38,7 +38,7 @@ CleanScript/
 ├── LICENSE                   # MIT лицензия
 ├── CONTRIBUTING.md           # Гайд для контрибьюторов
 ├── SECURITY.md               # Политика безопасности
-├── CLAUDE.md                 # Этот файл — инструкции для Claude
+├── CLAUDE.md                 # Этот файл - инструкции для Claude
 ├── assets/
 │   └── logo.svg              # Логотип проекта
 ├── tests/                    # Pester тесты (v2.13+)
@@ -57,7 +57,7 @@ CleanScript/
 
 ## 3. Архитектура скрипта
 
-WinClean.ps1 — монолитный скрипт (~2700 строк) с модульной структурой.
+WinClean.ps1 - монолитный скрипт (~2700 строк) с модульной структурой.
 
 ### Основные секции
 
@@ -98,8 +98,8 @@ $script:ProtectedPaths = @(...)    # Защищённые пути (никогд
 При запуске скрипт проверяет PSGallery на наличие новой версии:
 
 ```powershell
-# Test-ScriptUpdate — проверяет версию на PSGallery
-# Invoke-ScriptUpdate — показывает UI и выполняет обновление
+# Test-ScriptUpdate - проверяет версию на PSGallery
+# Invoke-ScriptUpdate - показывает UI и выполняет обновление
 ```
 
 Особенности:
@@ -118,10 +118,10 @@ $script:ProtectedPaths = @(...)    # Защищённые пути (никогд
 2. `.VERSION` в PSScriptInfo (строка 2)
 3. `.RELEASENOTES` в PSScriptInfo (строки 14-18)
 4. `SYNOPSIS` (строка 24)
-5. `NOTES` секция — добавить "Changes in X.X"
+5. `NOTES` секция - добавить "Changes in X.X"
 6. Badges в README.md и README_RU.md
 7. Диаграмму "Execution Flow" в README (версия в заголовке)
-8. CHANGELOG.md — новая запись в начале
+8. CHANGELOG.md - новая запись в начале
 
 ### Публикация в PSGallery
 
@@ -157,94 +157,37 @@ Publish-PSResource -Path .\WinClean.ps1 -Repository PSGallery -ApiKey $env:PSGAL
 Файл: `.github/workflows/ci.yml`
 
 **Проверки (3 job'а):**
-1. **lint** — PSScriptAnalyzer (Warning, Error)
-2. **syntax** — Проверка синтаксиса PowerShell
-3. **test** — Pester тесты (94 теста, запускается после lint и syntax)
+1. **lint** - PSScriptAnalyzer (Warning, Error)
+2. **syntax** - Проверка синтаксиса PowerShell
+3. **test** - Pester тесты (94 теста, запускается после lint и syntax)
 
 **Исключения PSScriptAnalyzer** (допустимые для CLI):
-- PSAvoidUsingWriteHost — это интерактивная утилита
-- PSAvoidUsingEmptyCatchBlock — намеренное подавление ошибок
-- PSUseShouldProcessForStateChangingFunctions — не применимо
+- PSAvoidUsingWriteHost - это интерактивная утилита
+- PSAvoidUsingEmptyCatchBlock - намеренное подавление ошибок
+- PSUseShouldProcessForStateChangingFunctions - не применимо
 
 ### Pester тесты (v2.13+)
 
-**Структура тестов:**
-- `tests/Helpers.Tests.ps1` — 52 unit-теста helper-функций
-- `tests/Fixes.Tests.ps1` — 42 валидационных теста исправлений
-
-**Тестируемые функции:**
-- Format-FileSize, ConvertFrom-HumanReadableSize
-- Get-FolderSize, Test-PathProtected
-- Test-InteractiveConsole, Test-PendingReboot
-- Write-Log, Get-RecycleBinSize
-
-**Особенности реализации:**
-- Функции определены напрямую в `BeforeAll` (AST-парсинг не работает в контексте Pester)
-- Используются regex-паттерны для locale-независимых сравнений (`"^1[,.]00 KB$"`)
-- Параметризованные тесты преобразованы в отдельные `It` блоки
-
-**Запуск локально:**
-```powershell
-Install-Module Pester -Force -Scope CurrentUser -MinimumVersion 5.0
-Invoke-Pester ./tests -Output Detailed
-```
+- `tests/Helpers.Tests.ps1` - 52 unit-теста, `tests/Fixes.Tests.ps1` - 42 теста
+- Особенности: функции в BeforeAll (не AST), regex для locale-независимости, отдельные It блоки
 
 ---
 
-## 7. Текущие задачи и планы
-
-### Выполнено (январь 2026)
-
-- [x] Публикация в PSGallery (v2.9 → v2.13)
-- [x] CI/CD с PSScriptAnalyzer
-- [x] Функция авто-проверки обновлений (v2.10)
-- [x] Таймауты для winget/DISM (v2.11)
-- [x] PS 7.4+ совместимость, улучшенная статистика (v2.12)
-- [x] **Pester тесты — 94 теста** (v2.13)
-- [x] Документация EN/RU синхронизирована
-- [x] Issue templates (bug, feature, question)
-- [x] Черновик статьи для Хабра
+## 7. Текущие задачи
 
 ### В работе
-
-- [ ] Публикация статьи на Хабре (песочница)
-- [ ] Скриншоты для статьи
+- [ ] Публикация статьи на Хабре (`docs/habr-article.md` - текст готов, ждёт скриншоты)
 - [ ] Интеграционное тестирование в Hyper-V VM
 
-### Планы на будущее
-
+### Планы
 - [ ] Профили очистки (aggressive / moderate / minimal)
 - [ ] Поддержка WSL дистрибутивов (apt/snap кэши)
-- [ ] Интеграция с Windows Terminal
 - [ ] Scoop bucket для установки
-- [ ] Английская статья для Dev.to
+- [ ] Продвижение: Reddit (r/PowerShell), Dev.to
 
 ---
 
-## 8. Продвижение проекта
-
-### Стратегия
-
-1. **Хабр** (приоритет) — статья в песочнице
-2. **Reddit** — r/PowerShell, r/windows11
-3. **Dev.to** — короткая статья на английском
-4. **Twitter/X** — анонс с GIF
-
-### Материалы для Хабра
-
-Файлы в `docs/`:
-- `habr-article.md` — текст статьи (~1300 слов)
-- `habr-article-info.md` — полная документация по статье
-
-**Заголовок:** "Один скрипт вместо десяти утилит: наводим порядок в Windows 11"
-
-**Хабы:** Системное администрирование, DevOps
-
-**Статус:** Текст готов, ожидает скриншоты
-
----
-
-## 9. Частые задачи
+## 8. Частые задачи
 
 ### Добавление нового типа кэша
 
@@ -271,122 +214,30 @@ Invoke-Pester ./tests -Output Detailed
 
 ---
 
-## 10. История ключевых решений
-
-### Почему монолитный скрипт?
-
-- Простота установки (`Install-Script`)
-- Нет зависимостей между файлами
-- Легко копировать и передавать
-- PSGallery лучше работает с одним файлом
-
-### Почему PowerShell 7.1+?
-
-- `ForEach-Object -Parallel` (появился в 7.0)
-- Улучшенная обработка ошибок
-- Лучшая производительность
-- Активная поддержка Microsoft
-
-### Почему synchronized hashtable?
-
-- Thread-safe для параллельного выполнения
-- Простой доступ через `+=` вместо Interlocked
-- Избегает багов с `[ref]` и hashtable элементами
-
-### Почему Write-Host, а не Write-Output?
-
-- Это интерактивная CLI утилита, не модуль
-- Write-Host даёт цветной вывод
-- Не загрязняет pipeline
-- PSScriptAnalyzer исключение оправдано
-
----
-
-## 11. Известные проблемы и решения
-
-| Проблема | Решение | Версия |
-|----------|---------|--------|
-| Docker regex не парсит новый формат | Обновлён regex для обоих форматов | 2.13 |
-| Browser cache отрицательные значения | `[math]::Max(0, ...)` | 2.13 |
-| Temp paths дублируются | GetFullPath + Group-Object | 2.13 |
-| Get-FolderSize медленный | Добавлен флаг `-File` | 2.13 |
-| PS 7.4 удалил `-UseBasicParsing` | Удалён deprecated параметр | 2.12 |
-| winget статистика при ошибках | Проверка exit code | 2.12 |
-| PSWindowsUpdate зависает при установке | TLS 1.2 + таймауты | 2.9 |
-| Disk Cleanup зависает | Уменьшен таймаут до 7 мин | 2.8 |
-| TotalFreedBytes всегда 0 | Заменён Interlocked на += | 2.3 |
-| Рекурсия в Clear-RecycleBin | Переименована функция | 1.3 |
-
----
-
-## 12. Тестирование
-
-### Автоматические тесты (безопасно на рабочей машине)
+## 10. Тестирование
 
 ```powershell
-# Pester тесты (94 теста, без изменений системы)
-Invoke-Pester ./tests -Output Detailed
-
-# PSScriptAnalyzer
+Invoke-Pester ./tests -Output Detailed              # 94 Pester теста
 Invoke-ScriptAnalyzer -Path .\WinClean.ps1 -Severity Warning,Error
-
-# Проверка синтаксиса
-$null = [scriptblock]::Create((Get-Content .\WinClean.ps1 -Raw))
+.\WinClean.ps1 -ReportOnly                          # Предпросмотр без изменений
 ```
-
-### Ручное тестирование
-
-```powershell
-# Режим предпросмотра (без изменений)
-.\WinClean.ps1 -ReportOnly
-
-# Полный запуск (требует Admin, создаёт Restore Point)
-.\WinClean.ps1
-```
-
-### Тестирование в изоляции
-
-Для полного интеграционного тестирования рекомендуется Hyper-V VM:
-1. Создать VM с Windows 11 Pro
-2. Создать snapshot "Clean-Install"
-3. Создать "грязную" систему (кэши, корзина, temp файлы)
-4. Создать snapshot "Dirty-System"
-5. Запустить полный прогон и проверить результаты
 
 ---
 
-## 13. Контакты и ресурсы
+## 11. Важное для Claude
 
-- **GitHub Issues**: https://github.com/bivlked/WinClean/issues
-- **GitHub Discussions**: https://github.com/bivlked/WinClean/discussions
-- **PSGallery**: https://www.powershellgallery.com/packages/WinClean
+- **WinClean.ps1** - единственный файл кода, всегда читать перед изменениями
+- **Синхронизировать README** EN и RU при любых изменениях
+- **Обновлять CHANGELOG** при каждом изменении
+- **Версия в нескольких местах** - см. раздел "Версионирование"
+- **docs/ не в git** - черновики (статья для Хабра, ждёт скриншоты)
+- **Pester тесты**: функции в BeforeAll (не AST), regex для locale-независимости, отдельные It блоки
+- Ссылки: [Issues](https://github.com/bivlked/WinClean/issues) | [PSGallery](https://www.powershellgallery.com/packages/WinClean)
 
 ---
 
-## 14. Заметки для Claude
+## Навигация по коду (Serena + ast-grep)
 
-### При работе с этим проектом
-
-1. **Всегда читать WinClean.ps1** перед изменениями — это единственный файл кода
-2. **Синхронизировать README** — EN и RU версии должны быть идентичны по структуре
-3. **Обновлять CHANGELOG** — каждое изменение должно быть задокументировано
-4. **Версия в нескольких местах** — см. раздел "Версионирование"
-5. **docs/ не в git** — черновики и рабочие материалы
-6. **Запускать Pester тесты** после изменений helper-функций
-
-### Что помнить о проекте
-
-- Скрипт требует прав администратора
-- Создаёт точку восстановления перед изменениями
-- Поддерживает -ReportOnly для безопасного предпросмотра
-- Лог сохраняется в `%TEMP%\WinClean_*.log`
-- Опубликован в PSGallery — нужен API ключ для публикации
-- **94 Pester теста** в CI/CD — регрессии отслеживаются автоматически
-- Статья для Хабра готова, ждёт скриншоты
-
-### Особенности Pester тестов
-
-- Функции **определены напрямую в BeforeAll** — AST-парсинг не работает в Pester
-- Используются **regex для locale-независимости** (`"^1[,.]00 KB$"` вместо точного сравнения)
-- `-ForEach` параметризация преобразована в **отдельные It блоки** для надёжности
-- Тесты **не модифицируют систему** — безопасны для запуска на рабочей машине
+- **Serena MCP** подключён в этой папке (символьная навигация через LSP). Для понимания и рефакторинга кода предпочитай его инструменты обычным Read/Grep: `get_symbols_overview` (оглавление файла), `find_symbol` (определение по имени), `find_referencing_symbols` (кто вызывает), `replace_symbol_body` / `rename_symbol` (точечная правка). Проверка: `/mcp` -> serena connected.
+- **ast-grep** (`ast-grep` / `sg`, в PATH) - структурный поиск/замена по AST, когда нужна синтаксис-осведомлённость (точнее regex-Grep).
+- Обычный Grep - для первичного текстового поиска.
