@@ -47,3 +47,6 @@ coverage/
 # Old/backup script versions
 *.old*.ps1
 Krasivoe*.ps1
+
+# Serena MCP (local LSP index, do not commit)
+.serena/
