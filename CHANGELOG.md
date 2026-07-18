@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [2.15] - 2026-07-18
+
+### Added
+- **`-ResultJsonPath` parameter**: writes a machine-readable run summary (version, duration, per-category freed bytes, warning/error counts, reboot flag) - the foundation for automated verification in CI and on test stands
+
+- **One-command run** (`get.ps1`): `irm .../get.ps1 | iex` on any machine with PowerShell 7.1+ and admin rights - checks prerequisites with friendly errors, downloads the latest GitHub Release (SHA256-verified when the release publishes a hash, fail-closed - no fallback to mutable branches) and runs it. Parameter passthrough via the documented scriptblock pattern
+
+- **One-command install/update** (`install.ps1`): `irm .../install.ps1 | iex` (elevated) - installs or updates WinClean into the admin-protected `%ProgramFiles%\WinClean` (an elevated shortcut must not point at a user-writable file) and creates a desktop shortcut with the "Run as administrator" flag set (elevation on double-click)
+
+- **Integration test suite** (`tests/Integration.Tests.ps1`, 24 tests): real cleanup functions run against a sandboxed fake filesystem in a child process with redirected environment variables - verifies what actually gets deleted and what must survive (active log, protected paths, browser profile data). 139 Pester tests total
+
+- **Smoke runner** (`tools/Invoke-SmokeTest.ps1`): safe ReportOnly run with automated verification of exit code, result JSON and console box geometry (`tools/BoxGeometry.ps1` catches misaligned frames and foreign output inside boxes automatically)
+
+- **Proxmox test stand** (`tools/proxmox/`): full-system test cycle on a disposable Windows 11 VM - rollback to baseline snapshot, boot, deliver script (local working tree or GitHub), real run, artifact collection and assertions over qemu-guest-agent. Stand infrastructure config stays out of the repository
+
+---
+
 ## [2.14] - 2026-07-18
 
 ### Fixed

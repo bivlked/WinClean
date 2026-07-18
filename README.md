@@ -6,7 +6,7 @@
 
 ### Ultimate Windows 11 Maintenance Script
 
-[![Version](https://img.shields.io/badge/version-2.14-blue.svg)](https://github.com/bivlked/WinClean/releases)
+[![Version](https://img.shields.io/badge/version-2.15-blue.svg)](https://github.com/bivlked/WinClean/releases)
 [![PSGallery](https://img.shields.io/powershellgallery/v/WinClean?label=PSGallery&logo=powershell&logoColor=white)](https://www.powershellgallery.com/packages/WinClean)
 [![CI](https://github.com/bivlked/WinClean/actions/workflows/ci.yml/badge.svg)](https://github.com/bivlked/WinClean/actions/workflows/ci.yml)
 [![PowerShell 7.1+](https://img.shields.io/badge/PowerShell-7.1%2B-5391FE?logo=powershell&logoColor=white)](https://github.com/PowerShell/PowerShell)
@@ -135,7 +135,32 @@
 
 ## 🚀 Quick Start
 
-### 📦 Install from PowerShell Gallery (Recommended)
+> Requirements: PowerShell 7.1+ (`winget install Microsoft.PowerShell`) and an elevated terminal (Win+X -> Terminal (Admin)).
+
+### ⚡ Run once (one command)
+
+```powershell
+irm https://raw.githubusercontent.com/bivlked/WinClean/main/get.ps1 | iex
+```
+
+With parameters:
+
+```powershell
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/bivlked/WinClean/main/get.ps1))) -ReportOnly
+```
+
+### 📌 Install or update + desktop shortcut (one command)
+
+Installs the latest release (SHA256-verified) into `%ProgramFiles%\WinClean` and creates a **WinClean** desktop shortcut that always launches elevated. Re-run the same command anytime to update:
+
+```powershell
+irm https://raw.githubusercontent.com/bivlked/WinClean/main/install.ps1 | iex
+```
+
+<details>
+<summary>📥 Alternative installation methods</summary>
+
+### 📦 PowerShell Gallery
 
 ```powershell
 Install-Script -Name WinClean -Scope CurrentUser
@@ -144,15 +169,6 @@ Install-Script -Name WinClean -Scope CurrentUser
 Then run as Administrator:
 ```powershell
 WinClean.ps1
-```
-
-<details>
-<summary>📥 Alternative installation methods</summary>
-
-### ⚡ One-Line Download & Run
-
-```powershell
-irm https://raw.githubusercontent.com/bivlked/WinClean/main/WinClean.ps1 -OutFile "$env:TEMP\WinClean.ps1"; Start-Process pwsh -Verb RunAs -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$env:TEMP\WinClean.ps1`""
 ```
 
 ### Manual Download
@@ -190,6 +206,7 @@ cd WinClean
 | `-DisableTelemetry` | Disable Windows telemetry via Group Policy | `false` |
 | `-ReportOnly` | **Dry run** — show what would be done | `false` |
 | `-LogPath` | Custom log file path | Auto |
+| `-ResultJsonPath` | Write a machine-readable run summary (JSON) for automation/CI | Off |
 
 ---
 
@@ -319,7 +336,7 @@ C:\Users\YourName\
 
 ```
 ┌────────────────────────────────────────────────────────────────┐
-│                     WinClean v2.14                              │
+│                     WinClean v2.15                              │
 ├────────────────────────────────────────────────────────────────┤
 │  PREPARATION                                                   │
 │  ├─ ✓ Check Administrator Rights                               │

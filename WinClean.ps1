@@ -1,5 +1,5 @@
 <#PSScriptInfo
-.VERSION 2.14
+.VERSION 2.15
 .GUID 8f7c3b2a-1d4e-5f6a-9b8c-0d1e2f3a4b5c
 .AUTHOR bivlked
 .COMPANYNAME
@@ -12,6 +12,7 @@
 .REQUIREDSCRIPTS
 .EXTERNALSCRIPTDEPENDENCIES
 .RELEASENOTES
+    v2.15: ResultJsonPath for automated testing, one-command install/run (get.ps1, install.ps1), integration test suite
     v2.14: Log persistence fix, correct npm/Firefox cache paths, localized size parsing, faster DISM/EventLogs, UI fixes
     v2.13: Statistics accuracy fixes, efficiency improvements, registry cleanup
     v2.12: PS 7.4+ compatibility, improved statistics (Docker/WSL/RecycleBin), ReportOnly accuracy
@@ -23,7 +24,7 @@
 
 <#
 .SYNOPSIS
-    WinClean - Ultimate Windows 11 Maintenance Script v2.14
+    WinClean - Ultimate Windows 11 Maintenance Script v2.15
 .DESCRIPTION
     Комплексный скрипт для обновления и очистки Windows 11:
     - Обновление Windows (включая драйверы)
@@ -37,8 +38,15 @@
     - Подробный цветной вывод + лог-файл
 .NOTES
     Author: biv
-    Version: 2.14
+    Version: 2.15
     Requires: PowerShell 7.1+, Windows 11, Administrator rights
+    Changes in 2.15:
+    - Added -ResultJsonPath: machine-readable run summary (JSON) for automated
+      testing, CI and VM test stands
+    - Added get.ps1 (one-command run from the internet) and install.ps1
+      (one-command install/update + elevated desktop shortcut)
+    - Added integration test suite (sandboxed filesystem tests) and smoke runner
+      with automated console box-geometry checking
     Changes in 2.14:
     - Fixed log file being deleted by the script's own temp cleanup (all entries
       logged before Clear-TempFiles were silently lost every run)
@@ -202,6 +210,9 @@
     Только показать, что будет сделано (без выполнения)
 .PARAMETER LogPath
     Путь к файлу лога (по умолчанию: $env:TEMP\WinClean_<date>.log)
+.PARAMETER ResultJsonPath
+    Путь для машиночитаемого итога прогона (JSON). Используется автотестами
+    и стендами; если не задан - JSON не создаётся
 #>
 
 #Requires -Version 7.1
@@ -217,7 +228,8 @@ param(
     [switch]$SkipVSCleanup,
     [switch]$DisableTelemetry,
     [switch]$ReportOnly,
-    [string]$LogPath
+    [string]$LogPath,
+    [string]$ResultJsonPath
 )
 
 #region ═══════════════════════════════════════════════════════════════════════
@@ -256,7 +268,7 @@ if (-not $LogPath) {
 }
 
 # Script version (single source of truth for version checking)
-$script:Version = "2.14"
+$script:Version = "2.15"
 
 # Protected paths that should never be deleted
 $script:ProtectedPaths = @(
@@ -2999,6 +3011,54 @@ function Show-FinalStatistics {
     }
 }
 
+function Write-ResultJson {
+    <#
+    .SYNOPSIS
+        Writes a machine-readable run summary (JSON) for automated testing/stands
+    #>
+    param([string]$Path)
+
+    if (-not $Path) { return }
+
+    try {
+        $elapsed = (Get-Date) - $script:Stats.StartTime
+
+        $result = [ordered]@{
+            Version             = $script:Version
+            Timestamp           = (Get-Date).ToString('o')
+            DurationSeconds     = [math]::Round($elapsed.TotalSeconds, 1)
+            ReportOnly          = [bool]$ReportOnly
+            Parameters          = [ordered]@{
+                SkipUpdates       = [bool]$SkipUpdates
+                SkipCleanup       = [bool]$SkipCleanup
+                SkipRestore       = [bool]$SkipRestore
+                SkipDevCleanup    = [bool]$SkipDevCleanup
+                SkipDockerCleanup = [bool]$SkipDockerCleanup
+                SkipVSCleanup     = [bool]$SkipVSCleanup
+                DisableTelemetry  = [bool]$DisableTelemetry
+            }
+            TotalFreedBytes     = [long]$script:Stats.TotalFreedBytes
+            FreedByCategory     = @{} + $script:Stats.FreedByCategory
+            WindowsUpdatesCount = $script:Stats.WindowsUpdatesCount
+            AppUpdatesCount     = $script:Stats.AppUpdatesCount
+            WarningsCount       = $script:Stats.WarningsCount
+            ErrorsCount         = $script:Stats.ErrorsCount
+            RebootRequired      = [bool]$script:Stats.RebootRequired
+            LogPath             = $script:LogPath
+        }
+
+        $resultDir = Split-Path -Path $Path -Parent
+        if ($resultDir -and -not (Test-Path -LiteralPath $resultDir)) {
+            New-Item -ItemType Directory -Path $resultDir -Force -ErrorAction SilentlyContinue | Out-Null
+        }
+
+        $result | ConvertTo-Json -Depth 4 | Out-File -FilePath $Path -Encoding utf8
+        Write-Log "Result JSON written: $Path" -Level INFO
+    } catch {
+        Write-Log "Failed to write result JSON: $_" -Level WARNING
+    }
+}
+
 function Start-WinClean {
     # Initialize log
     "WinClean v$($script:Version) - Started at $(Get-Date)" | Out-File -FilePath $script:LogPath -Encoding utf8
@@ -3107,6 +3167,9 @@ function Start-WinClean {
         Write-Log "Critical error: $_" -Level ERROR
         $script:Stats.ErrorsCount++
     } finally {
+        # JSON goes first: Show-FinalStatistics may block on a keypress in
+        # interactive mode, and automated runs must get the result regardless
+        Write-ResultJson -Path $ResultJsonPath
         Show-FinalStatistics
     }
 }

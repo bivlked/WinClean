@@ -1,0 +1,10 @@
+{
+  "SshHost": "192.168.1.10",
+  "SshUser": "root",
+  "TemplateVmId": 100,
+  "StandVmId": 190,
+  "StandVmName": "winclean-test",
+  "MemoryMB": 8192,
+  "Cores": 4,
+  "SnapshotName": "baseline"
+}

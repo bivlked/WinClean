@@ -6,7 +6,7 @@
 
 ### Комплексный скрипт обслуживания Windows 11
 
-[![Версия](https://img.shields.io/badge/версия-2.14-blue.svg)](https://github.com/bivlked/WinClean/releases)
+[![Версия](https://img.shields.io/badge/версия-2.15-blue.svg)](https://github.com/bivlked/WinClean/releases)
 [![PSGallery](https://img.shields.io/powershellgallery/v/WinClean?label=PSGallery&logo=powershell&logoColor=white)](https://www.powershellgallery.com/packages/WinClean)
 [![CI](https://github.com/bivlked/WinClean/actions/workflows/ci.yml/badge.svg)](https://github.com/bivlked/WinClean/actions/workflows/ci.yml)
 [![PowerShell 7.1+](https://img.shields.io/badge/PowerShell-7.1%2B-5391FE?logo=powershell&logoColor=white)](https://github.com/PowerShell/PowerShell)
@@ -135,7 +135,32 @@
 
 ## 🚀 Быстрый старт
 
-### 📦 Установка из PowerShell Gallery (Рекомендуется)
+> Требования: PowerShell 7.1+ (`winget install Microsoft.PowerShell`) и терминал от имени администратора (Win+X -> Терминал (Администратор)).
+
+### ⚡ Разовый запуск (одна команда)
+
+```powershell
+irm https://raw.githubusercontent.com/bivlked/WinClean/main/get.ps1 | iex
+```
+
+С параметрами:
+
+```powershell
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/bivlked/WinClean/main/get.ps1))) -ReportOnly
+```
+
+### 📌 Установка или обновление + ярлык на рабочем столе (одна команда)
+
+Устанавливает последний релиз (с проверкой SHA256) в `%ProgramFiles%\WinClean` и создаёт на рабочем столе ярлык **WinClean**, который всегда запускается с правами администратора. Для обновления просто выполните команду ещё раз:
+
+```powershell
+irm https://raw.githubusercontent.com/bivlked/WinClean/main/install.ps1 | iex
+```
+
+<details>
+<summary>📥 Альтернативные способы установки</summary>
+
+### 📦 PowerShell Gallery
 
 ```powershell
 Install-Script -Name WinClean -Scope CurrentUser
@@ -144,15 +169,6 @@ Install-Script -Name WinClean -Scope CurrentUser
 Затем запустите от имени администратора:
 ```powershell
 WinClean.ps1
-```
-
-<details>
-<summary>📥 Альтернативные способы установки</summary>
-
-### ⚡ Скачать и запустить одной командой
-
-```powershell
-irm https://raw.githubusercontent.com/bivlked/WinClean/main/WinClean.ps1 -OutFile "$env:TEMP\WinClean.ps1"; Start-Process pwsh -Verb RunAs -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$env:TEMP\WinClean.ps1`""
 ```
 
 ### Ручная загрузка
@@ -190,6 +206,7 @@ cd WinClean
 | `-DisableTelemetry` | Отключить телеметрию Windows через групповую политику | `false` |
 | `-ReportOnly` | **Тестовый режим** — показать, что будет сделано | `false` |
 | `-LogPath` | Путь к файлу лога | Авто |
+| `-ResultJsonPath` | Машиночитаемый итог прогона (JSON) для автоматизации/CI | Выкл |
 
 ---
 
@@ -319,7 +336,7 @@ C:\Users\ВашеИмя\
 
 ```
 ┌────────────────────────────────────────────────────────────────┐
-│                     WinClean v2.14                             │
+│                     WinClean v2.15                             │
 ├────────────────────────────────────────────────────────────────┤
 │  ПОДГОТОВКА                                                    │
 │  ├─ ✓ Проверка прав администратора                             │
