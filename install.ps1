@@ -102,23 +102,34 @@ Unblock-File -Path $scriptPath -ErrorAction SilentlyContinue
 $newVersionLine = Select-String -Path $scriptPath -Pattern '^\.VERSION\s+([\d.]+)' | Select-Object -First 1
 $newVersion = if ($newVersionLine) { $newVersionLine.Matches[0].Groups[1].Value } else { '?' }
 
-# 5. Desktop shortcut with the "Run as administrator" flag
-$desktop = [Environment]::GetFolderPath('Desktop')
-$lnkPath = Join-Path $desktop 'WinClean.lnk'
+# 5. Desktop shortcut with the "Run as administrator" flag.
+#    Shortcut failure must not fail the install (e.g. profiles without a
+#    Desktop folder, service contexts) - the script itself is already in place.
+$lnkPath = $null
+try {
+    $desktop = [Environment]::GetFolderPath('Desktop')
+    if (-not $desktop) { throw "Desktop folder is not available in this session" }
+    if (-not (Test-Path $desktop)) { New-Item -ItemType Directory -Path $desktop -Force | Out-Null }
+    $lnkPath = Join-Path $desktop 'WinClean.lnk'
 
-$shell = New-Object -ComObject WScript.Shell
-$shortcut = $shell.CreateShortcut($lnkPath)
-$shortcut.TargetPath = $pwshPath
-$shortcut.Arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$scriptPath`""
-$shortcut.WorkingDirectory = $installDir
-$shortcut.IconLocation = '%SystemRoot%\System32\SHELL32.dll,153'
-$shortcut.Description = 'WinClean - Windows 11 maintenance (runs elevated)'
-$shortcut.Save()
+    $shell = New-Object -ComObject WScript.Shell
+    $shortcut = $shell.CreateShortcut($lnkPath)
+    $shortcut.TargetPath = $pwshPath
+    $shortcut.Arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$scriptPath`""
+    $shortcut.WorkingDirectory = $installDir
+    $shortcut.IconLocation = '%SystemRoot%\System32\SHELL32.dll,153'
+    $shortcut.Description = 'WinClean - Windows 11 maintenance (runs elevated)'
+    $shortcut.Save()
 
-# Set the RunAsAdministrator flag (byte 0x15, bit 0x20 of the .lnk header)
-$lnkBytes = [System.IO.File]::ReadAllBytes($lnkPath)
-$lnkBytes[0x15] = $lnkBytes[0x15] -bor 0x20
-[System.IO.File]::WriteAllBytes($lnkPath, $lnkBytes)
+    # Set the RunAsAdministrator flag (byte 0x15, bit 0x20 of the .lnk header)
+    $lnkBytes = [System.IO.File]::ReadAllBytes($lnkPath)
+    $lnkBytes[0x15] = $lnkBytes[0x15] -bor 0x20
+    [System.IO.File]::WriteAllBytes($lnkPath, $lnkBytes)
+} catch {
+    $lnkPath = $null
+    Write-Host "Warning: could not create the desktop shortcut: $_" -ForegroundColor Yellow
+    Write-Host "You can run WinClean from an elevated terminal: & `"$scriptPath`"" -ForegroundColor Gray
+}
 
 # 6. Summary
 Write-Host ""
@@ -130,6 +141,11 @@ if ($previousVersion -and $previousVersion -ne $newVersion) {
     Write-Host "WinClean v$newVersion installed" -ForegroundColor Green
 }
 Write-Host "  Location: $scriptPath" -ForegroundColor DarkGray
-Write-Host "  Shortcut: $lnkPath (launches elevated)" -ForegroundColor DarkGray
-Write-Host ""
-Write-Host "Double-click the WinClean shortcut on your desktop to run maintenance." -ForegroundColor Cyan
+if ($lnkPath) {
+    Write-Host "  Shortcut: $lnkPath (launches elevated)" -ForegroundColor DarkGray
+    Write-Host ""
+    Write-Host "Double-click the WinClean shortcut on your desktop to run maintenance." -ForegroundColor Cyan
+} else {
+    Write-Host ""
+    Write-Host "Run WinClean from an elevated PowerShell 7: & `"$scriptPath`"" -ForegroundColor Cyan
+}
