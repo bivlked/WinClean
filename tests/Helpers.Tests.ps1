@@ -7,7 +7,7 @@
     Tests safe, non-destructive helper functions that can run in CI/CD.
     These tests do not require Administrator rights or modify the system.
 .NOTES
-    Version: 2.13
+    Version: 2.14
     Requires: Pester 5.0+
 #>
 
@@ -26,7 +26,9 @@ BeforeAll {
     function ConvertFrom-HumanReadableSize {
         param([string]$SizeString)
         if (-not $SizeString) { return 0 }
-        if ($SizeString -match '^([\d.,]+)\s*([KMGT]?B)$') {
+        $normalized = ($SizeString -replace '[\u00A0\u202F\u2007]', ' ').Trim()
+        $normalized = $normalized -replace 'КБ$', 'KB' -replace 'МБ$', 'MB' -replace 'ГБ$', 'GB' -replace 'ТБ$', 'TB' -replace 'Б$', 'B'
+        if ($normalized -match '^([\d.,]+)\s*([KMGT]?B)$') {
             $value = [double]($Matches[1] -replace ',', '.')
             $unit = $Matches[2].ToUpper()
             $multiplier = switch ($unit) {
@@ -336,6 +338,29 @@ Describe "ConvertFrom-HumanReadableSize" -Tag "Unit", "Helper" {
     It "Handles comma as decimal separator (localization)" {
         # Some locales use comma: "2,5 GB"
         ConvertFrom-HumanReadableSize -SizeString "2,5 GB" | Should -Be 2684354560
+    }
+
+    Context "Localized units (v2.14: Shell GetDetailsOf on Russian Windows)" {
+
+        It "Converts Cyrillic units: '<SizeString>'" -ForEach @(
+            @{ SizeString = "816 КБ";  Expected = 835584 }
+            @{ SizeString = "1,52 МБ"; Expected = 1593836 }
+            @{ SizeString = "2,5 ГБ";  Expected = 2684354560 }
+            @{ SizeString = "1 ТБ";    Expected = 1099511627776 }
+            @{ SizeString = "100 Б";   Expected = 100 }
+        ) {
+            ConvertFrom-HumanReadableSize -SizeString $SizeString | Should -Be $Expected
+        }
+
+        It "Handles no-break space between value and unit" {
+            $nbsp = [char]0x00A0
+            ConvertFrom-HumanReadableSize -SizeString "1,5${nbsp}ГБ" | Should -Be 1610612736
+        }
+
+        It "Handles narrow no-break space between value and unit" {
+            $nnbsp = [char]0x202F
+            ConvertFrom-HumanReadableSize -SizeString "1,5${nnbsp}MB" | Should -Be 1572864
+        }
     }
 }
 

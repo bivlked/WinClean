@@ -1,5 +1,5 @@
 <#PSScriptInfo
-.VERSION 2.13
+.VERSION 2.14
 .GUID 8f7c3b2a-1d4e-5f6a-9b8c-0d1e2f3a4b5c
 .AUTHOR bivlked
 .COMPANYNAME
@@ -12,6 +12,7 @@
 .REQUIREDSCRIPTS
 .EXTERNALSCRIPTDEPENDENCIES
 .RELEASENOTES
+    v2.14: Log persistence fix, correct npm/Firefox cache paths, localized size parsing, faster DISM/EventLogs, UI fixes
     v2.13: Statistics accuracy fixes, efficiency improvements, registry cleanup
     v2.12: PS 7.4+ compatibility, improved statistics (Docker/WSL/RecycleBin), ReportOnly accuracy
     v2.11: Added timeouts for winget/DISM operations, fixed version display, improved reliability
@@ -22,7 +23,7 @@
 
 <#
 .SYNOPSIS
-    WinClean - Ultimate Windows 11 Maintenance Script v2.13
+    WinClean - Ultimate Windows 11 Maintenance Script v2.14
 .DESCRIPTION
     Комплексный скрипт для обновления и очистки Windows 11:
     - Обновление Windows (включая драйверы)
@@ -36,8 +37,32 @@
     - Подробный цветной вывод + лог-файл
 .NOTES
     Author: biv
-    Version: 2.13
+    Version: 2.14
     Requires: PowerShell 7.1+, Windows 11, Administrator rights
+    Changes in 2.14:
+    - Fixed log file being deleted by the script's own temp cleanup (all entries
+      logged before Clear-TempFiles were silently lost every run)
+    - Fixed npm cache path for npm v7+ (LOCALAPPDATA\npm-cache; old APPDATA path kept as fallback)
+    - Fixed Firefox cache path (cache2/startupCache live under LOCALAPPDATA, not APPDATA)
+    - Fixed localized size parsing (Cyrillic units, no-break spaces) for Recycle Bin statistics
+    - Fixed restore points silently not created due to the 24h system frequency limit
+    - Fixed winget update count inflated by the "require explicit targeting" table
+    - Fixed Storage Sense wasting 120s + false warning when the scheduled task is disabled
+    - Fixed misaligned UPDATE AVAILABLE box and countdown ghost character
+    - DISM: component store analyzed first (/English), cleanup skipped when not needed;
+      DISM output redirected to keep console clean
+    - Event logs: only enabled non-empty Administrative/Operational logs are cleared
+      (much faster, no chronic partial-failure warnings)
+    - Delivery Optimization cache cleared via supported Delete-DeliveryOptimizationCache cmdlet
+    - Replaced dead connectivity probe winget.azureedge.net with cdn.winget.microsoft.com
+    - Removed risky cleanmgr categories (Previous Installations, Windows ESD installation files)
+    - Added Opera GX and uv cache cleanup; winget check hardened with --disable-interactivity
+    - Removed dead code (unused statusIcon/dockerInfo variables)
+    - Fixed Docker reclaimed-space parsing ($Matches after array -match) + exit code check
+    - Fixed icacls on non-English Windows (SID S-1-5-32-544 instead of localized "Administrators")
+    - Fixed failed Windows Update search being reported as "up to date"
+    - Stats no longer count locked files / undeleted Recycle Bin items as freed
+    - Custom -LogPath directories are created automatically
     Changes in 2.13:
     - Fixed Docker prune output parsing (supports "Total reclaimed space:" format)
     - Fixed WarningsCount not incrementing for event log failures
@@ -223,10 +248,15 @@ if (-not $LogPath) {
     $script:LogPath = Join-Path $env:TEMP "WinClean_$((Get-Date).ToString('yyyyMMdd_HHmmss')).log"
 } else {
     $script:LogPath = $LogPath
+    # Ensure the parent directory exists for custom log paths (v2.14)
+    $logDir = Split-Path -Path $script:LogPath -Parent
+    if ($logDir -and -not (Test-Path -LiteralPath $logDir)) {
+        New-Item -ItemType Directory -Path $logDir -Force -ErrorAction SilentlyContinue | Out-Null
+    }
 }
 
 # Script version (single source of truth for version checking)
-$script:Version = "2.13"
+$script:Version = "2.14"
 
 # Protected paths that should never be deleted
 $script:ProtectedPaths = @(
@@ -394,7 +424,7 @@ function Test-InternetConnection {
     $targets = @(
         @{ Host = 'www.microsoft.com'; Port = 443 }
         @{ Host = 'api.github.com'; Port = 443 }
-        @{ Host = 'winget.azureedge.net'; Port = 443 }
+        @{ Host = 'cdn.winget.microsoft.com'; Port = 443 }
     )
 
     $timeoutMs = 3000  # 3 секунды таймаут на каждое соединение
@@ -504,12 +534,19 @@ function Invoke-ScriptUpdate {
         [hashtable]$UpdateInfo
     )
 
+    # Dynamically centered title in a 70-char box (matches the rest of the UI; v2.14
+    # fixes a misaligned right border caused by hardcoded padding)
+    $boxWidth = 70
+    $updateTitle = "UPDATE AVAILABLE"
+    $titlePadding = [math]::Max(0, $boxWidth - $updateTitle.Length)
+    $titleLeftPad = [math]::Floor($titlePadding / 2)
+
     Write-Host ""
-    Write-Host "  ╔══════════════════════════════════════════════════════════════════╗" -ForegroundColor Cyan
-    Write-Host "  ║                      " -NoNewline -ForegroundColor Cyan
-    Write-Host "UPDATE AVAILABLE" -NoNewline -ForegroundColor Yellow
-    Write-Host "                         ║" -ForegroundColor Cyan
-    Write-Host "  ╚══════════════════════════════════════════════════════════════════╝" -ForegroundColor Cyan
+    Write-Host "  ╔$("═" * $boxWidth)╗" -ForegroundColor Cyan
+    Write-Host "  ║$(" " * $titleLeftPad)" -NoNewline -ForegroundColor Cyan
+    Write-Host $updateTitle -NoNewline -ForegroundColor Yellow
+    Write-Host "$(" " * ($titlePadding - $titleLeftPad))║" -ForegroundColor Cyan
+    Write-Host "  ╚$("═" * $boxWidth)╝" -ForegroundColor Cyan
     Write-Host ""
     Write-Host "  Current version: " -NoNewline -ForegroundColor Gray
     Write-Host "v$($UpdateInfo.CurrentVersion)" -ForegroundColor White
@@ -794,8 +831,13 @@ function ConvertFrom-HumanReadableSize {
 
     if (-not $SizeString) { return 0 }
 
+    # Normalize localized strings (e.g. from Shell GetDetailsOf on Russian Windows):
+    # replace no-break spaces with regular ones and map Cyrillic units to Latin
+    $normalized = ($SizeString -replace '[\u00A0\u202F\u2007]', ' ').Trim()
+    $normalized = $normalized -replace 'КБ$', 'KB' -replace 'МБ$', 'MB' -replace 'ГБ$', 'GB' -replace 'ТБ$', 'TB' -replace 'Б$', 'B'
+
     # Handle formats: "2.5 GB", "2.5GB", "512 MB", "100.5MB"
-    if ($SizeString -match '^([\d.,]+)\s*([KMGT]?B)$') {
+    if ($normalized -match '^([\d.,]+)\s*([KMGT]?B)$') {
         $value = [double]($Matches[1] -replace ',', '.')
         $unit = $Matches[2].ToUpper()
 
@@ -846,7 +888,9 @@ function Remove-FolderContent {
 
         [string]$Description,
 
-        [switch]$RemoveFolder
+        [switch]$RemoveFolder,
+
+        [string[]]$ExcludeFile = @()
     )
 
     # Safety check
@@ -873,7 +917,16 @@ function Remove-FolderContent {
         if ($RemoveFolder) {
             Remove-Item -LiteralPath $Path -Recurse -Force -ErrorAction SilentlyContinue
         } else {
-            Get-ChildItem -LiteralPath $Path -Force -ErrorAction SilentlyContinue | ForEach-Object {
+            Get-ChildItem -LiteralPath $Path -Force -ErrorAction SilentlyContinue | Where-Object {
+                # Skip excluded files and any directory that contains one.
+                # Deliberately conservative: a directory holding an excluded file is
+                # kept whole rather than partially cleaned (safe > thorough here)
+                $item = $_
+                -not ($ExcludeFile | Where-Object {
+                    $_ -and (($item.FullName -ieq $_) -or
+                             $_.StartsWith($item.FullName + '\', [System.StringComparison]::OrdinalIgnoreCase))
+                })
+            } | ForEach-Object {
                 try {
                     # Handle read-only files
                     if ($_.Attributes -band [System.IO.FileAttributes]::ReadOnly) {
@@ -986,10 +1039,26 @@ function New-SystemRestorePoint {
 
     try {
         # Checkpoint-Computer doesn't work in PowerShell 7, use Windows PowerShell
+        # Note (v2.14): Windows silently skips restore point creation if one was made in
+        # the last 24h (SystemRestorePointCreationFrequency default = 1440 minutes).
+        # For a maintenance script that can run daily this means points were almost never
+        # created - temporarily lift the limit for this call only, then restore it.
         $scriptBlock = @"
             try {
                 Enable-ComputerRestore -Drive "$env:SystemDrive" -ErrorAction SilentlyContinue
-                Checkpoint-Computer -Description "$Description" -RestorePointType MODIFY_SETTINGS -ErrorAction Stop
+
+                `$srKey = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\SystemRestore'
+                `$prevFreq = (Get-ItemProperty -Path `$srKey -Name SystemRestorePointCreationFrequency -ErrorAction SilentlyContinue).SystemRestorePointCreationFrequency
+                Set-ItemProperty -Path `$srKey -Name SystemRestorePointCreationFrequency -Value 0 -Type DWord -Force
+                try {
+                    Checkpoint-Computer -Description "$Description" -RestorePointType MODIFY_SETTINGS -ErrorAction Stop
+                } finally {
+                    if (`$null -ne `$prevFreq) {
+                        Set-ItemProperty -Path `$srKey -Name SystemRestorePointCreationFrequency -Value `$prevFreq -Type DWord -Force
+                    } else {
+                        Remove-ItemProperty -Path `$srKey -Name SystemRestorePointCreationFrequency -ErrorAction SilentlyContinue
+                    }
+                }
                 Write-Output "SUCCESS"
             } catch {
                 Write-Output "ERROR: `$_"
@@ -1119,15 +1188,22 @@ function Update-WindowsSystem {
         Write-Log "Searching for updates..." -Level INFO
 
         Write-Log "System Updates" -Level SECTION
-        $systemUpdates = @(Get-WindowsUpdate -MicrosoftUpdate -NotCategory "Drivers" -ErrorAction SilentlyContinue)
+        $systemUpdates = @(Get-WindowsUpdate -MicrosoftUpdate -NotCategory "Drivers" -ErrorAction SilentlyContinue -ErrorVariable wuSearchErrors)
 
         Write-Log "Driver Updates" -Level SECTION
-        $driverUpdates = @(Get-WindowsUpdate -MicrosoftUpdate -Category "Drivers" -ErrorAction SilentlyContinue)
+        $driverUpdates = @(Get-WindowsUpdate -MicrosoftUpdate -Category "Drivers" -ErrorAction SilentlyContinue -ErrorVariable +wuSearchErrors)
 
         $totalUpdates = $systemUpdates.Count + $driverUpdates.Count
 
         if ($totalUpdates -eq 0) {
-            Write-Log "Windows is up to date" -Level SUCCESS
+            # Distinguish "no updates" from "search failed" (v2.14) - previously a
+            # failed search was reported as "Windows is up to date"
+            if ($wuSearchErrors) {
+                Write-Log "Update search completed with errors: $($wuSearchErrors[0])" -Level WARNING
+                $script:Stats.WarningsCount++
+            } else {
+                Write-Log "Windows is up to date" -Level SUCCESS
+            }
             return
         }
 
@@ -1265,7 +1341,8 @@ function Update-Applications {
 
         $tempFile = [System.IO.Path]::GetTempFileName()
         $tempErrorFile = [System.IO.Path]::GetTempFileName()
-        $process = Start-Process -FilePath $wingetPath -ArgumentList "upgrade", "--include-unknown" `
+        $process = Start-Process -FilePath $wingetPath `
+            -ArgumentList "upgrade", "--include-unknown", "--accept-source-agreements", "--disable-interactivity" `
             -NoNewWindow -RedirectStandardOutput $tempFile -RedirectStandardError $tempErrorFile -PassThru
 
         # Wait with timeout (5 minutes for check operation)
@@ -1310,9 +1387,11 @@ function Update-Applications {
             # Must have multiple columns (name, id, version, available, source)
             if ($foundSeparator) {
                 $trimmed = $line.Trim()
-                # Skip empty lines, footer text ("X upgrades available"), and lines with too few columns
-                if ($trimmed -and
-                    $trimmed -notmatch "^\d+\s+(upgrade|обновлен)" -and
+                # First table ends at the first blank line - stop there to avoid counting
+                # the second "require explicit targeting" table (not covered by --all)
+                if (-not $trimmed) { break }
+                # Skip footer text ("X upgrades available") and lines with too few columns
+                if ($trimmed -notmatch "^\d+\s+(upgrade|обновлен)" -and
                     $trimmed -notmatch "^(No |Нет )" -and
                     ($trimmed -split '\s{2,}').Count -ge 3) {
                     $updateCount++
@@ -1396,7 +1475,9 @@ function Clear-TempFiles {
     } | Group-Object Path | ForEach-Object { $_.Group[0] }
 
     foreach ($item in $tempPaths) {
-        Remove-FolderContent -Path $item.Path -Category "Temp" -Description $item.Desc
+        # Exclude the active log file - it lives in $env:TEMP by default and would
+        # otherwise be deleted mid-run, losing everything logged so far
+        Remove-FolderContent -Path $item.Path -Category "Temp" -Description $item.Desc -ExcludeFile $script:LogPath
     }
 }
 
@@ -1428,9 +1509,21 @@ function Clear-BrowserCaches {
             "$env:LOCALAPPDATA\Yandex\YandexBrowser\User Data\Default\GPUCache"
         )
         "Opera" = @(
+            # Chromium disk caches live under LOCALAPPDATA; APPDATA kept for older layouts
+            "$env:LOCALAPPDATA\Opera Software\Opera Stable\Cache"
+            "$env:LOCALAPPDATA\Opera Software\Opera Stable\Code Cache"
+            "$env:LOCALAPPDATA\Opera Software\Opera Stable\GPUCache"
             "$env:APPDATA\Opera Software\Opera Stable\Cache"
             "$env:APPDATA\Opera Software\Opera Stable\Code Cache"
             "$env:APPDATA\Opera Software\Opera Stable\GPUCache"
+        )
+        "Opera GX" = @(
+            "$env:LOCALAPPDATA\Opera Software\Opera GX Stable\Cache"
+            "$env:LOCALAPPDATA\Opera Software\Opera GX Stable\Code Cache"
+            "$env:LOCALAPPDATA\Opera Software\Opera GX Stable\GPUCache"
+            "$env:APPDATA\Opera Software\Opera GX Stable\Cache"
+            "$env:APPDATA\Opera Software\Opera GX Stable\Code Cache"
+            "$env:APPDATA\Opera Software\Opera GX Stable\GPUCache"
         )
         "Brave" = @(
             "$env:LOCALAPPDATA\BraveSoftware\Brave-Browser\User Data\Default\Cache"
@@ -1519,11 +1612,18 @@ function Clear-BrowserCaches {
     }
 
     # Handle Firefox profiles separately
-    $firefoxProfiles = "$env:APPDATA\Mozilla\Firefox\Profiles"
-    if (Test-Path $firefoxProfiles) {
-        Get-ChildItem -Path $firefoxProfiles -Directory -ErrorAction SilentlyContinue | ForEach-Object {
-            Remove-FolderContent -Path "$($_.FullName)\cache2" -Category "Browser" -Description "Firefox cache"
-            Remove-FolderContent -Path "$($_.FullName)\startupCache" -Category "Browser"
+    # Note: cache2/startupCache live under LOCALAPPDATA (the APPDATA profile only
+    # holds roaming data like bookmarks/prefs) - fixed in v2.14
+    $firefoxProfileRoots = @(
+        "$env:LOCALAPPDATA\Mozilla\Firefox\Profiles"
+        "$env:APPDATA\Mozilla\Firefox\Profiles"
+    )
+    foreach ($firefoxProfiles in $firefoxProfileRoots) {
+        if (Test-Path $firefoxProfiles) {
+            Get-ChildItem -Path $firefoxProfiles -Directory -ErrorAction SilentlyContinue | ForEach-Object {
+                Remove-FolderContent -Path "$($_.FullName)\cache2" -Category "Browser" -Description "Firefox cache"
+                Remove-FolderContent -Path "$($_.FullName)\startupCache" -Category "Browser"
+            }
         }
     }
 }
@@ -1638,14 +1738,18 @@ function Clear-WinCleanRecycleBin {
                 Remove-Item -LiteralPath $_.Path -Recurse -Force -ErrorAction SilentlyContinue
             }
 
-            # Update statistics even for fallback method
-            $script:Stats.TotalFreedBytes += $sizeBefore
-            if (-not $script:Stats.FreedByCategory.ContainsKey("Recycle Bin")) {
-                $script:Stats.FreedByCategory["Recycle Bin"] = 0
+            # Measure what was actually freed - some items may have failed to
+            # delete silently (v2.14; previously the full size was always counted)
+            $freed = [math]::Max(0, $sizeBefore - (Get-RecycleBinSize))
+            if ($freed -gt 0) {
+                $script:Stats.TotalFreedBytes += $freed
+                if (-not $script:Stats.FreedByCategory.ContainsKey("Recycle Bin")) {
+                    $script:Stats.FreedByCategory["Recycle Bin"] = 0
+                }
+                $script:Stats.FreedByCategory["Recycle Bin"] += $freed
             }
-            $script:Stats.FreedByCategory["Recycle Bin"] += $sizeBefore
 
-            Write-Log "Recycle Bin emptied ($count items) - $(Format-FileSize $sizeBefore)" -Level SUCCESS
+            Write-Log "Recycle Bin emptied ($count items) - $(Format-FileSize $freed)" -Level SUCCESS
         } catch {
             Write-Log "Could not empty Recycle Bin: $_" -Level WARNING
             $script:Stats.WarningsCount++
@@ -1667,7 +1771,6 @@ function Clear-SystemCaches {
         @{ Path = "$env:LOCALAPPDATA\Microsoft\Windows\WER"; Desc = "Error reports (local)" }
         @{ Path = "$env:ProgramData\Microsoft\Windows\WER"; Desc = "Error reports (system)" }
         @{ Path = "$env:ProgramData\USOShared\Logs"; Desc = "Update logs" }
-        @{ Path = "$env:SystemDrive\ProgramData\Microsoft\Windows\DeliveryOptimization"; Desc = "Delivery Optimization" }
         @{ Path = "$env:LOCALAPPDATA\Packages\Microsoft.WindowsStore_8wekyb3d8bbwe\LocalCache"; Desc = "Windows Store cache" }
     )
 
@@ -1682,20 +1785,56 @@ function Clear-SystemCaches {
                 } else {
                     Remove-Item -LiteralPath $item.Path -Force -ErrorAction SilentlyContinue
 
-                    if ($fileSize -gt 0) {
-                        $script:Stats.TotalFreedBytes += $fileSize
-                        if (-not $script:Stats.FreedByCategory.ContainsKey("System")) {
-                            $script:Stats.FreedByCategory["System"] = 0
+                    if (Test-Path -LiteralPath $item.Path -ErrorAction SilentlyContinue) {
+                        # File is locked (e.g. IconCache.db held by Explorer) -
+                        # don't count it as freed (v2.14)
+                        Write-Log "$($item.Desc) is in use - skipped" -Level DETAIL
+                    } else {
+                        if ($fileSize -gt 0) {
+                            $script:Stats.TotalFreedBytes += $fileSize
+                            if (-not $script:Stats.FreedByCategory.ContainsKey("System")) {
+                                $script:Stats.FreedByCategory["System"] = 0
+                            }
+                            $script:Stats.FreedByCategory["System"] += $fileSize
                         }
-                        $script:Stats.FreedByCategory["System"] += $fileSize
-                    }
 
-                    Write-Log "$($item.Desc) cleaned" -Level DETAIL
+                        Write-Log "$($item.Desc) cleaned" -Level DETAIL
+                    }
                 }
             }
         } else {
             Remove-FolderContent -Path $item.Path -Category "System" -Description $item.Desc
         }
+    }
+
+    # Delivery Optimization cache: files are owned by the DO service, so raw folder
+    # deletion usually fails silently - use the supported cmdlet instead (v2.14)
+    $doPath = "$env:ProgramData\Microsoft\Windows\DeliveryOptimization"
+    if ($ReportOnly) {
+        $doSize = Get-FolderSize -Path $doPath
+        if ($doSize -gt 0) {
+            Write-Log "Would clean: Delivery Optimization - $(Format-FileSize $doSize)" -Level DETAIL
+        }
+    } elseif (Get-Command Delete-DeliveryOptimizationCache -ErrorAction SilentlyContinue) {
+        try {
+            $doSizeBefore = Get-FolderSize -Path $doPath
+            Delete-DeliveryOptimizationCache -Force -ErrorAction Stop
+            $doFreed = [math]::Max(0, $doSizeBefore - (Get-FolderSize -Path $doPath))
+            if ($doFreed -gt 0) {
+                $script:Stats.TotalFreedBytes += $doFreed
+                if (-not $script:Stats.FreedByCategory.ContainsKey("System")) {
+                    $script:Stats.FreedByCategory["System"] = 0
+                }
+                $script:Stats.FreedByCategory["System"] += $doFreed
+                Write-Log "Delivery Optimization cache - $(Format-FileSize $doFreed)" -Level SUCCESS
+            } else {
+                Write-Log "Delivery Optimization cache cleaned" -Level DETAIL
+            }
+        } catch {
+            Remove-FolderContent -Path $doPath -Category "System" -Description "Delivery Optimization"
+        }
+    } else {
+        Remove-FolderContent -Path $doPath -Category "System" -Description "Delivery Optimization"
     }
 }
 
@@ -1712,17 +1851,21 @@ function Clear-EventLogs {
     }
 
     try {
-        $logs = wevtutil el 2>$null | Where-Object {
-            $_ -notmatch 'Analytic' -and
-            $_ -notmatch 'Debug' -and
-            $_ -ne 'Security'  # Keep only the main Security log (exact match, fixed in v2.1)
+        # Enumerate only logs worth clearing: enabled, non-empty, Administrative/Operational.
+        # This skips ~1000 Analytic/Debug/empty channels - much faster and avoids
+        # chronic partial-failure warnings (v2.14; was: wevtutil el over all channels)
+        $logs = Get-WinEvent -ListLog * -ErrorAction SilentlyContinue | Where-Object {
+            $_.RecordCount -gt 0 -and
+            $_.IsEnabled -and
+            $_.LogName -ne 'Security' -and  # Keep the main Security log (exact match)
+            $_.LogType -in @('Administrative', 'Operational')
         }
 
         $clearedCount = 0
         $failedCount = 0
         foreach ($log in $logs) {
             try {
-                wevtutil cl $log 2>$null
+                wevtutil cl $log.LogName 2>$null
                 if ($LASTEXITCODE -eq 0) {
                     $clearedCount++
                 } else {
@@ -2007,7 +2150,9 @@ function Clear-WindowsOld {
         }
 
         $remaining = $timeout - [int]((Get-Date) - $startTime).TotalSeconds
-        Write-Host "`r  Delete Windows.old? (Y/n, default Y in $remaining sec): " -NoNewline -ForegroundColor Yellow
+        # {0,2} keeps the line length constant so no ghost chars remain when the
+        # countdown drops from 2 digits to 1 (v2.14)
+        Write-Host ("`r  Delete Windows.old? (Y/n, default Y in {0,2} sec): " -f $remaining) -NoNewline -ForegroundColor Yellow
         Start-Sleep -Milliseconds 100
     }
 
@@ -2018,8 +2163,10 @@ function Clear-WindowsOld {
 
         try {
             # Take ownership and remove
+            # Use the well-known SID for the Administrators group - the literal name
+            # is localized (e.g. "Администраторы") and fails on non-English Windows (v2.14)
             $null = takeown /F $windowsOldPath /A /R /D Y 2>&1
-            $null = icacls $windowsOldPath /grant Administrators:F /T /C /Q 2>&1
+            $null = icacls $windowsOldPath /grant "*S-1-5-32-544:F" /T /C /Q 2>&1
             Remove-Item -Path $windowsOldPath -Recurse -Force -ErrorAction SilentlyContinue
 
             if (-not (Test-Path $windowsOldPath)) {
@@ -2058,10 +2205,11 @@ function Clear-DeveloperCaches {
     Write-Log "DEVELOPER CACHES" -Level TITLE
     Update-Progress -Activity "Developer Cleanup" -Status "Cleaning caches..."
 
-    # NPM Cache
+    # NPM Cache (npm v7+ uses LOCALAPPDATA; older versions used APPDATA - fixed in v2.14)
     Write-Log "npm Cache" -Level SECTION
-    $npmCache = "$env:APPDATA\npm-cache"
-    if (Test-Path $npmCache) {
+    $npmCachePaths = @("$env:LOCALAPPDATA\npm-cache", "$env:APPDATA\npm-cache")
+    $npmCache = $npmCachePaths | Where-Object { Test-Path $_ } | Select-Object -First 1
+    if ($npmCache) {
         if ($ReportOnly) {
             $size = Get-FolderSize $npmCache
             Write-Log "Would clean: npm cache - $(Format-FileSize $size)" -Level DETAIL
@@ -2091,6 +2239,11 @@ function Clear-DeveloperCaches {
             } else {
                 Remove-FolderContent -Path $npmCache -Category "Developer" -Description "npm cache"
             }
+        }
+
+        # Clean any remaining legacy cache location as well (both may exist after npm upgrades)
+        foreach ($stalePath in ($npmCachePaths | Where-Object { $_ -ne $npmCache })) {
+            Remove-FolderContent -Path $stalePath -Category "Developer" -Description "npm cache (legacy)"
         }
     }
 
@@ -2166,6 +2319,11 @@ function Clear-DeveloperCaches {
     foreach ($cache in $cargoCaches) {
         Remove-FolderContent -Path $cache -Category "Developer" -Description "Cargo cache"
     }
+
+    # uv Cache (Python package/project manager)
+    Write-Log "uv Cache" -Level SECTION
+    $uvCache = "$env:LOCALAPPDATA\uv\cache"
+    Remove-FolderContent -Path $uvCache -Category "Developer" -Description "uv cache"
 }
 
 #endregion
@@ -2195,7 +2353,7 @@ function Clear-DockerWSL {
         # Check if Docker is running
         $dockerRunning = $false
         try {
-            $dockerInfo = docker info 2>&1
+            $null = docker info 2>&1
             $exitCode = $LASTEXITCODE  # Capture immediately after command
             $dockerRunning = $exitCode -eq 0
         } catch {
@@ -2210,10 +2368,19 @@ function Clear-DockerWSL {
                     # Remove unused data (stopped containers, unused networks, dangling images, build cache)
                     Write-Log "Running docker system prune..." -Level INFO
                     $result = docker system prune -f 2>&1
+                    $pruneExitCode = $LASTEXITCODE
 
+                    # Join output into a single string: -match against an array does not
+                    # populate $Matches reliably (v2.14)
+                    $resultText = $result | Out-String
+
+                    if ($pruneExitCode -ne 0) {
+                        Write-Log "Docker prune failed (exit code: $pruneExitCode)" -Level WARNING
+                        $script:Stats.WarningsCount++
+                    }
                     # Parse reclaimed space and add to statistics
                     # Supports both "reclaimed 1.23GB" and "Total reclaimed space: 1.23GB" formats
-                    if ($result -match "reclaimed\s+(?:space:\s*)?([\d.,]+\s*[KMGT]?B)") {
+                    elseif ($resultText -match "reclaimed\s+(?:space:\s*)?([\d.,]+\s*[KMGT]?B)") {
                         $reclaimedStr = $Matches[1]
                         $reclaimedBytes = ConvertFrom-HumanReadableSize $reclaimedStr
 
@@ -2431,12 +2598,46 @@ function Invoke-DISMCleanup {
         return
     }
 
+    # Analyze first: skip the expensive cleanup when DISM says it is not needed (v2.14).
+    # /English forces English output so the recommendation line is parseable on any locale.
+    # On analyze failure/timeout fall back to running the cleanup unconditionally.
+    Write-Log "Analyzing component store..." -Level INFO
+
+    $runCleanup = $true
+    $analyzeFile = [System.IO.Path]::GetTempFileName()
+    try {
+        $analyzeProcess = Start-Process -FilePath "$env:SystemRoot\System32\Dism.exe" `
+            -ArgumentList "/Online", "/English", "/Cleanup-Image", "/AnalyzeComponentStore" `
+            -NoNewWindow -PassThru -RedirectStandardOutput $analyzeFile
+
+        if ($analyzeProcess.WaitForExit(300000)) {
+            $analyzeOutput = Get-Content $analyzeFile -Raw -ErrorAction SilentlyContinue
+            if ($analyzeProcess.ExitCode -eq 0 -and
+                $analyzeOutput -match 'Component Store Cleanup Recommended\s*:\s*No') {
+                $runCleanup = $false
+                Write-Log "Component store is clean - cleanup not needed" -Level SUCCESS
+            }
+        } else {
+            $analyzeProcess.Kill()
+        }
+    } catch {
+        # Analyze failed - run the cleanup unconditionally (previous behavior)
+    } finally {
+        Remove-Item $analyzeFile -Force -ErrorAction SilentlyContinue
+    }
+
+    if (-not $runCleanup) {
+        return
+    }
+
     Write-Log "Running DISM cleanup (this may take several minutes)..." -Level INFO
 
+    # Redirect DISM output to a file - its progress bar corrupts the script's console UI
+    $dismOutFile = [System.IO.Path]::GetTempFileName()
     try {
         $dismProcess = Start-Process -FilePath "$env:SystemRoot\System32\Dism.exe" `
             -ArgumentList "/Online", "/Cleanup-Image", "/StartComponentCleanup", "/ResetBase" `
-            -NoNewWindow -PassThru
+            -NoNewWindow -PassThru -RedirectStandardOutput $dismOutFile
 
         # Wait with timeout (15 minutes for DISM operation)
         $timeoutMs = 900000
@@ -2450,11 +2651,16 @@ function Invoke-DISMCleanup {
         switch ($dismProcess.ExitCode) {
             0       { Write-Log "DISM cleanup completed successfully" -Level SUCCESS }
             87      { Write-Log "DISM cleanup not needed" -Level INFO }
-            default { Write-Log "DISM completed with code: $($dismProcess.ExitCode)" -Level WARNING }
+            default {
+                Write-Log "DISM completed with code: $($dismProcess.ExitCode)" -Level WARNING
+                $script:Stats.WarningsCount++
+            }
         }
     } catch {
         Write-Log "DISM error: $_" -Level WARNING
         $script:Stats.WarningsCount++
+    } finally {
+        Remove-Item $dismOutFile -Force -ErrorAction SilentlyContinue
     }
 }
 
@@ -2476,7 +2682,9 @@ function Invoke-StorageSense {
     $ssTaskName = "StorageSense"
     $task = Get-ScheduledTask -TaskPath $ssTaskPath -TaskName $ssTaskName -ErrorAction SilentlyContinue
 
-    if ($task) {
+    # A disabled task cannot be started - fall back to cleanmgr instead of
+    # waiting the full timeout for a task that never runs (v2.14)
+    if ($task -and $task.State -ne 'Disabled') {
         Write-Log "Running Storage Sense..." -Level INFO
 
         # Record time before running to compare with LastRunTime
@@ -2527,21 +2735,28 @@ function Invoke-StorageSense {
         }
     } else {
         # Fallback to cleanmgr
-        Write-Log "Storage Sense task not found, using Disk Cleanup..." -Level INFO
+        if ($task) {
+            Write-Log "Storage Sense task is disabled, using Disk Cleanup..." -Level INFO
+        } else {
+            Write-Log "Storage Sense task not found, using Disk Cleanup..." -Level INFO
+        }
 
         # Configure cleanup categories
         $sageset = 9999
         $regPath = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\VolumeCaches"
 
+        # Note (v2.14): "Previous Installations" removed - Windows.old deletion must go
+        # through Clear-WindowsOld which asks for user confirmation.
+        # "Windows ESD installation files" removed - ESD files are needed for "Reset this PC".
         $categories = @(
             "Active Setup Temp Folders", "BranchCache", "Downloaded Program Files",
             "Internet Cache Files", "Memory Dump Files", "Old ChkDsk Files",
-            "Previous Installations", "Recycle Bin", "Setup Log Files",
+            "Recycle Bin", "Setup Log Files",
             "System error memory dump files", "System error minidump files",
             "Temporary Files", "Temporary Setup Files", "Thumbnail Cache",
             "Update Cleanup", "Upgrade Discarded Files", "User file versions",
             "Windows Error Reporting Archive Files", "Windows Error Reporting Queue Files",
-            "Windows Upgrade Log Files", "Windows ESD installation files"
+            "Windows Upgrade Log Files"
         )
 
         try {
@@ -2655,7 +2870,6 @@ function Show-FinalStatistics {
     # Determine overall status
     $hasErrors = $script:Stats.ErrorsCount -gt 0
     $hasWarnings = $script:Stats.WarningsCount -gt 0
-    $statusIcon = if ($hasErrors) { "✗" } elseif ($hasWarnings) { "⚠" } else { "✓" }
     $statusText = if ($hasErrors) { "COMPLETED WITH ERRORS" } elseif ($hasWarnings) { "COMPLETED WITH WARNINGS" } else { "COMPLETED SUCCESSFULLY" }
     $headerColor = if ($hasErrors) { "Red" } elseif ($hasWarnings) { "Yellow" } else { "Green" }
 
@@ -2735,7 +2949,9 @@ function Show-FinalStatistics {
     # Warnings/Errors (if any)
     if ($hasWarnings -or $hasErrors) {
         $issueStr = "$($script:Stats.WarningsCount) warnings, $($script:Stats.ErrorsCount) errors"
-        $issueIcon = if ($hasErrors) { "✗" } else { "⚠" }
+        # ASCII "!" instead of "⚠": the warning sign is ambiguous-width in some
+        # terminals and breaks box alignment (v2.14)
+        $issueIcon = if ($hasErrors) { "✗" } else { "!" }
         $issueColor = if ($hasErrors) { "Red" } else { "Yellow" }
         Write-StatLine -Icon $issueIcon -Label "Issues:" -Value $issueStr -IconColor $issueColor -ValueColor $issueColor
     }

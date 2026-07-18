@@ -2,17 +2,18 @@
 
 <#
 .SYNOPSIS
-    Tests for verifying 9 specific fixes in WinClean.ps1 v2.13
+    Tests for verifying specific fixes in WinClean.ps1 (v2.13 and v2.14)
 .DESCRIPTION
-    These tests validate that all bug fixes and improvements in v2.13 are working correctly.
+    These tests validate that bug fixes and improvements are working correctly.
     Tests are organized by fix ID from the CHANGELOG.
 
     Fix Categories:
-    - A1-A3: Critical fixes (broken functionality)
-    - B1-B4: Important fixes (incorrect behavior)
-    - C1-C2: Minor fixes (edge cases)
+    - A1-A3: Critical fixes v2.13 (broken functionality)
+    - B1-B4: Important fixes v2.13 (incorrect behavior)
+    - C1-C2: Minor fixes v2.13 (edge cases)
+    - V214: Regression tests for v2.14 fixes
 .NOTES
-    Version: 2.13
+    Version: 2.14
     Requires: Pester 5.0+
 #>
 
@@ -300,6 +301,88 @@ Describe "C2: Disk Cleanup StateFlags Registry Cleanup" -Tag "Fix", "C2", "Regis
 
     It "Script targets VolumeCaches registry path" {
         $scriptContent | Should -Match 'VolumeCaches'
+    }
+}
+
+#endregion
+
+#region v2.14 Fixes
+
+Describe "v2.14: Log file protected from temp cleanup" -Tag "Fix", "V214" {
+    It "Remove-FolderContent supports ExcludeFile parameter" {
+        $scriptContent | Should -Match '\[string\[\]\]\$ExcludeFile'
+    }
+
+    It "Clear-TempFiles excludes the active log file" {
+        $scriptContent | Should -Match 'Remove-FolderContent[^\r\n]*-ExcludeFile \$script:LogPath'
+    }
+}
+
+Describe "v2.14: Cache path corrections" -Tag "Fix", "V214" {
+    It "npm cache checks LOCALAPPDATA (npm v7+) before APPDATA" {
+        $scriptContent | Should -Match '\$env:LOCALAPPDATA\\npm-cache'
+    }
+
+    It "Firefox cache is looked up under LOCALAPPDATA" {
+        $scriptContent | Should -Match '\$env:LOCALAPPDATA\\Mozilla\\Firefox\\Profiles'
+    }
+
+    It "uv cache cleanup is present" {
+        $scriptContent | Should -Match '\$env:LOCALAPPDATA\\uv\\cache'
+    }
+}
+
+Describe "v2.14: Dead internet probe replaced" -Tag "Fix", "V214" {
+    It "winget.azureedge.net (retired CDN) is no longer probed" {
+        # Check the probe target list specifically (the name may legitimately
+        # appear in release notes)
+        $scriptContent | Should -Not -Match "Host = 'winget\.azureedge\.net'"
+    }
+
+    It "cdn.winget.microsoft.com is probed instead" {
+        $scriptContent | Should -Match "Host = 'cdn\.winget\.microsoft\.com'"
+    }
+}
+
+Describe "v2.14: DISM analyze-first optimization" -Tag "Fix", "V214" {
+    It "AnalyzeComponentStore runs with /English for parseable output" {
+        $scriptContent | Should -Match '"/English",\s*"/Cleanup-Image",\s*"/AnalyzeComponentStore"'
+    }
+
+    It "Cleanup recommendation is parsed" {
+        $scriptContent | Should -Match 'Component Store Cleanup Recommended'
+    }
+}
+
+Describe "v2.14: Restore point 24h limit bypass" -Tag "Fix", "V214" {
+    It "SystemRestorePointCreationFrequency is temporarily lifted and restored" {
+        $scriptContent | Should -Match 'SystemRestorePointCreationFrequency'
+        # Must restore the previous value afterwards
+        $scriptContent | Should -Match 'prevFreq'
+    }
+}
+
+Describe "v2.14: Safer cleanmgr categories" -Tag "Fix", "V214" {
+    It "Does not auto-delete Previous Installations (Windows.old needs confirmation)" {
+        $scriptContent | Should -Not -Match '"Previous Installations",'
+    }
+
+    It "Does not delete Windows ESD installation files (needed for Reset this PC)" {
+        $scriptContent | Should -Not -Match '"Windows ESD installation files"\s*\)?\s*[,)]?\s*$'
+    }
+}
+
+Describe "v2.14: Event log enumeration" -Tag "Fix", "V214" {
+    It "Uses Get-WinEvent -ListLog with RecordCount/IsEnabled/LogType filter" {
+        $scriptContent | Should -Match 'Get-WinEvent -ListLog \*'
+        $scriptContent | Should -Match 'RecordCount -gt 0'
+        $scriptContent | Should -Match "LogType -in @\('Administrative', 'Operational'\)"
+    }
+}
+
+Describe "v2.14: winget hardening" -Tag "Fix", "V214" {
+    It "Upgrade check runs with --disable-interactivity and --accept-source-agreements" {
+        $scriptContent | Should -Match '"--accept-source-agreements", "--disable-interactivity"'
     }
 }
 

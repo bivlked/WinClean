@@ -7,6 +7,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [2.14] - 2026-07-18
+
+### Fixed
+- **Log file survival**: the log file (stored in `%TEMP%` by default) was deleted by the script's own temp cleanup - everything logged before `Clear-TempFiles` was silently lost every run. The active log is now excluded from cleanup (`Remove-FolderContent -ExcludeFile`)
+
+- **npm cache path**: npm v7+ stores its cache in `%LOCALAPPDATA%\npm-cache`, the script only checked `%APPDATA%\npm-cache` - npm cleanup silently did nothing on modern systems. Both paths are handled now
+
+- **Firefox cache path**: `cache2`/`startupCache` live under `%LOCALAPPDATA%\Mozilla\Firefox\Profiles`, the script iterated `%APPDATA%` (roaming profile, no cache there) - Firefox cleanup silently did nothing. Both roots are scanned now
+
+- **Localized size parsing**: `ConvertFrom-HumanReadableSize` only understood Latin units (`KB/MB/GB`). Shell `GetDetailsOf` fallback (Recycle Bin statistics) returns localized strings on non-English Windows (e.g. `1,52 МБ` with no-break space) which parsed as 0. Cyrillic units and no-break spaces are normalized now
+
+- **Restore points silently not created**: Windows skips restore point creation if one was made within the last 24 hours (`SystemRestorePointCreationFrequency` default), while the script reported SUCCESS. The limit is now lifted temporarily for the script's own checkpoint call and restored afterwards
+
+- **winget update count**: when winget prints a second table ("require explicit targeting"), its header and rows were counted as available updates. Parsing now stops at the end of the first table
+
+- **Storage Sense with disabled task**: if the StorageSense scheduled task is disabled, the script waited the full 120 s timeout and logged a false warning on every run. It now falls back to Disk Cleanup immediately
+
+- **Dead connectivity probe**: `winget.azureedge.net` no longer resolves (CDN retired) - replaced with `cdn.winget.microsoft.com`
+
+- **UI fixes**: misaligned right border of the "UPDATE AVAILABLE" box (inner width 63 vs 66); ghost character left by the Windows.old countdown when seconds dropped to single digits; ambiguous-width `⚠` glyph replaced with `!` inside the statistics box
+
+- **Dead code**: removed unused `$statusIcon` and `$dockerInfo` variables
+
+- **Docker reclaimed-space parsing**: `-match` against an array does not populate `$Matches` in PowerShell - the reclaimed size could be read from a stale value. Output is now joined via `Out-String` before matching, and `docker system prune` exit code is checked
+
+- **Windows.old removal on non-English Windows**: `icacls ... /grant Administrators:F` used the localized group name and failed e.g. on Russian Windows ("Администраторы"). Now uses the well-known SID `*S-1-5-32-544`
+
+- **Windows Update search errors**: a failed update search was indistinguishable from "no updates" and reported as success. Search errors are now captured via `-ErrorVariable` and reported as a warning
+
+- **Statistics accuracy**: locked single files (e.g. `IconCache.db` held by Explorer) and Recycle Bin items that failed to delete are no longer counted as freed space; unexpected DISM exit codes now count as warnings in the final status
+
+- **Custom log path**: `-LogPath` pointing into a non-existent directory is now created at startup instead of silently failing to log
+
+### Improved
+- **DISM component cleanup**: the component store is analyzed first (`/AnalyzeComponentStore /English`); the expensive `/StartComponentCleanup /ResetBase` pass (5-15 min) is skipped when DISM reports cleanup is not needed. DISM output is redirected to keep the console clean
+
+- **Event logs cleanup**: only enabled, non-empty Administrative/Operational logs are cleared (~120 instead of ~1200 channel attempts) - much faster and no more chronic partial-failure warnings
+
+- **Delivery Optimization cache**: cleared via the supported `Delete-DeliveryOptimizationCache` cmdlet (raw folder deletion usually failed silently on service-owned files), with folder cleanup as fallback
+
+- **Safer Disk Cleanup fallback**: removed `Previous Installations` (Windows.old deletion must go through the interactive confirmation) and `Windows ESD installation files` (needed for "Reset this PC") from cleanmgr categories
+
+- **winget hardening**: upgrade check now runs with `--accept-source-agreements --disable-interactivity` (no interactive prompts / progress junk in captured output)
+
+### Added
+- **Opera GX** cache cleanup; Opera/Opera GX caches also looked up under `%LOCALAPPDATA%` (where Chromium disk caches actually live)
+- **uv cache** cleanup (`%LOCALAPPDATA%\uv\cache`)
+- **npm legacy cache**: when both `%LOCALAPPDATA%` and `%APPDATA%` npm-cache folders exist, the legacy one is cleaned too
+- **21 new Pester tests** (115 total): localized size parsing (Cyrillic units, NBSP) and regression tests for all v2.14 fixes
+
+---
+
 ## [2.13] - 2026-01-18
 
 ### Added
