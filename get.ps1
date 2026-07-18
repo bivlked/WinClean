@@ -93,14 +93,30 @@ if (-not ($head -join "`n").Contains('PSScriptInfo')) {
 Unblock-File -Path $destPath -ErrorAction SilentlyContinue
 
 # 6. Run
+# NOTE: splatting a plain STRING ARRAY does not bind parameter names - the
+# tokens would be passed positionally ("-ReportOnly" would become a VALUE of
+# the first positional parameter). Parse the tokens into a hashtable instead.
+$splat = @{}
+for ($i = 0; $i -lt $WinCleanArgs.Count; $i++) {
+    $token = $WinCleanArgs[$i]
+    if ($token -like '-*') {
+        $name = $token.TrimStart('-')
+        if (($i + 1) -lt $WinCleanArgs.Count -and $WinCleanArgs[$i + 1] -notlike '-*') {
+            $splat[$name] = $WinCleanArgs[++$i]
+        } else {
+            $splat[$name] = $true
+        }
+    } else {
+        Write-Host "Unrecognized argument: '$token' (expected -Parameter [value]). Aborting." -ForegroundColor Red
+        Remove-Item $destDir -Recurse -Force -ErrorAction SilentlyContinue
+        return
+    }
+}
+
 Write-Host "Starting WinClean..." -ForegroundColor Cyan
 Write-Host ""
 try {
-    if ($WinCleanArgs) {
-        & $destPath @WinCleanArgs
-    } else {
-        & $destPath
-    }
+    & $destPath @splat
 } finally {
     Remove-Item $destDir -Recurse -Force -ErrorAction SilentlyContinue
 }

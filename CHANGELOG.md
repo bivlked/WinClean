@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [2.15] - 2026-07-18
 
+### Fixed
+- **Bootstrap parameter passthrough**: `get.ps1` initially forwarded WinClean parameters by splatting a string array, which PowerShell binds POSITIONALLY - `-ReportOnly` could silently become the `LogPath` value and an intended dry run turned into a real maintenance run. Arguments are now parsed into named-parameter (hashtable) splatting, and WinClean itself declares `PositionalBinding = $false` so stray positional arguments fail loudly instead of binding to string parameters
+
 ### Added
 - **`-ResultJsonPath` parameter**: writes a machine-readable run summary (version, duration, per-category freed bytes, warning/error counts, reboot flag) - the foundation for automated verification in CI and on test stands
 

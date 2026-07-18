@@ -386,6 +386,18 @@ Describe "v2.14: winget hardening" -Tag "Fix", "V214" {
     }
 }
 
+Describe "v2.15: positional binding hardening" -Tag "Fix", "V215" {
+    It "CmdletBinding disables positional binding (stray args must fail loudly)" {
+        $scriptContent | Should -Match 'PositionalBinding\s*=\s*\$false'
+    }
+
+    It "get.ps1 uses hashtable splatting for parameter passthrough" {
+        $getContent = Get-Content (Join-Path $PSScriptRoot '..' 'get.ps1') -Raw
+        $getContent | Should -Match '& \$destPath @splat'
+        $getContent | Should -Not -Match '& \$destPath @WinCleanArgs'
+    }
+}
+
 #endregion
 
 #region Script Version Verification

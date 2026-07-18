@@ -218,7 +218,10 @@
 #Requires -Version 7.1
 #Requires -RunAsAdministrator
 
-[CmdletBinding()]
+# PositionalBinding disabled (v2.15): stray positional arguments must fail loudly
+# instead of silently binding to LogPath/ResultJsonPath and turning an intended
+# dry run into a real one
+[CmdletBinding(PositionalBinding = $false)]
 param(
     [switch]$SkipUpdates,
     [switch]$SkipCleanup,
