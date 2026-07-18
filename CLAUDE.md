@@ -51,9 +51,11 @@ CleanScript/
 │   ├── Invoke-SmokeTest.ps1  # Смоук: ReportOnly + JSON + геометрия рамок
 │   ├── BoxGeometry.ps1       # Автопроверка геометрии консольных рамок
 │   └── proxmox/              # Стенд на Proxmox (config/results в .gitignore)
-│       ├── New-StandVM.ps1       # Разовая подготовка VM (клон шаблона + PS7 + снапшот)
+│       ├── New-StandVM.ps1       # Разовая подготовка VM (клон + PS7 + опц. локаль + снапшот)
 │       ├── Invoke-StandTest.ps1  # Цикл: rollback -> boot -> run -> assert
-│       └── StandCommon.ps1       # SSH/guest-agent helpers
+│       ├── Invoke-NightlyStand.ps1 # Ночная матрица (cron на proxmos) + Telegram-отчёт
+│       ├── Deploy-StandRunner.ps1  # Деплой runner на Proxmox-хост (pwsh, cron, creds)
+│       └── StandCommon.ps1       # SSH/guest-agent helpers (+ local-режим на хосте)
 ├── docs/                     # Черновики документации (НЕ в git!)
 │   ├── habr-article.md       # Статья для Хабра
 │   └── habr-article-info.md  # Документация по статье
@@ -229,7 +231,8 @@ Publish-PSResource -Path .\WinClean.ps1 -Repository PSGallery -ApiKey $env:PSGAL
 ```powershell
 Invoke-Pester ./tests -Output Detailed              # 139 Pester тестов
 pwsh tools/Invoke-SmokeTest.ps1                     # Смоук: ReportOnly + геометрия UI
-pwsh tools/proxmox/Invoke-StandTest.ps1 -Mode Report # Стенд на Proxmox (VM 190)
+pwsh tools/proxmox/Invoke-StandTest.ps1 -Mode Report # Стенд на Proxmox (RU=VM 190, EN: -ConfigPath ...en.json = VM 191)
+# Ночная матрица: cron 03:30 на proxmos (/opt/winclean-stand, /etc/cron.d/winclean-stand), отчёт в Telegram
 Invoke-ScriptAnalyzer -Path .\WinClean.ps1 -Severity Warning,Error
 .\WinClean.ps1 -ReportOnly                          # Предпросмотр без изменений
 ```

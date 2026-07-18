@@ -22,16 +22,27 @@ function Get-StandConfig {
 }
 
 function Invoke-Pve {
-    <# Runs a command on the Proxmox host over SSH; throws on failure unless -AllowFail #>
+    <#
+    .SYNOPSIS
+        Runs a command on the Proxmox host; throws on failure unless -AllowFail
+    .DESCRIPTION
+        Remote mode (default): over SSH with key auth.
+        Local mode (SshHost = 'local'): executed directly via bash - used when the
+        harness itself runs ON the Proxmox host (nightly cron runner).
+    #>
     param(
         [Parameter(Mandatory)]$Config,
         [Parameter(Mandatory)][string]$Command,
         [switch]$AllowFail
     )
 
-    $out = ssh -o BatchMode=yes -o ConnectTimeout=10 "$($Config.SshUser)@$($Config.SshHost)" $Command 2>&1
+    if ($Config.SshHost -eq 'local') {
+        $out = bash -c $Command 2>&1
+    } else {
+        $out = ssh -o BatchMode=yes -o ConnectTimeout=10 "$($Config.SshUser)@$($Config.SshHost)" $Command 2>&1
+    }
     if ($LASTEXITCODE -ne 0 -and -not $AllowFail) {
-        throw "SSH/qm command failed (exit $LASTEXITCODE): $Command`n$($out -join "`n")"
+        throw "qm command failed (exit $LASTEXITCODE): $Command`n$($out -join "`n")"
     }
     $out
 }

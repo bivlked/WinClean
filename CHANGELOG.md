@@ -25,6 +25,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Proxmox test stand** (`tools/proxmox/`): full-system test cycle on a disposable Windows 11 VM - rollback to baseline snapshot, boot, deliver script (local working tree or GitHub), real run, artifact collection and assertions over qemu-guest-agent. Stand infrastructure config stays out of the repository
 
+- **Nightly stand matrix** (`tools/proxmox/Invoke-NightlyStand.ps1` + `Deploy-StandRunner.ps1`): cron-driven nightly Full runs on the Proxmox host itself (pwsh on Linux, `SshHost='local'` mode) across all configured stand VMs, with a Telegram summary (direct/SOCKS transport fallback) and artifact retention. `New-StandVM.ps1` can now convert a clone's locale (`ConvertLocaleTo`, e.g. en-US) for a locale test matrix
+
 ---
 
 ## [2.14] - 2026-07-18

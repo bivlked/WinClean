@@ -35,7 +35,14 @@ param(
 
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'StandCommon.ps1')
-. (Join-Path $PSScriptRoot '..' 'BoxGeometry.ps1')
+# BoxGeometry sits flat next to this script in the deployed nightly-runner
+# layout (preferred), or one level up in the repository layout
+$boxGeometryPath = @(
+    (Join-Path $PSScriptRoot 'BoxGeometry.ps1')
+    (Join-Path $PSScriptRoot '..' 'BoxGeometry.ps1')
+) | Where-Object { Test-Path $_ } | Select-Object -First 1
+if (-not $boxGeometryPath) { throw "BoxGeometry.ps1 not found next to or above $PSScriptRoot" }
+. $boxGeometryPath
 
 $cfg = Get-StandConfig -ConfigPath $ConfigPath
 $vmid = $cfg.StandVmId
@@ -61,8 +68,15 @@ Start-Sleep -Seconds 20
 Write-Host "[2/6] Delivering WinClean.ps1 ($Source)..." -ForegroundColor Cyan
 switch ($Source) {
     'local' {
-        $localScript = (Resolve-Path (Join-Path $PSScriptRoot '..' '..' 'WinClean.ps1')).Path
-        Copy-FileToGuest -Config $cfg -LocalPath $localScript -GuestPath $guestScript
+        # Repository layout: ../../WinClean.ps1; deployed flat layout: ./WinClean.ps1
+        $localScript = @(
+            (Join-Path $PSScriptRoot '..' '..' 'WinClean.ps1')
+            (Join-Path $PSScriptRoot 'WinClean.ps1')
+        ) | Where-Object { Test-Path $_ } | Select-Object -First 1
+        if (-not $localScript) {
+            throw "Source 'local' requires WinClean.ps1 in the repository root or next to this script (deployed runners should use -Source main/release)"
+        }
+        Copy-FileToGuest -Config $cfg -LocalPath (Resolve-Path $localScript).Path -GuestPath $guestScript
     }
     default {
         $tagExpr = if ($Source -eq 'main') {

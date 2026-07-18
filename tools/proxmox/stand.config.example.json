@@ -6,5 +6,7 @@
   "StandVmName": "winclean-test",
   "MemoryMB": 8192,
   "Cores": 4,
-  "SnapshotName": "baseline"
+  "SnapshotName": "baseline",
+  "Label": "RU 25H2",
+  "ConvertLocaleTo": ""
 }

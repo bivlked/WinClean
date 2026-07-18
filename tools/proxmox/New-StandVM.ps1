@@ -73,6 +73,43 @@ Test-Path 'C:\Program Files\PowerShell\7\pwsh.exe'
     Write-Host "PowerShell 7 already present." -ForegroundColor Green
 }
 
+# 4.5 Optional locale conversion (e.g. RU template -> en-US stand for the locale matrix)
+if ($cfg.PSObject.Properties.Name -contains 'ConvertLocaleTo' -and $cfg.ConvertLocaleTo) {
+    $locale = $cfg.ConvertLocaleTo
+    Write-Host "Converting guest locale to $locale (language pack via Windows Update, 10-25 min)..." -ForegroundColor Cyan
+
+    $conv = Invoke-GuestCommand -Config $cfg -TimeoutSeconds 2400 -Script @"
+`$ErrorActionPreference = 'Stop'
+`$ProgressPreference = 'SilentlyContinue'
+Install-Language -Language $locale | Out-Null
+Set-WinSystemLocale -SystemLocale $locale
+Set-Culture $locale
+Set-WinUILanguageOverride -Language $locale
+Set-SystemPreferredUILanguage -Language $locale
+Copy-UserInternationalSettingsToSystem -WelcomeScreen `$true -NewUser `$true
+Write-Output 'CONVERT_OK'
+"@
+    if ($conv.ExitCode -ne 0 -or $conv.Output -notmatch 'CONVERT_OK') {
+        throw "Locale conversion failed (exit $($conv.ExitCode)): $($conv.Error)`n$($conv.Output)"
+    }
+
+    Write-Host "Rebooting guest to apply the locale..." -ForegroundColor Cyan
+    $null = Invoke-Pve -Config $cfg -Command "qm reboot $vmid --timeout 180"
+    Start-Sleep -Seconds 20
+    $null = Wait-GuestAgent -Config $cfg -TimeoutSeconds 420
+    Start-Sleep -Seconds 15
+
+    $verify = Invoke-GuestCommand -Config $cfg -Script @"
+"SYSLOCALE=`$((Get-WinSystemLocale).Name);CULTURE=`$((Get-Culture).Name);PREFUI=`$(Get-SystemPreferredUILanguage);INSTALLED=`$((Get-InstalledLanguage -Language $locale -ErrorAction SilentlyContinue) -ne `$null)"
+"@
+    foreach ($marker in @("SYSLOCALE=$locale", "CULTURE=$locale", "PREFUI=$locale", 'INSTALLED=True')) {
+        if ($verify.Output -notmatch [regex]::Escape($marker)) {
+            throw "Locale verification failed at '$marker', guest reports: $($verify.Output)"
+        }
+    }
+    Write-Host "Locale converted and verified: $locale" -ForegroundColor Green
+}
+
 # 5. Shutdown + baseline snapshot
 Write-Host "Shutting down and creating '$($cfg.SnapshotName)' snapshot..." -ForegroundColor Cyan
 $null = Invoke-Pve -Config $cfg -Command "qm shutdown $vmid --timeout 180"
