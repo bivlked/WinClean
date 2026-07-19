@@ -43,9 +43,9 @@ CleanScript/
 │   └── logo.svg              # Логотип проекта
 ├── get.ps1                   # Bootstrap: разовый запуск одной командой (irm | iex)
 ├── install.ps1               # Bootstrap: установка/обновление + ярлык (RunAs admin)
-├── tests/                    # Pester тесты (139 всего)
-│   ├── Helpers.Tests.ps1     # Unit-тесты helper-функций (59 тестов)
-│   ├── Fixes.Tests.ps1       # Валидационные тесты исправлений (56 тестов)
+├── tests/                    # Pester тесты (141 всего)
+│   ├── Helpers.Tests.ps1     # Unit-тесты helper-функций (65 тестов)
+│   ├── Fixes.Tests.ps1       # Валидационные тесты исправлений (52 теста)
 │   └── Integration.Tests.ps1 # Интеграционные тесты в песочнице ФС (24 теста)
 ├── tools/                    # Тестовая инфраструктура (не публикуется в PSGallery)
 │   ├── Invoke-SmokeTest.ps1  # Смоук: ReportOnly + JSON + геометрия рамок
@@ -135,6 +135,15 @@ $script:ProtectedPaths = @(...)    # Защищённые пути (никогд
 7. Диаграмму "Execution Flow" в README (версия в заголовке)
 8. CHANGELOG.md - новая запись в начале
 
+🔴 **9. GitHub Release с ассетами - ОБЯЗАТЕЛЕН, иначе one-liner'ы отдают СТАРУЮ версию.**
+`get.ps1` и `install.ps1` берут скрипт из **последнего GitHub Release** (fail-closed, без отката на main) и сверяют SHA256 с ассетом `WinClean.ps1.sha256`. Просто `git push` новую версию НЕ публикует - пользователи продолжат получать предыдущий релиз.
+```powershell
+$hash = (Get-FileHash .\WinClean.ps1 -Algorithm SHA256).Hash
+"$hash  WinClean.ps1" | Out-File "$env:TEMP\WinClean.ps1.sha256" -Encoding ascii -NoNewline
+gh release create vX.Y ".\WinClean.ps1#WinClean.ps1" "$env:TEMP\WinClean.ps1.sha256#WinClean.ps1.sha256" --title "WinClean vX.Y" --notes "..."
+# при правке скрипта внутри уже выпущенного релиза: gh release upload vX.Y ... --clobber (хеш пересчитать!)
+```
+
 ### Публикация в PSGallery
 
 ```powershell
@@ -171,7 +180,7 @@ Publish-PSResource -Path .\WinClean.ps1 -Repository PSGallery -ApiKey $env:PSGAL
 **Проверки (3 job'а):**
 1. **lint** - PSScriptAnalyzer (Warning, Error)
 2. **syntax** - Проверка синтаксиса PowerShell
-3. **test** - Pester тесты (139 тестов, запускается после lint и syntax)
+3. **test** - Pester тесты (141, запускается после lint и syntax; интеграционные требуют admin - на GitHub runners это выполняется)
 
 **Исключения PSScriptAnalyzer** (допустимые для CLI):
 - PSAvoidUsingWriteHost - это интерактивная утилита
@@ -180,7 +189,7 @@ Publish-PSResource -Path .\WinClean.ps1 -Repository PSGallery -ApiKey $env:PSGAL
 
 ### Pester тесты (v2.13+)
 
-- `tests/Helpers.Tests.ps1` - 59 unit-тестов, `tests/Fixes.Tests.ps1` - 56 тестов, `tests/Integration.Tests.ps1` - 24 интеграционных (песочница ФС, требуют admin)
+- `tests/Helpers.Tests.ps1` - 65 unit-тестов, `tests/Fixes.Tests.ps1` - 52 теста, `tests/Integration.Tests.ps1` - 24 интеграционных (песочница ФС, требуют admin)
 - Особенности: функции в BeforeAll (не AST), regex для locale-независимости, отдельные It блоки
 
 ---
@@ -188,14 +197,20 @@ Publish-PSResource -Path .\WinClean.ps1 -Repository PSGallery -ApiKey $env:PSGAL
 ## 7. Текущие задачи
 
 ### В работе
-- [ ] Публикация статьи на Хабре (`docs/habr-article.md` - текст готов, ждёт скриншоты)
-- [ ] Интеграционное тестирование в Hyper-V VM
+- [ ] **Публикация v2.15 в PSGallery** (решение за пользователем; GitHub Release v2.15 уже выпущен, one-liner'ы работают). Команда - в разделе "Публикация в PSGallery" ниже
+- [ ] Публикация статьи на Хабре (`docs/habr-article.md` - текст готов, ждёт скриншоты). ⚠️ Текст писался под старую версию - сверить с v2.15 (появились get.ps1/install.ps1, стенд, ночные прогоны)
+
+### Сделано (19.07.2026, чтобы не переоткрывать)
+- ✅ Интеграционное тестирование в VM - закрыто **стендом на Proxmox** (VM 190 RU + VM 191 EN), Hyper-V не понадобился
+- ✅ Установка одной командой - `get.ps1` / `install.ps1` (см. раздел 2 и README)
+- ✅ Ночные автопрогоны стенда с Telegram-отчётом (cron 03:30 на proxmos)
 
 ### Планы
 - [ ] Профили очистки (aggressive / moderate / minimal)
 - [ ] Поддержка WSL дистрибутивов (apt/snap кэши)
 - [ ] Scoop bucket для установки
 - [ ] Продвижение: Reddit (r/PowerShell), Dev.to
+- [ ] Опционально: еженедельный прогон стенда в режиме `FullWithUpdates` (сейчас ночью только `Full` без обновлений)
 
 ---
 
@@ -229,7 +244,7 @@ Publish-PSResource -Path .\WinClean.ps1 -Repository PSGallery -ApiKey $env:PSGAL
 ## 9. Тестирование
 
 ```powershell
-Invoke-Pester ./tests -Output Detailed              # 139 Pester тестов
+Invoke-Pester ./tests -Output Detailed              # 141 Pester тест (65+52+24)
 pwsh tools/Invoke-SmokeTest.ps1                     # Смоук: ReportOnly + геометрия UI
 pwsh tools/proxmox/Invoke-StandTest.ps1 -Mode Report # Стенд на Proxmox (RU=VM 190, EN: -ConfigPath ...en.json = VM 191)
 # Ночная матрица: cron 03:30 на proxmos (/opt/winclean-stand, /etc/cron.d/winclean-stand), отчёт в Telegram
@@ -247,6 +262,8 @@ Invoke-ScriptAnalyzer -Path .\WinClean.ps1 -Severity Warning,Error
 - **Версия в нескольких местах** - см. раздел "Версионирование"
 - **docs/ не в git** - черновики (статья для Хабра, ждёт скриншоты)
 - **Pester тесты**: функции в BeforeAll (не AST), regex для locale-независимости, отдельные It блоки
+- 🔴 **Боевые прогоны скрипта - ТОЛЬКО на стенде, не на рабочей станции.** 18.07.2026 e2e-проверка «безопасного» dry-run отработала по-боевому (сплаттинг массива в `get.ps1` биндил `-ReportOnly` позиционно в `LogPath`). Отсюда два durable-правила: у любого «безопасного» прогона сначала ВЕРИФИЦИРОВАТЬ режим (маркер `REPORT MODE` в выводе / `ReportOnly:true` в result JSON), а деструктивное гонять на VM 190/191. Разбор: память `ps-array-splat-positional-trap`
+- **Стенд и отчёты**: конфиги стендов `tools/proxmox/stand.config*.json` в git НЕ хранятся (только `.example`); runner на proxmos в `/opt/winclean-stand` (редеплой - `pwsh tools/proxmox/Deploy-StandRunner.ps1`); ночные отчёты шлёт бот **@bivalerter_bot** в личный чат, доставка ТОЛЬКО через SOCKS-шлюз .210 (direct режется DPI). Механика транспорта в гостя: память `proxmox-guest-exec-transport`
 - Ссылки: [Issues](https://github.com/bivlked/WinClean/issues) | [PSGallery](https://www.powershellgallery.com/packages/WinClean)
 
 ---
