@@ -7,6 +7,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [Unreleased]
+
+Planned for a later release: quick system health section (SMART, image integrity, WinRE),
+Windows Update driver listing, run-to-run delta and HTML report. See CLAUDE.md.
+
+---
+
+## [2.16] - 2026-07-20
+
+### Added
+
+- **Driver store cleanup**: removes superseded third-party driver packages. A package is deleted only when no device is bound to it **and** a newer version of the same INF is installed, so drivers for temporarily unplugged hardware are preserved. `pnputil /force` is never used. Measured 451.8 MB across 31 packages on the author's workstation (one Bluetooth INF was present in nine versions)
+- **Disk space report**: shows large consumers that cleanup deliberately leaves alone - MSI cache (`C:\Windows\Installer`, required for uninstall and repair), search index, `hiberfil.sys`, page file and shadow copies. On the author's machine this surfaced 51 GB of hibernation file and 10.7 GB of search index that no cleanup would ever have explained
+- **Kernel dump cleanup**: deletes `LiveKernelReports\*.dmp` older than 30 days. Nothing in Windows cleans these up - an 8.99 GB watchdog dump had been sitting untouched for 18 months
+- `ControlledFolderAccess` field in the result JSON
+
+### Fixed
+
+- **Delivery Optimization cache was measured at the wrong path**: the `ProgramData` location does not exist on Windows 11, so a 7.37 GB cache was reported as "0 B" both in `-ReportOnly` and in the freed-space statistics. The cache lives under the NetworkService profile; the old path is kept as a fallback for earlier builds
+- **Temp cleanup deleted files of running applications**: entries younger than one day are now skipped (`-MinAgeDays`). `-ReportOnly` measures by the same rule, so the preview no longer promises more than the run deletes
+- **Windows Update cache was cleaned while the service still held it**: a failed `Stop-Service` was swallowed silently; the script now waits for the Stopped state and warns if a service is still running
+- **Controlled Folder Access was invisible**: when enabled, Defender blocks deletions without raising an error, so the log reported success while nothing was freed. A warning is now emitted up front
+- **Disk Cleanup category list did not match the registry**: three handlers never existed on Windows 11 (`Memory Dump Files`, `Windows Error Reporting Archive/Queue Files`) and were silently skipped. Replaced with the real `Windows Error Reporting Files`, plus `Device Driver Packages`, `D3D Shader Cache`, `Language Pack` and four others. `DownloadsFolder` is deliberately excluded - it is the user's Downloads folder
+- **Registry cleanup missed leftover flags**: `StateFlags9999` was removed only for the current category list, leaving flags from interrupted runs behind forever. Four such leftovers were found on a live machine; every handler is now swept
+- **Disk Cleanup timed out on every run**: the 420 second limit was too short for a workstation with a large component store. Raised to 900 seconds, and exceeding it is no longer counted as a warning - cleanmgr keeps working after the script stops waiting
+- **winget exit codes were printed as bare numbers**: `-1978335188` now reads as `0x8A15002C - some applications failed to upgrade`. `0x8A15002B` ("nothing to upgrade") is no longer reported as a warning at all
+- **Progress bars stayed on screen under the summary**: the script closed two activity names that never existed while using seven real ones. All are closed now, including foreign bars from other cmdlets
+
+### Documentation
+
+- Removed 23 em dashes from README, README_RU, CHANGELOG and CONTRIBUTING
+- Test counters corrected to the actual number (CONTRIBUTING claimed 94, CHANGELOG claimed 139)
+- SECURITY.md: dropped the false claim that releases are signed, documented the SHA256 release verification and protected install location added in 2.15
+- CLAUDE.md: section map and versioning checklist rebuilt from the real file
+
+### Tests
+
+- 181 Pester tests (was 141): 38 new validation tests covering every fix and feature above, plus an integration test proving that freshly written temp files survive cleanup
+
+---
+
 ## [2.15] - 2026-07-18
 
 ### Fixed
@@ -19,7 +60,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **One-command install/update** (`install.ps1`): `irm .../install.ps1 | iex` (elevated) - installs or updates WinClean into the admin-protected `%ProgramFiles%\WinClean` (an elevated shortcut must not point at a user-writable file) and creates a desktop shortcut with the "Run as administrator" flag set (elevation on double-click)
 
-- **Integration test suite** (`tests/Integration.Tests.ps1`, 24 tests): real cleanup functions run against a sandboxed fake filesystem in a child process with redirected environment variables - verifies what actually gets deleted and what must survive (active log, protected paths, browser profile data). 139 Pester tests total
+- **Integration test suite** (`tests/Integration.Tests.ps1`, 24 tests): real cleanup functions run against a sandboxed fake filesystem in a child process with redirected environment variables - verifies what actually gets deleted and what must survive (active log, protected paths, browser profile data). 141 Pester tests total
 
 - **Smoke runner** (`tools/Invoke-SmokeTest.ps1`): safe ReportOnly run with automated verification of exit code, result JSON and console box geometry (`tools/BoxGeometry.ps1` catches misaligned frames and foreign output inside boxes automatically)
 
@@ -268,7 +309,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Disk space warning: Red <10%, Yellow <20%
 
 ### Changed
-- **Removed auto-close timeout**: Window now waits indefinitely for keypress instead of 60-second timeout — users won't miss results if distracted
+- **Removed auto-close timeout**: Window now waits indefinitely for keypress instead of 60-second timeout - users won't miss results if distracted
 
 ---
 
@@ -276,8 +317,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 - **Critical: TotalFreedBytes always showed 0**: The "Space freed" counter in final statistics was always displaying 0 bytes regardless of actual cleanup
-  - **Root cause**: `[System.Threading.Interlocked]::Add([ref]$script:Stats.TotalFreedBytes, ...)` doesn't work with hashtable elements in PowerShell — `[ref]` creates a temporary copy instead of referencing the actual hashtable value
-  - **Solution**: Replaced all 6 occurrences with simple `+=` operator — the synchronized hashtable already provides thread-safety for basic operations
+  - **Root cause**: `[System.Threading.Interlocked]::Add([ref]$script:Stats.TotalFreedBytes, ...)` doesn't work with hashtable elements in PowerShell - `[ref]` creates a temporary copy instead of referencing the actual hashtable value
+  - **Solution**: Replaced all 6 occurrences with simple `+=` operator - the synchronized hashtable already provides thread-safety for basic operations
   - **Impact**: All previous versions (2.0-2.2) had this bug; users saw "Space freed: 0 Bytes" even when gigabytes were actually cleaned
 
 ---
@@ -286,7 +327,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 - **TcpClient resource leak**: Now properly closed in `finally` block to prevent socket exhaustion on repeated connection failures
-- **Code region markers**: Fixed 8 misplaced `#region` tags that should have been `#` (plain comment) — now IDE can properly fold code sections
+- **Code region markers**: Fixed 8 misplaced `#region` tags that should have been `#` (plain comment) - now IDE can properly fold code sections
 - **Banner ASCII art**: Changed from "DREAM" to "CLEAN" to match the script name
 
 ---
@@ -295,7 +336,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 - **Clear-EventLogs precision**: Now uses exact match (`-ne 'Security'`) instead of `-notmatch 'Security'` to only preserve the main Security log (was incorrectly skipping all logs with "Security" in the name)
-- **Browser profile cache cleanup**: Additional Chrome/Edge profiles now get full cache set (Cache, Code Cache, GPUCache, Service Worker) — previously only Cache was cleaned
+- **Browser profile cache cleanup**: Additional Chrome/Edge profiles now get full cache set (Cache, Code Cache, GPUCache, Service Worker) - previously only Cache was cleaned
 - **Update-Applications error tracking**: Now increments `ErrorsCount` when no internet connection (was only logging error without counting)
 - **Roslyn Temp cleanup**: File patterns (`*.roslynobjectin`) now handled correctly using new `Remove-FilesByPattern` function (was passing file paths to directory cleanup function)
 - **winget update count**: Now works with any source, not just `winget|msstore` (supports custom/corporate repositories)

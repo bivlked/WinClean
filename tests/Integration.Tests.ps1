@@ -74,6 +74,23 @@ BeforeAll {
             [System.IO.File]::WriteAllText((Join-Path $root $f), $files[$f])
         }
 
+        # v2.16: Clear-TempFiles skips entries younger than a day, so temp junk has to be
+        # aged for the cleanup tests to be meaningful. Files first, then the directory -
+        # writing a file bumps its parent's LastWriteTime.
+        $old = (Get-Date).AddDays(-3)
+        foreach ($rel in @(
+            'Users\test\AppData\Local\Temp\junk1.txt'
+            'Users\test\AppData\Local\Temp\junkdir\junk2.txt'
+            'Users\test\AppData\Local\Temp\junkdir'
+            'Windows\Temp\wjunk.txt'
+        )) {
+            $item = Get-Item -LiteralPath (Join-Path $root $rel) -Force
+            $item.LastWriteTime = $old
+        }
+
+        # Freshly written file: must survive the age filter
+        [System.IO.File]::WriteAllText((Join-Path $root 'Users\test\AppData\Local\Temp\fresh.txt'), 'x' * 1024)
+
         $script:SandboxRoots.Add($root)
         return $root
     }
@@ -159,6 +176,11 @@ Clear-TempFiles
 
     It "Removes junk from Windows temp" {
         Test-Path (Join-Path $root 'Windows\Temp\wjunk.txt') | Should -BeFalse
+    }
+
+    It "Keeps files younger than a day (v2.16 age filter)" {
+        # Files of a running installer must not be deleted mid-operation
+        Test-Path (Join-Path $root 'Users\test\AppData\Local\Temp\fresh.txt') | Should -BeTrue
     }
 
     It "Keeps the active log file (v2.14 regression)" {
@@ -294,5 +316,43 @@ Write-ResultJson -Path $ResultJsonPath
         [long]$json.TotalFreedBytes | Should -BeGreaterThan 0
         $json.PSObject.Properties.Name | Should -Contain 'ErrorsCount'
         $json.PSObject.Properties.Name | Should -Contain 'FreedByCategory'
+    }
+}
+
+Describe "Sandbox: temp age filter is recursive" -Tag "Integration" -Skip:(-not $IsElevated) {
+
+    BeforeAll {
+        $root = New-Sandbox
+        $tempRoot = Join-Path $root 'Users\test\AppData\Local\Temp'
+        $old = (Get-Date).AddDays(-10)
+
+        # Old-looking directory holding a freshly written file deeper inside.
+        # A parent's LastWriteTime does not move when a grandchild changes, so a
+        # non-recursive age check would delete the fresh file along with the parent.
+        $nested = Join-Path $tempRoot 'oldlooking\inner'
+        New-Item -ItemType Directory -Path $nested -Force | Out-Null
+        [System.IO.File]::WriteAllText((Join-Path $nested 'fresh-inside.txt'), 'x' * 512)
+        (Get-Item (Join-Path $tempRoot 'oldlooking') -Force).LastWriteTime = $old
+
+        # Directory that is old all the way down: must still be removed
+        $stale = Join-Path $tempRoot 'fullyold'
+        New-Item -ItemType Directory -Path $stale -Force | Out-Null
+        [System.IO.File]::WriteAllText((Join-Path $stale 'old.txt'), 'x' * 512)
+        (Get-Item (Join-Path $stale 'old.txt') -Force).LastWriteTime = $old
+        (Get-Item $stale -Force).LastWriteTime = $old
+
+        $result = Invoke-Sandbox -Root $root -Body 'Clear-TempFiles'
+    }
+
+    It "Runs without errors" {
+        $result.ExitCode | Should -Be 0
+    }
+
+    It "Keeps a directory that holds a fresh file deeper inside" {
+        Test-Path (Join-Path $root 'Users\test\AppData\Local\Temp\oldlooking\inner\fresh-inside.txt') | Should -BeTrue
+    }
+
+    It "Still removes a directory that is old all the way down" {
+        Test-Path (Join-Path $root 'Users\test\AppData\Local\Temp\fullyold') | Should -BeFalse
     }
 }

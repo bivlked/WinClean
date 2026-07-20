@@ -6,7 +6,7 @@
 
 ### Комплексный скрипт обслуживания Windows 11
 
-[![Версия](https://img.shields.io/badge/версия-2.15-blue.svg)](https://github.com/bivlked/WinClean/releases)
+[![Версия](https://img.shields.io/badge/версия-2.16-blue.svg)](https://github.com/bivlked/WinClean/releases)
 [![PSGallery](https://img.shields.io/powershellgallery/v/WinClean?label=PSGallery&logo=powershell&logoColor=white)](https://www.powershellgallery.com/packages/WinClean)
 [![CI](https://github.com/bivlked/WinClean/actions/workflows/ci.yml/badge.svg)](https://github.com/bivlked/WinClean/actions/workflows/ci.yml)
 [![PowerShell 7.1+](https://img.shields.io/badge/PowerShell-7.1%2B-5391FE?logo=powershell&logoColor=white)](https://github.com/PowerShell/PowerShell)
@@ -55,7 +55,7 @@
 - **Все инструменты разработки** параллельно
 - **Docker и WSL** оптимизированы
 - **Глубокая очистка** через DISM
-- **Безопасно** — защищённые пути
+- **Безопасно** - защищённые пути
 
 </td>
 </tr>
@@ -81,11 +81,14 @@
 <td width="33%" valign="top">
 
 ### 🗑️ Очистка
-- Временные файлы (3 места)
+- Временные файлы (с учётом возраста)
 - Кэши браузеров (6 браузеров)
 - Кэши Windows (8 типов)
+- Хранилище драйверов (старые версии)
+- Устаревшие дампы ядра
 - Очистка корзины
 - Удаление Windows.old
+- Отчёт по месту на диске
 
 </td>
 <td width="33%" valign="top">
@@ -204,7 +207,7 @@ cd WinClean
 | `-SkipDockerCleanup` | Пропустить очистку Docker/WSL | `false` |
 | `-SkipVSCleanup` | Пропустить очистку Visual Studio | `false` |
 | `-DisableTelemetry` | Отключить телеметрию Windows через групповую политику | `false` |
-| `-ReportOnly` | **Тестовый режим** — показать, что будет сделано | `false` |
+| `-ReportOnly` | **Тестовый режим** - показать, что будет сделано | `false` |
 | `-LogPath` | Путь к файлу лога | Авто |
 | `-ResultJsonPath` | Машиночитаемый итог прогона (JSON) для автоматизации/CI | Выкл |
 
@@ -263,10 +266,10 @@ cd WinClean
 
 | Профиль | Команда | Для чего |
 |:--------|:--------|:---------|
-| **Просмотр** | `.\WinClean.ps1 -ReportOnly` | Первый запуск — посмотреть, что будет очищено, без изменений |
-| **Безопасный** | `.\WinClean.ps1 -SkipUpdates -SkipDockerCleanup` | Минимум риска — только временные файлы и кэши |
-| **Разработчик** | `.\WinClean.ps1` | Полная очистка — включая npm, pip, nuget, Docker, IDE кэши |
-| **Быстрый** | `.\WinClean.ps1 -SkipUpdates -SkipDevCleanup -SkipVSCleanup` | Быстро — только системная очистка |
+| **Просмотр** | `.\WinClean.ps1 -ReportOnly` | Первый запуск - посмотреть, что будет очищено, без изменений |
+| **Безопасный** | `.\WinClean.ps1 -SkipUpdates -SkipDockerCleanup` | Минимум риска - только временные файлы и кэши |
+| **Разработчик** | `.\WinClean.ps1` | Полная очистка - включая npm, pip, nuget, Docker, IDE кэши |
+| **Быстрый** | `.\WinClean.ps1 -SkipUpdates -SkipDevCleanup -SkipVSCleanup` | Быстро - только системная очистка |
 | **Только обновления** | `.\WinClean.ps1 -SkipCleanup` | Только обновления Windows и приложений |
 
 > 💡 **Совет:** Всегда сначала запускайте с `-ReportOnly` для предпросмотра!
@@ -336,7 +339,7 @@ C:\Users\ВашеИмя\
 
 ```
 ┌────────────────────────────────────────────────────────────────┐
-│                     WinClean v2.15                             │
+│                     WinClean v2.16                             │
 ├────────────────────────────────────────────────────────────────┤
 │  ПОДГОТОВКА                                                    │
 │  ├─ ✓ Проверка прав администратора                             │
@@ -355,14 +358,16 @@ C:\Users\ВашеИмя\
 ├────────────────────────────────────────────────────────────────┤
 │  ГЛУБОКАЯ ОЧИСТКА                                              │
 │  ├─ 🔧 Очистка компонентов DISM                                │
-│  ├─ 💾 Очистка диска (20+ категорий)                           │
+│  ├─ 💾 Очистка диска (24 категории)                            │
+│  ├─ 🚗 Хранилище драйверов (устаревшие пакеты)                 │
+│  ├─ 🧹 Старые дампы ядра (старше 30 дней)                      │
 │  └─ 📁 Удаление Windows.old (с подтверждением)                 │
 ├────────────────────────────────────────────────────────────────┤
 │  ПРИВАТНОСТЬ (опционально)                                     │
 │  ├─ 🔒 Очистка DNS кэша и истории                              │
 │  └─ ⚙️ Отключение телеметрии (если -DisableTelemetry)          │
 ├────────────────────────────────────────────────────────────────┤
-│  📊 ИТОГОВЫЙ ОТЧЁТ                                             │
+│  📊 ОТЧЁТ ПО МЕСТУ НА ДИСКЕ + ИТОГИ                            │
 └────────────────────────────────────────────────────────────────┘
 ```
 
@@ -444,7 +449,7 @@ C:\Users\ВашеИмя\
 
 ## 📄 Лицензия
 
-Этот проект лицензирован под MIT License — см. файл [LICENSE](LICENSE) для подробностей.
+Этот проект лицензирован под MIT License - см. файл [LICENSE](LICENSE) для подробностей.
 
 ---
 

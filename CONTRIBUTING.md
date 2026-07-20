@@ -107,12 +107,14 @@ Invoke-Pester ./tests -Output Detailed
 # Run specific test file
 Invoke-Pester ./tests/Helpers.Tests.ps1
 Invoke-Pester ./tests/Fixes.Tests.ps1
+Invoke-Pester ./tests/Integration.Tests.ps1
 ```
 
 #### Test Structure
 
-- `tests/Helpers.Tests.ps1` — Unit tests for helper functions (safe, no system changes)
-- `tests/Fixes.Tests.ps1` — Validation tests for bug fixes (code inspection)
+- `tests/Helpers.Tests.ps1` - Unit tests for helper functions (safe, no system changes)
+- `tests/Fixes.Tests.ps1` - Validation tests for bug fixes (code inspection)
+- `tests/Integration.Tests.ps1` - Integration tests: real cleanup functions run against a sandboxed fake filesystem (requires administrator)
 
 #### Manual Testing
 
@@ -126,7 +128,7 @@ Invoke-Pester ./tests/Fixes.Tests.ps1
 All PRs automatically run:
 - PSScriptAnalyzer (linting)
 - Syntax check
-- Pester tests (94 tests)
+- Pester tests (141 tests)
 
 ### Commit Messages
 
@@ -213,12 +215,14 @@ Invoke-Pester ./tests -Output Detailed
 # Запустить конкретный файл тестов
 Invoke-Pester ./tests/Helpers.Tests.ps1
 Invoke-Pester ./tests/Fixes.Tests.ps1
+Invoke-Pester ./tests/Integration.Tests.ps1
 ```
 
 #### Структура тестов
 
-- `tests/Helpers.Tests.ps1` — Unit-тесты вспомогательных функций (безопасные, без изменений системы)
-- `tests/Fixes.Tests.ps1` — Валидационные тесты исправлений (проверка кода)
+- `tests/Helpers.Tests.ps1` - Unit-тесты вспомогательных функций (безопасные, без изменений системы)
+- `tests/Fixes.Tests.ps1` - Валидационные тесты исправлений (проверка кода)
+- `tests/Integration.Tests.ps1` - Интеграционные тесты: реальные функции очистки в песочнице файловой системы (требуют прав администратора)
 
 #### Ручное тестирование
 
@@ -232,7 +236,7 @@ Invoke-Pester ./tests/Fixes.Tests.ps1
 Все PR автоматически проходят:
 - PSScriptAnalyzer (линтинг)
 - Проверка синтаксиса
-- Pester тесты (94 теста)
+- Pester тесты (141 тест)
 
 ---
 

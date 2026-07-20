@@ -6,7 +6,7 @@
 
 ### Ultimate Windows 11 Maintenance Script
 
-[![Version](https://img.shields.io/badge/version-2.15-blue.svg)](https://github.com/bivlked/WinClean/releases)
+[![Version](https://img.shields.io/badge/version-2.16-blue.svg)](https://github.com/bivlked/WinClean/releases)
 [![PSGallery](https://img.shields.io/powershellgallery/v/WinClean?label=PSGallery&logo=powershell&logoColor=white)](https://www.powershellgallery.com/packages/WinClean)
 [![CI](https://github.com/bivlked/WinClean/actions/workflows/ci.yml/badge.svg)](https://github.com/bivlked/WinClean/actions/workflows/ci.yml)
 [![PowerShell 7.1+](https://img.shields.io/badge/PowerShell-7.1%2B-5391FE?logo=powershell&logoColor=white)](https://github.com/PowerShell/PowerShell)
@@ -55,7 +55,7 @@
 - **All dev tools** handled in parallel
 - **Docker & WSL** optimized
 - **Deep cleanup** with DISM
-- **Safe by design** — protected paths
+- **Safe by design** - protected paths
 
 </td>
 </tr>
@@ -81,11 +81,14 @@
 <td width="33%" valign="top">
 
 ### 🗑️ Cleanup
-- Temp files (3 locations)
+- Temp files (age-aware)
 - Browser caches (6 browsers)
 - Windows caches (8 types)
+- Driver store (old versions)
+- Stale kernel dumps
 - Recycle Bin emptying
 - Windows.old removal
+- Disk space report
 
 </td>
 <td width="33%" valign="top">
@@ -204,7 +207,7 @@ cd WinClean
 | `-SkipDockerCleanup` | Skip Docker/WSL cleanup | `false` |
 | `-SkipVSCleanup` | Skip Visual Studio cleanup | `false` |
 | `-DisableTelemetry` | Disable Windows telemetry via Group Policy | `false` |
-| `-ReportOnly` | **Dry run** — show what would be done | `false` |
+| `-ReportOnly` | **Dry run** - show what would be done | `false` |
 | `-LogPath` | Custom log file path | Auto |
 | `-ResultJsonPath` | Write a machine-readable run summary (JSON) for automation/CI | Off |
 
@@ -263,10 +266,10 @@ Choose the right profile for your needs:
 
 | Profile | Command | Best For |
 |:--------|:--------|:---------|
-| **Preview** | `.\WinClean.ps1 -ReportOnly` | First run — see what will be cleaned without changes |
-| **Safe** | `.\WinClean.ps1 -SkipUpdates -SkipDockerCleanup` | Minimal risk — only temp files and caches |
-| **Developer** | `.\WinClean.ps1` | Full cleanup — includes npm, pip, nuget, Docker, IDE caches |
-| **Quick** | `.\WinClean.ps1 -SkipUpdates -SkipDevCleanup -SkipVSCleanup` | Fast — system cleanup only, no dev tools |
+| **Preview** | `.\WinClean.ps1 -ReportOnly` | First run - see what will be cleaned without changes |
+| **Safe** | `.\WinClean.ps1 -SkipUpdates -SkipDockerCleanup` | Minimal risk - only temp files and caches |
+| **Developer** | `.\WinClean.ps1` | Full cleanup - includes npm, pip, nuget, Docker, IDE caches |
+| **Quick** | `.\WinClean.ps1 -SkipUpdates -SkipDevCleanup -SkipVSCleanup` | Fast - system cleanup only, no dev tools |
 | **Updates Only** | `.\WinClean.ps1 -SkipCleanup` | Just Windows and app updates |
 
 > 💡 **Tip:** Always run with `-ReportOnly` first to preview what will be cleaned!
@@ -336,7 +339,7 @@ C:\Users\YourName\
 
 ```
 ┌────────────────────────────────────────────────────────────────┐
-│                     WinClean v2.15                              │
+│                     WinClean v2.16                             │
 ├────────────────────────────────────────────────────────────────┤
 │  PREPARATION                                                   │
 │  ├─ ✓ Check Administrator Rights                               │
@@ -355,14 +358,16 @@ C:\Users\YourName\
 ├────────────────────────────────────────────────────────────────┤
 │  DEEP CLEANUP                                                  │
 │  ├─ 🔧 DISM Component Cleanup                                  │
-│  ├─ 💾 Disk Cleanup (20+ categories)                           │
+│  ├─ 💾 Disk Cleanup (24 categories)                            │
+│  ├─ 🚗 Driver Store (superseded packages)                      │
+│  ├─ 🧹 Stale Kernel Dumps (older than 30 days)                 │
 │  └─ 📁 Windows.old Removal (with confirmation)                 │
 ├────────────────────────────────────────────────────────────────┤
 │  PRIVACY (optional)                                            │
 │  ├─ 🔒 Clear DNS Cache & History                               │
 │  └─ ⚙️ Disable Telemetry (if -DisableTelemetry)                │
 ├────────────────────────────────────────────────────────────────┤
-│  📊 SUMMARY REPORT                                             │
+│  📊 DISK SPACE REPORT + SUMMARY                                │
 └────────────────────────────────────────────────────────────────┘
 ```
 
@@ -444,7 +449,7 @@ Contributions are welcome! Please feel free to submit a Pull Request.
 
 ## 📄 License
 
-This project is licensed under the MIT License — see the [LICENSE](LICENSE) file for details.
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
 
 ---
 

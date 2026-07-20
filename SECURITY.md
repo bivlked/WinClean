@@ -16,7 +16,9 @@ WinClean is designed with security in mind:
 - **No Network Data**: Script doesn't send any data externally
 - **No Credentials**: Script never stores or transmits credentials
 - **Dry Run Mode**: `-ReportOnly` flag to preview all changes
-- **Signed Commits**: All releases are signed
+- **SHA256 verification** (since 2.15): `get.ps1` and `install.ps1` download the script from the latest GitHub Release and verify it against the published `WinClean.ps1.sha256` asset. Verification is fail-closed - a hash mismatch or a missing asset aborts the run, and the scripts never silently fall back to a mutable branch
+- **Protected install location** (since 2.15): `install.ps1` installs to `%ProgramFiles%\WinClean`, which requires administrator rights to modify, so the elevated desktop shortcut cannot be hijacked by a non-admin process
+- **Explicit parameter binding** (since 2.15): the script declares `PositionalBinding = $false`, so a stray argument fails loudly instead of silently binding to the wrong parameter
 
 ### Protected Paths (Never Modified)
 
