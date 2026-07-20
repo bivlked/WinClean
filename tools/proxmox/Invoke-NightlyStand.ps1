@@ -10,10 +10,12 @@
     example) it runs Invoke-StandTest.ps1, collects verdict + stats from the run
     artifacts, sends a single Telegram summary and prunes old results.
 
-    Telegram credentials come from an env file (default /root/.winclean-stand.env):
+    Telegram credentials come from an env file (default /root/.winclean-stand.env),
+    written by Deploy-StandRunner.ps1 from the (gitignored) stand config - see
+    stand.config.example.json for the GatewayCtId/GatewaySocksProxies fields:
         BOT_TOKEN=...
         CHAT_ID=...
-        TG_PROXIES=socks5h://172.16.1.210:1080,socks5h://172.16.1.210:11080
+        TG_PROXIES=socks5h://<gateway-host>:1080,socks5h://<gateway-host>:11080
     Delivery tries direct first, then each proxy (same pattern as the vpn-gw
     healthcheck - direct Telegram is intermittently unavailable).
 .PARAMETER Mode
@@ -63,24 +65,41 @@ function Send-Telegram {
         return $false
     }
 
-    $transports = @('') + @(($env.TG_PROXIES -split ',') | Where-Object { $_ })
-    foreach ($proxy in $transports) {
-        $curlArgs = @('-sS', '--max-time', '10')
-        if ($proxy) { $curlArgs += @('--proxy', $proxy.Trim()) }
-        $curlArgs += @(
-            '-X', 'POST', "https://api.telegram.org/bot$($env.BOT_TOKEN)/sendMessage",
-            '-d', "chat_id=$($env.CHAT_ID)",
-            '--data-urlencode', "text=$Text",
-            '-o', '/dev/null', '-w', '%{http_code}'
-        )
-        $code = & curl @curlArgs 2>$null
-        if ($code -eq '200') {
-            Write-NightlyLog "Telegram delivered via $(if ($proxy) { $proxy } else { 'direct' })"
-            return $true
+    # v2.17 (p.27 of the audit): the token used to be embedded in the URL, which lands
+    # in curl's argv and is readable by any other local user via ps aux on a shared
+    # host. A curl config file (-K) keeps the URL/token/message out of the process
+    # arguments - only the config file's own path shows up there, not its contents.
+    # curl's config format needs backslash/quote escaping inside quoted values.
+    $escape = { param($s) ($s -replace '\\', '\\\\') -replace '"', '\"' }
+    $curlConfig = New-TemporaryFile
+    try {
+        if (-not $IsWindows) { & chmod 600 $curlConfig 2>$null }
+        @(
+            "url = ""https://api.telegram.org/bot$(& $escape $env.BOT_TOKEN)/sendMessage"""
+            "data = ""chat_id=$(& $escape $env.CHAT_ID)"""
+            "data-urlencode = ""text=$(& $escape $Text)"""
+            'output = "/dev/null"'
+            'write-out = "%{http_code}"'
+            'silent'
+            'show-error'
+            'max-time = 10'
+        ) | Set-Content -LiteralPath $curlConfig -Encoding ascii
+
+        $transports = @('') + @(($env.TG_PROXIES -split ',') | Where-Object { $_ })
+        foreach ($proxy in $transports) {
+            $curlArgs = @('-K', $curlConfig)
+            if ($proxy) { $curlArgs += @('--proxy', $proxy.Trim()) }
+            $code = & curl @curlArgs 2>$null
+            if ($code -eq '200') {
+                Write-NightlyLog "Telegram delivered via $(if ($proxy) { $proxy } else { 'direct' })"
+                return $true
+            }
         }
+        Write-NightlyLog "Telegram delivery FAILED via all transports"
+        return $false
+    } finally {
+        Remove-Item -LiteralPath $curlConfig -Force -ErrorAction SilentlyContinue
     }
-    Write-NightlyLog "Telegram delivery FAILED via all transports"
-    return $false
 }
 
 # --- Discover the stand matrix ---
@@ -88,7 +107,12 @@ $configs = Get-ChildItem -Path $PSScriptRoot -Filter 'stand.config*.json' |
     Where-Object { $_.Name -ne 'stand.config.example.json' } | Sort-Object Name
 
 if (-not $configs) {
-    Write-NightlyLog "No stand configs found - nothing to do"
+    # v2.17 (p.28 of the audit): this used to exit silently - exactly the situation
+    # where the Telegram channel is needed most, since a stand this broken cannot
+    # produce its usual per-run report either.
+    $msg = "No stand configs found in $PSScriptRoot - nightly matrix did not run"
+    Write-NightlyLog $msg
+    $null = Send-Telegram -Text "WinClean stand [FAIL] $(Get-Date -Format 'dd.MM HH:mm')`n$msg"
     exit 1
 }
 

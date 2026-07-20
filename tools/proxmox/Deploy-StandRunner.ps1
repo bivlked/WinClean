@@ -11,11 +11,16 @@
          BoxGeometry) and all stand configs (rewritten to SshHost='local') into
          /opt/winclean-stand
       3. Creates /root/.winclean-stand.env with Telegram credentials extracted
-         host-side from the vpn-gw healthcheck (CT 103) - credentials never leave
-         the host and are not stored in this repository
+         host-side from a companion VPN-gateway container's healthcheck script -
+         credentials never leave the host and are not stored in this repository
       4. Installs the cron job (03:30 nightly, flock-guarded)
 .PARAMETER CronSchedule
     Cron time spec (default: "30 3 * * *")
+.NOTES
+    v2.17 (p.31 of the audit): the gateway container ID and its SOCKS proxy
+    addresses used to be hardcoded here, leaking internal network topology into a
+    public repository. They now come from the (gitignored) stand config -
+    GatewayCtId and GatewaySocksProxies - see stand.config.example.json.
 #>
 [CmdletBinding()]
 param(
@@ -28,8 +33,13 @@ $ErrorActionPreference = 'Stop'
 
 $cfg = Get-StandConfig -ConfigPath $ConfigPath
 if ($cfg.SshHost -eq 'local') { throw "Deploy must run from the workstation against a remote host config" }
+if (-not $cfg.GatewayCtId -or -not $cfg.GatewaySocksProxies) {
+    throw "Config is missing GatewayCtId/GatewaySocksProxies - see stand.config.example.json"
+}
 $target = "$($cfg.SshUser)@$($cfg.SshHost)"
 $remoteDir = '/opt/winclean-stand'
+$gatewayCtId = [int]$cfg.GatewayCtId
+$gatewayProxies = @($cfg.GatewaySocksProxies)
 
 Write-Host "Deploying nightly stand runner to $target..." -ForegroundColor Cyan
 
@@ -39,13 +49,15 @@ $pwshCheck = ssh -o BatchMode=yes $target 'test -x /usr/local/bin/pwsh && /usr/l
 if ($LASTEXITCODE -ne 0) {
     Write-Host "  Installing pwsh (official tar.gz)..." -ForegroundColor Yellow
     # GitHub asset downloads from the host are intermittently slow/blocked -
-    # fall back to the vpn-gw SOCKS proxy (same transport chain as Telegram)
+    # fall back to the vpn-gw SOCKS proxy (same transport chain as Telegram).
+    # __GATEWAY_PROXIES__ is substituted below - kept as a placeholder here so the
+    # heredoc can stay single-quoted (it also contains literal bash $variables).
     $installCmd = @'
 set -e
 command -v jq >/dev/null || { echo "jq is required on the host (apt install jq)"; exit 1; }
 ARCH=linux-x64
 fetch() { # $1=url $2=outfile
-  for p in "" "socks5h://172.16.1.210:1080" "socks5h://172.16.1.210:11080"; do
+  for p in "" __GATEWAY_PROXIES__; do
     if [ -n "$p" ]; then
       curl -sSL --max-time 300 --proxy "$p" "$1" -o "$2" && return 0
     else
@@ -66,6 +78,8 @@ ln -sf /opt/powershell/pwsh /usr/local/bin/pwsh
 rm -f /tmp/pwsh.tar.gz /tmp/pwsh-release.json
 /usr/local/bin/pwsh --version
 '@
+    $proxyListBash = ($gatewayProxies | ForEach-Object { '"' + $_ + '"' }) -join ' '
+    $installCmd = $installCmd -replace '__GATEWAY_PROXIES__', $proxyListBash
     $out = ssh -o BatchMode=yes $target $installCmd 2>&1
     if ($LASTEXITCODE -ne 0) { throw "pwsh installation failed:`n$($out -join "`n")" }
     Write-Host "  Installed: $($out | Select-Object -Last 1)" -ForegroundColor Green
@@ -107,7 +121,8 @@ try {
     Remove-Item $stageDir -Recurse -Force -ErrorAction SilentlyContinue
 }
 
-# 3. Telegram env (extracted host-side from CT 103; never passes through here)
+# 3. Telegram env (extracted host-side from the gateway container; never passes
+#    through here - see .NOTES for why the container ID is not hardcoded)
 Write-Host "[3/4] Telegram credentials..." -ForegroundColor Cyan
 $tgCmd = @'
 set -e
@@ -117,13 +132,15 @@ if valid; then
   chmod 600 "$ENV"
   echo exists
 else
-  pct exec 103 -- sh -c 'grep -E "^(BOT_TOKEN|CHAT_ID)=" /opt/xray/healthcheck.sh' > "$ENV"
-  echo 'TG_PROXIES=socks5h://172.16.1.210:1080,socks5h://172.16.1.210:11080' >> "$ENV"
+  pct exec __GATEWAY_CT_ID__ -- sh -c 'grep -E "^(BOT_TOKEN|CHAT_ID)=" /opt/xray/healthcheck.sh' > "$ENV"
+  echo 'TG_PROXIES=__GATEWAY_PROXIES_CSV__' >> "$ENV"
   chmod 600 "$ENV"
   valid || { echo "env extraction produced an invalid file"; exit 1; }
   echo created
 fi
 '@
+$proxyCsv = $gatewayProxies -join ','
+$tgCmd = $tgCmd -replace '__GATEWAY_CT_ID__', $gatewayCtId -replace '__GATEWAY_PROXIES_CSV__', $proxyCsv
 $tgResult = ssh -o BatchMode=yes $target $tgCmd 2>&1
 if ($LASTEXITCODE -ne 0) { throw "Telegram env setup failed:`n$($tgResult -join "`n")" }
 Write-Host "  /root/.winclean-stand.env: $($tgResult | Select-Object -Last 1)" -ForegroundColor Green

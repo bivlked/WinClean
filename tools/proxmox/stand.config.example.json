@@ -8,5 +8,7 @@
   "Cores": 4,
   "SnapshotName": "baseline",
   "Label": "RU 25H2",
-  "ConvertLocaleTo": ""
+  "ConvertLocaleTo": "",
+  "GatewayCtId": 900,
+  "GatewaySocksProxies": ["socks5h://10.0.0.1:1080", "socks5h://10.0.0.1:11080"]
 }

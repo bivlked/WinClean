@@ -293,6 +293,10 @@ $script:Stats = [hashtable]::Synchronized(@{
 # Progress activities seen so far, so all of them can be closed at the end (v2.16)
 $script:ProgressActivities = @()
 
+# Memoized Test-InternetConnection result for the whole run (v2.17, p.5 of the audit):
+# the check costs up to ~15s offline and is called from two separate update phases
+$script:InternetConnectionCache = $null
+
 # Initialize log path (script scope for access in functions)
 if (-not $LogPath) {
     $script:LogPath = Join-Path $env:TEMP "WinClean_$((Get-Date).ToString('yyyyMMdd_HHmmss')).log"
@@ -351,10 +355,24 @@ function Write-Log {
     $timestamp = (Get-Date).ToString('HH:mm:ss')
     $logMessage = "[$timestamp] [$Level] $Message"
 
-    # Write to log file
+    # Write to log file. v2.17 (p.7 of the audit): Out-File used to open, seek to end,
+    # write and close the file on every single call - Write-Log fires hundreds of times
+    # per run. A StreamWriter kept open for the run avoids that, with AutoFlush so each
+    # line still lands on disk immediately (same durability as before, just cheaper).
+    # FileShare.Delete matters for tests: they Remove-Item the log path in AfterAll while
+    # this writer may still be the last one that touched it.
     if (-not $NoLog) {
         try {
-            $logMessage | Out-File -FilePath $script:LogPath -Append -Encoding utf8 -ErrorAction SilentlyContinue
+            if (-not $script:LogWriter -or $script:LogWriterPath -ne $script:LogPath) {
+                if ($script:LogWriter) { $script:LogWriter.Dispose() }
+                $fileStream = [System.IO.File]::Open(
+                    $script:LogPath, [System.IO.FileMode]::Append, [System.IO.FileAccess]::Write,
+                    ([System.IO.FileShare]::ReadWrite -bor [System.IO.FileShare]::Delete))
+                $script:LogWriter = [System.IO.StreamWriter]::new($fileStream, [System.Text.Encoding]::UTF8)
+                $script:LogWriter.AutoFlush = $true
+                $script:LogWriterPath = $script:LogPath
+            }
+            $script:LogWriter.WriteLine($logMessage)
         } catch { }
     }
 
@@ -451,11 +469,14 @@ function Clear-AllProgress {
         our own (seven different activities are used) and foreign ones from cmdlets such
         as Clear-RecycleBin, whose activity name is not ours to know. Clearing by Id
         covers those: an unused Id is simply a no-op.
+        v2.17 (p.16 of the audit): 0..10 was eyeballed, not derived from anything. Widened
+        to 0..30 - ForEach-Object -Parallel and nested cmdlets can allocate Ids well past
+        10, and clearing an unused Id costs nothing.
     #>
     foreach ($activity in $script:ProgressActivities) {
         Write-Progress -Activity $activity -Completed -ErrorAction SilentlyContinue
     }
-    for ($id = 0; $id -le 10; $id++) {
+    for ($id = 0; $id -le 30; $id++) {
         Write-Progress -Id $id -Activity ' ' -Completed -ErrorAction SilentlyContinue
     }
 }
@@ -493,8 +514,18 @@ function Test-InternetConnection {
         Проверяет доступ к интернету через TCP-соединения с таймаутом
     .DESCRIPTION
         Использует TcpClient с явным таймаутом (3 сек) вместо Test-NetConnection,
-        который может зависать на 20-30 секунд при VPN или нестабильном соединении
+        который может зависать на 20-30 секунд при VPN или нестабильном соединении.
+        Результат кэшируется на весь прогон (v2.17): вызывается из двух фаз
+        (Windows Update, Applications Update), до 15 сек на офлайн-машине каждый раз.
+        Сетевая связность внутри одного прогона скрипта не меняется настолько часто,
+        чтобы повторная проверка была оправдана. -Force сбрасывает кэш.
     #>
+    param([switch]$Force)
+
+    if (-not $Force -and $null -ne $script:InternetConnectionCache) {
+        return $script:InternetConnectionCache
+    }
+
     $targets = @(
         @{ Host = 'www.microsoft.com'; Port = 443 }
         @{ Host = 'api.github.com'; Port = 443 }
@@ -512,6 +543,7 @@ function Test-InternetConnection {
 
             if ($success -and $tcpClient.Connected) {
                 $tcpClient.EndConnect($connect)
+                $script:InternetConnectionCache = $true
                 return $true
             }
         } catch {
@@ -528,9 +560,11 @@ function Test-InternetConnection {
 
     foreach ($dns in $dnsServers) {
         if (Test-Connection -ComputerName $dns -Count 1 -Quiet -TimeoutSeconds 2 -ErrorAction SilentlyContinue) {
+            $script:InternetConnectionCache = $true
             return $true
         }
     }
+    $script:InternetConnectionCache = $false
     return $false
 }
 
@@ -808,6 +842,73 @@ function Install-PackageProviderWithTimeout {
     }
 }
 
+function Get-WindowsUpdateWithTimeout {
+    <#
+    .SYNOPSIS
+        Runs a Get-WindowsUpdate search in a background job with a timeout
+    .DESCRIPTION
+        v2.17 (p.15 of the audit): a hung WU agent call used to hang the whole script
+        forever - fatal for an unattended nightly stand run with no one to notice.
+        Read-only search, so killing the job on timeout is safe: there is nothing to
+        roll back. -ErrorVariable does not cross the job boundary, so the job captures
+        its own error and returns it as a plain string instead.
+    .PARAMETER CategoryParamName
+        'Category' or 'NotCategory' - which Get-WindowsUpdate parameter to use
+    .PARAMETER CategoryValue
+        Value for that parameter (e.g. "Drivers")
+    #>
+    param(
+        [Parameter(Mandatory)]
+        [ValidateSet('Category', 'NotCategory')]
+        [string]$CategoryParamName,
+
+        [Parameter(Mandatory)]
+        [string]$CategoryValue,
+
+        [int]$TimeoutSeconds = 300
+    )
+
+    $job = Start-Job -ScriptBlock {
+        param($categoryParamName, $categoryValue)
+        Import-Module PSWindowsUpdate -ErrorAction Stop
+        $errs = $null
+        $params = @{ MicrosoftUpdate = $true; ErrorAction = 'SilentlyContinue'; ErrorVariable = 'errs' }
+        $params[$categoryParamName] = $categoryValue
+        $updates = @(Get-WindowsUpdate @params)
+        [PSCustomObject]@{
+            Updates    = $updates
+            FirstError = if ($errs) { $errs[0].ToString() } else { $null }
+        }
+    } -ArgumentList $CategoryParamName, $CategoryValue
+
+    $completed = Wait-Job $job -Timeout $TimeoutSeconds
+    if (-not $completed) {
+        Stop-Job $job -ErrorAction SilentlyContinue
+        Remove-Job $job -Force -ErrorAction SilentlyContinue
+        return [PSCustomObject]@{
+            Updates    = @()
+            FirstError = "search timed out after $TimeoutSeconds seconds"
+        }
+    }
+
+    $jobError = $null
+    $output = $null
+    try {
+        $output = Receive-Job $job -ErrorAction Stop
+    } catch {
+        $jobError = $_
+    }
+    Remove-Job $job -Force -ErrorAction SilentlyContinue
+
+    if ($jobError -or -not $output) {
+        return [PSCustomObject]@{
+            Updates    = @()
+            FirstError = if ($jobError) { $jobError.ToString() } else { 'search job returned no output' }
+        }
+    }
+    return $output
+}
+
 function Test-PendingReboot {
     <#
     .SYNOPSIS
@@ -880,6 +981,33 @@ function Get-FolderSize {
     }
 }
 
+function Get-FolderSizeChecked {
+    <#
+    .SYNOPSIS
+        Like Get-FolderSize, but distinguishes "empty" from "could not measure"
+    .DESCRIPTION
+        v2.17 (p.10 of the audit): Get-FolderSize returns 0 on ANY access error, which
+        Show-DiskSpaceReport read as "nothing above 100 MB" when the true answer was
+        "could not check". Returns $null when Get-ChildItem hit access errors while
+        walking the tree, 0 only when the path is genuinely absent or truly empty.
+    #>
+    param([string]$Path)
+
+    if (-not (Test-Path -LiteralPath $Path -ErrorAction SilentlyContinue)) {
+        return 0
+    }
+
+    $walkErrors = $null
+    $items = Get-ChildItem -LiteralPath $Path -Recurse -Force -File `
+                -ErrorAction SilentlyContinue -ErrorVariable walkErrors
+    if ($walkErrors) {
+        return $null
+    }
+
+    $sum = ($items | Measure-Object -Property Length -Sum).Sum
+    return [long]($sum ?? 0)
+}
+
 function Format-FileSize {
     <#
     .SYNOPSIS
@@ -903,6 +1031,13 @@ function ConvertFrom-HumanReadableSize {
     <#
     .SYNOPSIS
         Converts human-readable size string to bytes (inverse of Format-FileSize)
+    .DESCRIPTION
+        v2.17 (p.17 of the audit) widened localization handling. Previously failed on:
+        a space-grouped thousands separator (it sat INSIDE the numeric group, which the
+        old regex did not allow), "1.234,5" EU-style dot-thousands/comma-decimal (threw
+        an unhandled exception instead of returning 0), the word form of bytes, and
+        "MiB"/"GiB"/etc binary-unit spelling (this script's own *B literals are already
+        1024-based, so the multiplier is identical to KB/MB/GB/TB).
     .EXAMPLE
         ConvertFrom-HumanReadableSize "2.5 GB"  # Returns 2684354560
         ConvertFrom-HumanReadableSize "512MB"   # Returns 536870912
@@ -911,29 +1046,47 @@ function ConvertFrom-HumanReadableSize {
 
     if (-not $SizeString) { return 0 }
 
-    # Normalize localized strings (e.g. from Shell GetDetailsOf on Russian Windows):
-    # replace no-break spaces with regular ones and map Cyrillic units to Latin
-    $normalized = ($SizeString -replace '[\u00A0\u202F\u2007]', ' ').Trim()
-    $normalized = $normalized -replace 'КБ$', 'KB' -replace 'МБ$', 'MB' -replace 'ГБ$', 'GB' -replace 'ТБ$', 'TB' -replace 'Б$', 'B'
+    # Drop all whitespace outright (including no-break/thin-space variants) - it only
+    # ever separates thousands groups or sits between the number and the unit, never
+    # meaningful data.
+    $normalized = ($SizeString -replace '[\u00A0\u202F\u2007\s]', '')
+    $normalized = $normalized -ireplace 'байт(а|ов)?$', 'B' -ireplace 'bytes?$', 'B' -replace 'ТБ$', 'TB' -replace 'ГБ$', 'GB' -replace 'МБ$', 'MB' -replace 'КБ$', 'KB' -replace 'Б$', 'B'
+    $normalized = $normalized -ireplace 'KiB$', 'KB' -ireplace 'MiB$', 'MB' -ireplace 'GiB$', 'GB' -ireplace 'TiB$', 'TB'
 
-    # Handle formats: "2.5 GB", "2.5GB", "512 MB", "100.5MB"
-    if ($normalized -match '^([\d.,]+)\s*([KMGT]?B)$') {
-        $value = [double]($Matches[1] -replace ',', '.')
-        $unit = $Matches[2].ToUpper()
-
-        $multiplier = switch ($unit) {
-            'B'  { 1 }
-            'KB' { 1KB }
-            'MB' { 1MB }
-            'GB' { 1GB }
-            'TB' { 1TB }
-            default { 1 }
-        }
-
-        return [long]($value * $multiplier)
+    # Handle formats: "2.5GB", "512MB", "100.5MB", "1234.5MB", "1234,5MB" (whitespace
+    # already stripped above, so no \s* needed between the number and the unit)
+    if ($normalized -notmatch '^([\d.,]+)([KMGT]?B)$') {
+        return 0
     }
 
-    return 0
+    $numberPart = $Matches[1]
+    $unit = $Matches[2].ToUpper()
+
+    # Decimal-separator ambiguity ("1.234,5" EU vs "1,234.5" US vs a lone "," or "."):
+    # whichever mark appears LAST is the decimal point; anything earlier was a
+    # thousands grouping and is dropped.
+    $lastComma = $numberPart.LastIndexOf(',')
+    $lastDot = $numberPart.LastIndexOf('.')
+    if ($lastComma -gt $lastDot) {
+        $numberPart = $numberPart.Replace('.', '').Replace(',', '.')
+    } elseif ($lastDot -gt $lastComma) {
+        $numberPart = $numberPart.Replace(',', '')
+    }
+
+    $multiplier = switch ($unit) {
+        'B'  { 1 }
+        'KB' { 1KB }
+        'MB' { 1MB }
+        'GB' { 1GB }
+        'TB' { 1TB }
+        default { 1 }
+    }
+
+    try {
+        return [long]([double]$numberPart * $multiplier)
+    } catch {
+        return 0
+    }
 }
 
 function Test-PathProtected {
@@ -1125,7 +1278,12 @@ function Remove-FilesByPattern {
     .SYNOPSIS
         Removes files matching a pattern with size tracking
     .DESCRIPTION
-        Handles file patterns (like *.roslynobjectin) that Remove-FolderContent can't handle
+        Handles file patterns (like *.roslynobjectin) that Remove-FolderContent can't handle.
+
+        v2.17 (p.18 of the audit): this was the one delete path in the whole script with
+        no protected-path check and no age filter - safe today because the only caller
+        passes a single fixed pattern under %APPDATA%, but that made it a latent risk for
+        the next caller. Mirrors Remove-FolderContent's guards for consistency.
     #>
     param(
         [Parameter(Mandatory)]
@@ -1134,10 +1292,25 @@ function Remove-FilesByPattern {
         [Parameter(Mandatory)]
         [string]$Category,
 
-        [string]$Description
+        [string]$Description,
+
+        [int]$MinAgeDays = 0
     )
 
     $files = Get-Item -Path $Pattern -ErrorAction SilentlyContinue | Where-Object { -not $_.PSIsContainer }
+
+    if (-not $files) {
+        return
+    }
+
+    # Skip anything whose containing folder is itself a protected root, and anything
+    # younger than the age cutoff (matches Remove-FolderContent's -MinAgeDays intent:
+    # a file belonging to something still running should not be deleted mid-use)
+    $cutoff = (Get-Date).AddDays(-$MinAgeDays)
+    $files = $files | Where-Object {
+        (-not (Test-PathProtected -Path $_.DirectoryName)) -and
+        ($MinAgeDays -le 0 -or $_.LastWriteTime -lt $cutoff)
+    }
 
     if (-not $files) {
         return
@@ -1225,9 +1398,26 @@ function New-SystemRestorePoint {
             }
 "@
 
-        # Use Windows PowerShell 5.1 (Checkpoint-Computer not available in PS7)
-        $result = & powershell.exe `
-            -NoProfile -NoLogo -ExecutionPolicy Bypass -Command $scriptBlock 2>&1
+        # Use Windows PowerShell 5.1 (Checkpoint-Computer not available in PS7).
+        # v2.17 (p.14 of the audit): this was the one external call in the whole script
+        # with no timeout at all, and VSS is known to hang for minutes.
+        $outFile = [System.IO.Path]::GetTempFileName()
+        $errFile = [System.IO.Path]::GetTempFileName()
+        try {
+            $proc = Start-Process -FilePath 'powershell.exe' `
+                -ArgumentList @('-NoProfile', '-NoLogo', '-ExecutionPolicy', 'Bypass', '-Command', $scriptBlock) `
+                -NoNewWindow -PassThru -RedirectStandardOutput $outFile -RedirectStandardError $errFile
+
+            $timeoutMs = 120000  # 2 minutes - a restore point should never legitimately take this long
+            if (-not $proc.WaitForExit($timeoutMs)) {
+                $proc.Kill($true)
+                throw "restore point creation timed out after $($timeoutMs / 1000) seconds"
+            }
+
+            $result = (Get-Content -LiteralPath $outFile -Raw -ErrorAction SilentlyContinue)
+        } finally {
+            Remove-Item $outFile, $errFile -Force -ErrorAction SilentlyContinue
+        }
 
         if ($result -like "SUCCESS*") {
             Write-Log "Restore point created: $Description" -Level SUCCESS
@@ -1351,12 +1541,15 @@ function Update-WindowsSystem {
         Write-Log "Searching for updates..." -Level INFO
 
         Write-Log "System Updates" -Level SECTION
-        $systemUpdates = @(Get-WindowsUpdate -MicrosoftUpdate -NotCategory "Drivers" -ErrorAction SilentlyContinue -ErrorVariable wuSearchErrors)
+        $sysResult = Get-WindowsUpdateWithTimeout -CategoryParamName NotCategory -CategoryValue "Drivers"
+        $systemUpdates = @($sysResult.Updates)
 
         Write-Log "Driver Updates" -Level SECTION
-        $driverUpdates = @(Get-WindowsUpdate -MicrosoftUpdate -Category "Drivers" -ErrorAction SilentlyContinue -ErrorVariable +wuSearchErrors)
+        $drvResult = Get-WindowsUpdateWithTimeout -CategoryParamName Category -CategoryValue "Drivers"
+        $driverUpdates = @($drvResult.Updates)
 
         $totalUpdates = $systemUpdates.Count + $driverUpdates.Count
+        $wuSearchErrors = @($sysResult.FirstError, $drvResult.FirstError) | Where-Object { $_ }
 
         # v2.17: report search errors regardless of how many updates were found. The
         # check used to live inside the "zero updates" branch, so a failed system search
@@ -1422,6 +1615,12 @@ function Update-WindowsSystem {
             }
         }
 
+        # v2.17 (p.15 of the audit, partial): the two searches above got a job-based
+        # timeout - they are read-only, so killing the job on timeout is free. Install-
+        # WindowsUpdate is not wrapped the same way: it actually applies updates, and
+        # force-killing the job would not necessarily cancel the in-flight WU agent
+        # call, leaving system state that a stand run cannot verify without a live
+        # reproduction. Deferred - see MyAI-dtx8.
         $results = Install-WindowsUpdate @installParams
 
         # Handle null/empty results (possible silent error)
@@ -2977,8 +3176,13 @@ function Show-DiskSpaceReport {
     }
 
     $rows = @()
+    $unmeasured = @()
     foreach ($name in $targets.Keys) {
-        $size = Get-FolderSize -Path $targets[$name]
+        $size = Get-FolderSizeChecked -Path $targets[$name]
+        if ($null -eq $size) {
+            $unmeasured += $name
+            continue
+        }
         if ($size -gt 100MB) { $rows += [pscustomobject]@{ Item = $name; Bytes = $size } }
     }
 
@@ -2996,8 +3200,14 @@ function Show-DiskSpaceReport {
         if ($used -gt 100MB) { $rows += [pscustomobject]@{ Item = 'Restore points / shadow copies'; Bytes = $used } }
     }
 
+    if ($unmeasured.Count -gt 0) {
+        Write-Log "Could not fully measure: $($unmeasured -join ', ') (access denied on some items)" -Level DETAIL
+    }
+
     if ($rows.Count -eq 0) {
-        Write-Log "Nothing above 100 MB outside the cleaned areas" -Level DETAIL
+        if ($unmeasured.Count -eq 0) {
+            Write-Log "Nothing above 100 MB outside the cleaned areas" -Level DETAIL
+        }
         return
     }
 
@@ -3095,43 +3305,62 @@ function Get-RedundantDriverPackage {
         return @()
     }
 
-    # Index repository folders by the SHA256 of their INF file. Version strings are not
-    # unique - ibtusb.inf ships several packages carrying an identical DriverVer - so
-    # hashing the actual INF is the only exact oem*.inf -> folder mapping.
-    $byHash = @{}
-    foreach ($dir in (Get-ChildItem -LiteralPath $repo -Directory -ErrorAction SilentlyContinue)) {
-        $infName = ($dir.Name -split '\.inf_')[0] + '.inf'
-        $infPath = Join-Path $dir.FullName $infName
-        if (Test-Path -LiteralPath $infPath) {
-            try { $byHash[(Get-FileHash $infPath -Algorithm SHA256).Hash] = $dir.FullName } catch { }
-        }
-    }
-
     # v2.17: grouped by INF *and* vendor/class. Generic names (usbaudio.inf, hidusb.inf)
     # are shipped by several vendors, and grouping on the name alone could declare one
     # vendor's package "superseded" by another's - then delete a working driver whose
     # device merely happens to be unplugged right now.
-    $packages | Group-Object { "$($_.Inf)|$($_.Provider)|$($_.Class)" } | ForEach-Object {
+    #
+    # p.6 of the audit: figure out WHICH packages are superseded first, from pnputil's
+    # own metadata alone - no filesystem access needed for that. Only once there is at
+    # least one candidate do we pay for hashing FileRepository folders (700-1500 on a
+    # typical machine), and that walk stops as soon as every candidate is matched
+    # instead of always hashing every folder in the store.
+    $candidates = $packages | Group-Object { "$($_.Inf)|$($_.Provider)|$($_.Class)" } | ForEach-Object {
         $newest = $_.Group | Sort-Object Version, Date -Descending | Select-Object -First 1
         foreach ($pkg in $_.Group) {
             if ($pkg.Oem -eq $newest.Oem -or $pkg.InUse) { continue }
-
-            $size = 0
-            $infFile = Join-Path $env:SystemRoot "INF\$($pkg.Oem)"
-            if (Test-Path -LiteralPath $infFile) {
-                try {
-                    $hash = (Get-FileHash $infFile -Algorithm SHA256).Hash
-                    if ($byHash.ContainsKey($hash)) {
-                        $size = (Get-ChildItem -LiteralPath $byHash[$hash] -Recurse -File -Force -ErrorAction SilentlyContinue |
-                                 Measure-Object -Property Length -Sum).Sum
-                    }
-                } catch { }
-            }
-
-            $pkg | Add-Member -NotePropertyName Bytes -NotePropertyValue ([long]$size) -PassThru |
+            $pkg | Add-Member -NotePropertyName Bytes -NotePropertyValue ([long]0) -PassThru |
                    Add-Member -NotePropertyName KeptVersion -NotePropertyValue $newest.Version -PassThru
         }
     }
+
+    if (-not $candidates) {
+        return @()
+    }
+
+    # Hash each candidate's live INF once, up front: version strings are not unique
+    # (ibtusb.inf ships several packages carrying an identical DriverVer), so hashing
+    # the actual INF is the only exact oem*.inf -> FileRepository folder mapping.
+    $neededHashes = @{}   # SHA256 -> candidate object
+    foreach ($pkg in $candidates) {
+        $infFile = Join-Path $env:SystemRoot "INF\$($pkg.Oem)"
+        if (-not (Test-Path -LiteralPath $infFile)) { continue }
+        try {
+            $hash = (Get-FileHash $infFile -Algorithm SHA256).Hash
+            $neededHashes[$hash] = $pkg
+        } catch { }
+    }
+
+    foreach ($dir in (Get-ChildItem -LiteralPath $repo -Directory -ErrorAction SilentlyContinue)) {
+        if ($neededHashes.Count -eq 0) { break }
+
+        $infName = ($dir.Name -split '\.inf_')[0] + '.inf'
+        $infPath = Join-Path $dir.FullName $infName
+        if (-not (Test-Path -LiteralPath $infPath)) { continue }
+
+        try {
+            $hash = (Get-FileHash $infPath -Algorithm SHA256).Hash
+            if ($neededHashes.ContainsKey($hash)) {
+                $pkg = $neededHashes[$hash]
+                $size = (Get-ChildItem -LiteralPath $dir.FullName -Recurse -File -Force -ErrorAction SilentlyContinue |
+                         Measure-Object -Property Length -Sum).Sum
+                $pkg.Bytes = [long]($size ?? 0)
+                $neededHashes.Remove($hash)
+            }
+        } catch { }
+    }
+
+    return $candidates
 }
 
 function Clear-DriverStore {
@@ -3571,6 +3800,24 @@ function Show-Banner {
 }
 
 function Show-FinalStatistics {
+    <#
+    .DESCRIPTION
+        v2.17 (p.21 of the audit): this runs from Start-WinClean's finally block, so any
+        exception here (a Get-PSDrive provider returning 0 for both Used and Free, for
+        instance, dividing by zero below) would REPLACE whatever exception the try block
+        was already reporting - the one the user actually needs to see. The whole body
+        is wrapped so this function can never mask that.
+    #>
+    try {
+        Show-FinalStatisticsBody
+    } catch {
+        Write-Host ""
+        Write-Host "  Could not display the final summary: $_" -ForegroundColor Yellow
+        Write-Host "  Log: $script:LogPath" -ForegroundColor DarkGray
+    }
+}
+
+function Show-FinalStatisticsBody {
     $elapsed = (Get-Date) - $script:Stats.StartTime
     $elapsedStr = "{0:D2}:{1:D2}:{2:D2}" -f [int]$elapsed.Hours, $elapsed.Minutes, $elapsed.Seconds
 
@@ -3578,7 +3825,8 @@ function Show-FinalStatistics {
     $drive = Get-PSDrive -Name $env:SystemDrive.Replace(':', '')
     $freeSpace = [math]::Round($drive.Free / 1GB, 2)
     $totalSize = [math]::Round(($drive.Used + $drive.Free) / 1GB, 2)
-    $freePercent = [math]::Round(($drive.Free / ($drive.Used + $drive.Free)) * 100, 1)
+    $capacity = $drive.Used + $drive.Free
+    $freePercent = if ($capacity -gt 0) { [math]::Round(($drive.Free / $capacity) * 100, 1) } else { 0 }
 
     Clear-AllProgress
 
@@ -3637,7 +3885,9 @@ function Show-FinalStatistics {
     $totalUpdates = $script:Stats.WindowsUpdatesCount + $script:Stats.AppUpdatesCount
     if ($totalUpdates -gt 0) {
         $updatesStr = "Windows: $($script:Stats.WindowsUpdatesCount), Apps: $($script:Stats.AppUpdatesCount)"
-        Write-StatLine -Icon "↑" -Label "Updates installed:" -Value $updatesStr -IconColor "Green" -ValueColor "Green"
+        # ASCII "^" instead of "↑" (v2.17, p.20 of the audit): same ambiguous-width
+        # box-alignment issue as "⚠" below, just not caught the first time around
+        Write-StatLine -Icon "^" -Label "Updates installed:" -Value $updatesStr -IconColor "Green" -ValueColor "Green"
     }
 
     # Space freed (highlight if significant)
@@ -3675,9 +3925,9 @@ function Show-FinalStatistics {
     # Warnings/Errors (if any)
     if ($hasWarnings -or $hasErrors) {
         $issueStr = "$($script:Stats.WarningsCount) warnings, $($script:Stats.ErrorsCount) errors"
-        # ASCII "!" instead of "⚠": the warning sign is ambiguous-width in some
-        # terminals and breaks box alignment (v2.14)
-        $issueIcon = if ($hasErrors) { "✗" } else { "!" }
+        # ASCII "!"/"X" instead of "⚠"/"✗": both are ambiguous-width in some
+        # terminals and break box alignment (v2.14 / v2.17 p.20 of the audit)
+        $issueIcon = if ($hasErrors) { "X" } else { "!" }
         $issueColor = if ($hasErrors) { "Red" } else { "Yellow" }
         Write-StatLine -Icon $issueIcon -Label "Issues:" -Value $issueStr -IconColor $issueColor -ValueColor $issueColor
     }
@@ -3687,7 +3937,7 @@ function Show-FinalStatistics {
     # Reboot notification
     if ($script:Stats.RebootRequired) {
         Write-Host ""
-        Write-Host "  ⚠ " -NoNewline -ForegroundColor Yellow
+        Write-Host "  ! " -NoNewline -ForegroundColor Yellow
         Write-Host "Reboot required to complete Windows updates!" -ForegroundColor Yellow
 
         if (Test-InteractiveConsole) {
@@ -3942,12 +4192,25 @@ function Start-WinClean {
         # interactive mode, and automated runs must get the result regardless
         Write-ResultJson -Path $ResultJsonPath
         Show-FinalStatistics
+        # Release the log file handle (v2.17, p.7): a stand or the user may want to
+        # move/zip the log right after the run finishes.
+        if ($script:LogWriter) {
+            $script:LogWriter.Dispose()
+            $script:LogWriter = $null
+            $script:LogWriterPath = $null
+        }
     }
 }
 
 # Entry point
 if ($MyInvocation.InvocationName -ne '.') {
     Start-WinClean
+    # v2.17 (p.12 of the audit): the script used to always exit 0, even when the run
+    # logged errors. A scheduled task or stand cannot tell "clean run" from "ran into
+    # trouble" without parsing the log or the result JSON.
+    if ($script:Stats.ErrorsCount -gt 0) {
+        exit 1
+    }
 }
 
 #endregion
