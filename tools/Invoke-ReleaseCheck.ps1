@@ -105,7 +105,9 @@ $dashFiles = @(
 $withDashes = foreach ($f in $dashFiles) {
     $full = Join-Path $repoRoot $f
     if (-not (Test-Path $full)) { continue }
-    $count = ([regex]::Matches((Get-Content $full -Raw), '[–—]')).Count
+    # Unicode escapes, not the characters themselves: a literal em dash here would make
+    # this file fail its own check as soon as tools/ joined the list
+    $count = ([regex]::Matches((Get-Content $full -Raw), '[\u2013\u2014]')).Count
     if ($count -gt 0) { "$f ($count)" }
 }
 Add-Result -Name 'No em/en dashes in code and docs' -Passed (-not $withDashes) `
