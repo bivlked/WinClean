@@ -74,6 +74,23 @@ BeforeAll {
             [System.IO.File]::WriteAllText((Join-Path $root $f), $files[$f])
         }
 
+        # v2.16: Clear-TempFiles skips entries younger than a day, so temp junk has to be
+        # aged for the cleanup tests to be meaningful. Files first, then the directory -
+        # writing a file bumps its parent's LastWriteTime.
+        $old = (Get-Date).AddDays(-3)
+        foreach ($rel in @(
+            'Users\test\AppData\Local\Temp\junk1.txt'
+            'Users\test\AppData\Local\Temp\junkdir\junk2.txt'
+            'Users\test\AppData\Local\Temp\junkdir'
+            'Windows\Temp\wjunk.txt'
+        )) {
+            $item = Get-Item -LiteralPath (Join-Path $root $rel) -Force
+            $item.LastWriteTime = $old
+        }
+
+        # Freshly written file: must survive the age filter
+        [System.IO.File]::WriteAllText((Join-Path $root 'Users\test\AppData\Local\Temp\fresh.txt'), 'x' * 1024)
+
         $script:SandboxRoots.Add($root)
         return $root
     }
@@ -159,6 +176,11 @@ Clear-TempFiles
 
     It "Removes junk from Windows temp" {
         Test-Path (Join-Path $root 'Windows\Temp\wjunk.txt') | Should -BeFalse
+    }
+
+    It "Keeps files younger than a day (v2.16 age filter)" {
+        # Files of a running installer must not be deleted mid-operation
+        Test-Path (Join-Path $root 'Users\test\AppData\Local\Temp\fresh.txt') | Should -BeTrue
     }
 
     It "Keeps the active log file (v2.14 regression)" {

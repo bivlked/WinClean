@@ -314,7 +314,8 @@ Describe "v2.14: Log file protected from temp cleanup" -Tag "Fix", "V214" {
     }
 
     It "Clear-TempFiles excludes the active log file" {
-        $scriptContent | Should -Match 'Remove-FolderContent[^\r\n]*-ExcludeFile \$script:LogPath'
+        # The call is wrapped across lines since v2.16, so allow a backtick continuation
+        $scriptContent | Should -Match '(?s)Remove-FolderContent[^\r\n]*(`\r?\n\s*)?-ExcludeFile \$script:LogPath'
     }
 }
 
@@ -432,6 +433,154 @@ Describe "Regression Tests" -Tag "Regression" {
     It "No hardcoded test paths" {
         $scriptContent | Should -Not -Match 'C:\\Users\\test'
         $scriptContent | Should -Not -Match 'D:\\Test'
+    }
+}
+
+#endregion
+
+#region v2.16 Fixes
+
+Describe "v2.16: Delivery Optimization cache path" -Tag "Fix", "V216" {
+    It "Probes the NetworkService profile location" {
+        # The ProgramData path does not exist on Windows 11, so every size read returned 0
+        $scriptContent | Should -Match 'ServiceProfiles\\NetworkService\\AppData\\Local\\Microsoft\\Windows\\DeliveryOptimization'
+    }
+
+    It "Keeps the legacy path as a fallback" {
+        $scriptContent | Should -Match '\$env:ProgramData\\Microsoft\\Windows\\DeliveryOptimization'
+    }
+
+    It "Only uses locations that actually exist" {
+        $scriptContent | Should -Match '\$doPaths\s*=\s*@\('
+        $scriptContent | Should -Match 'Where-Object \{ Test-Path \$_ -ErrorAction SilentlyContinue \}'
+    }
+}
+
+Describe "v2.16: TEMP age filter" -Tag "Fix", "V216" {
+    It "Remove-FolderContent accepts MinAgeDays" {
+        $scriptContent | Should -Match '\[int\]\$MinAgeDays'
+    }
+
+    It "Clear-TempFiles passes MinAgeDays 1" {
+        $scriptContent | Should -Match '-MinAgeDays 1'
+    }
+
+    It "Age filter compares LastWriteTime against the cutoff" {
+        $scriptContent | Should -Match '\$MinAgeDays -le 0 -or \$_\.LastWriteTime -lt \(Get-Date\)\.AddDays\(-\$MinAgeDays\)'
+    }
+
+    It "ReportOnly measures only eligible entries when filtering by age" {
+        # Otherwise the report would promise more than the run deletes
+        $scriptContent | Should -Match '\$getEligible'
+    }
+}
+
+Describe "v2.16: Windows Update service stop is verified" -Tag "Fix", "V216" {
+    It "Waits for the Stopped status" {
+        $scriptContent | Should -Match 'WaitForStatus\(\[System\.ServiceProcess\.ServiceControllerStatus\]::Stopped'
+    }
+
+    It "Warns when a service is still running" {
+        $scriptContent | Should -Match 'still running after 30s'
+    }
+}
+
+Describe "v2.16: Controlled Folder Access preflight" -Tag "Fix", "V216" {
+    It "Reads the Defender preference" {
+        $scriptContent | Should -Match 'Get-MpPreference'
+        $scriptContent | Should -Match 'EnableControlledFolderAccess -eq 1'
+    }
+
+    It "Exposes the flag in the result JSON" {
+        $scriptContent | Should -Match 'ControlledFolderAccess = \[bool\]\$script:Stats\.ControlledFolderAccess'
+    }
+
+    It "Missing Defender cmdlets are not treated as an error" {
+        $scriptContent | Should -Match 'Get-MpPreference -ErrorAction Stop'
+    }
+}
+
+Describe "v2.16: Disk Cleanup categories match the registry" -Tag "Fix", "V216" {
+
+    BeforeAll {
+        # Scoped to the $categories array: the comment above it names the removed
+        # handlers, so a whole-file match would report them as still present
+        $categoriesBlock = [regex]::Match($scriptContent, '(?s)\$categories = @\((.*?)\n\s*\)').Groups[1].Value
+    }
+
+    It "The category list was found" {
+        $categoriesBlock | Should -Not -BeNullOrEmpty
+    }
+
+    It "Non-existent handlers are gone" {
+        $categoriesBlock | Should -Not -Match '"Memory Dump Files"'
+        $categoriesBlock | Should -Not -Match '"Windows Error Reporting Archive Files"'
+        $categoriesBlock | Should -Not -Match '"Windows Error Reporting Queue Files"'
+    }
+
+    It "The real WER handler name is used" {
+        $categoriesBlock | Should -Match '"Windows Error Reporting Files"'
+    }
+
+    It "Driver packages and shader cache are covered" {
+        $categoriesBlock | Should -Match '"Device Driver Packages"'
+        $categoriesBlock | Should -Match '"D3D Shader Cache"'
+    }
+
+    It "The user Downloads folder is never a cleanup target" {
+        $categoriesBlock | Should -Not -Match '"DownloadsFolder"'
+    }
+}
+
+Describe "v2.16: StateFlags cleanup sweeps every handler" -Tag "Fix", "V216" {
+    It "Iterates the registry instead of the local category list" {
+        # Flags left by an interrupted run used to stay in the registry forever
+        $scriptContent | Should -Match '(?s)Get-ChildItem -Path \$regPath[^
+]*\|\s*ForEach-Object \{\s*Remove-ItemProperty'
+    }
+}
+
+Describe "v2.16: progress bars are all closed" -Tag "Fix", "V216" {
+    It "Clear-AllProgress exists" {
+        $scriptContent | Should -Match 'function Clear-AllProgress'
+    }
+
+    It "Activities are tracked as they are used" {
+        $scriptContent | Should -Match '\$script:ProgressActivities'
+    }
+
+    It "Foreign bars are cleared by Id" {
+        $scriptContent | Should -Match 'Write-Progress -Id \$id -Activity'
+    }
+
+    It "Obsolete no-op calls are gone" {
+        $scriptContent | Should -Not -Match 'Write-Progress -Activity "Complete" -Completed'
+        $scriptContent | Should -Not -Match 'Write-Progress -Activity "Cleanup" -Completed'
+    }
+}
+
+Describe "v2.16: winget exit codes are decoded" -Tag "Fix", "V216" {
+    It "Known codes are mapped" {
+        $scriptContent | Should -Match '0x8A15002C - some applications failed to upgrade'
+        $scriptContent | Should -Match '0x8A15002B - no applicable update found'
+    }
+
+    It "Nothing-to-upgrade is not reported as a warning" {
+        $scriptContent | Should -Match '\$code -eq -1978335189'
+    }
+
+    It "Unknown codes still show the hex value" {
+        $scriptContent | Should -Match 'unrecognized winget exit code'
+    }
+}
+
+Describe "v2.16: Disk Cleanup timeout" -Tag "Fix", "V216" {
+    It "Waits longer than the previous 420 seconds" {
+        $scriptContent | Should -Match '\$maxWait = 900'
+    }
+
+    It "Exceeding the wait is not counted as a warning" {
+        $scriptContent | Should -Match 'continuing without waiting'
     }
 }
 

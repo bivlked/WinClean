@@ -256,7 +256,11 @@ $script:Stats = [hashtable]::Synchronized(@{
     StartTime            = Get-Date
     CurrentStep          = 0
     TotalSteps           = 0  # Calculated dynamically in Start-WinClean
+    ControlledFolderAccess = $false  # v2.16: set when Defender CFA may block deletions
 })
+
+# Progress activities seen so far, so all of them can be closed at the end (v2.16)
+$script:ProgressActivities = @()
 
 # Initialize log path (script scope for access in functions)
 if (-not $LogPath) {
@@ -398,7 +402,31 @@ function Update-Progress {
     $script:Stats.CurrentStep++
     $percent = [math]::Min(100, [math]::Round(($script:Stats.CurrentStep / $script:Stats.TotalSteps) * 100))
 
+    # Remember the activity so Clear-AllProgress can close it later (v2.16)
+    if ($Activity -and $script:ProgressActivities -notcontains $Activity) {
+        $script:ProgressActivities += $Activity
+    }
+
     Write-Progress -Activity $Activity -Status $Status -PercentComplete $percent
+}
+
+function Clear-AllProgress {
+    <#
+    .SYNOPSIS
+        Closes every progress bar before the final report is printed
+    .DESCRIPTION
+        v2.16: "Write-Progress -Activity 'Complete' -Completed" only closed an activity
+        that never existed, so leftover bars stayed on screen under the summary - both
+        our own (seven different activities are used) and foreign ones from cmdlets such
+        as Clear-RecycleBin, whose activity name is not ours to know. Clearing by Id
+        covers those: an unused Id is simply a no-op.
+    #>
+    foreach ($activity in $script:ProgressActivities) {
+        Write-Progress -Activity $activity -Completed -ErrorAction SilentlyContinue
+    }
+    for ($id = 0; $id -le 10; $id++) {
+        Write-Progress -Id $id -Activity ' ' -Completed -ErrorAction SilentlyContinue
+    }
 }
 
 #endregion
@@ -905,7 +933,11 @@ function Remove-FolderContent {
 
         [switch]$RemoveFolder,
 
-        [string[]]$ExcludeFile = @()
+        [string[]]$ExcludeFile = @(),
+
+        # v2.16: skip entries younger than N days. Used for TEMP, where deleting
+        # files of currently running installers/applications breaks them mid-work.
+        [int]$MinAgeDays = 0
     )
 
     # Safety check
@@ -918,8 +950,34 @@ function Remove-FolderContent {
         return
     }
 
+    # Selects top-level entries eligible for removal. Used by both the report and the
+    # real run so that "would clean" never promises more than the run actually deletes.
+    $getEligible = {
+        Get-ChildItem -LiteralPath $Path -Force -ErrorAction SilentlyContinue | Where-Object {
+            # Skip excluded files and any directory that contains one.
+            # Deliberately conservative: a directory holding an excluded file is
+            # kept whole rather than partially cleaned (safe > thorough here)
+            $item = $_
+            -not ($ExcludeFile | Where-Object {
+                $_ -and (($item.FullName -ieq $_) -or
+                         $_.StartsWith($item.FullName + '\', [System.StringComparison]::OrdinalIgnoreCase))
+            })
+        } | Where-Object {
+            # Age filter (v2.16). A directory's LastWriteTime moves when its contents
+            # change, so an actively used folder is kept even if it was created earlier.
+            $MinAgeDays -le 0 -or $_.LastWriteTime -lt (Get-Date).AddDays(-$MinAgeDays)
+        }
+    }
+
     if ($ReportOnly) {
-        $size = Get-FolderSize -Path $Path
+        if ($MinAgeDays -gt 0) {
+            $size = 0
+            foreach ($entry in (& $getEligible)) {
+                $size += if ($entry.PSIsContainer) { Get-FolderSize -Path $entry.FullName } else { $entry.Length }
+            }
+        } else {
+            $size = Get-FolderSize -Path $Path
+        }
         if ($size -gt 0 -and $Description) {
             Write-Log "Would clean: $Description - $(Format-FileSize $size)" -Level DETAIL
         }
@@ -932,16 +990,7 @@ function Remove-FolderContent {
         if ($RemoveFolder) {
             Remove-Item -LiteralPath $Path -Recurse -Force -ErrorAction SilentlyContinue
         } else {
-            Get-ChildItem -LiteralPath $Path -Force -ErrorAction SilentlyContinue | Where-Object {
-                # Skip excluded files and any directory that contains one.
-                # Deliberately conservative: a directory holding an excluded file is
-                # kept whole rather than partially cleaned (safe > thorough here)
-                $item = $_
-                -not ($ExcludeFile | Where-Object {
-                    $_ -and (($item.FullName -ieq $_) -or
-                             $_.StartsWith($item.FullName + '\', [System.StringComparison]::OrdinalIgnoreCase))
-                })
-            } | ForEach-Object {
+            & $getEligible | ForEach-Object {
                 try {
                     # Handle read-only files
                     if ($_.Attributes -band [System.IO.FileAttributes]::ReadOnly) {
@@ -1455,9 +1504,34 @@ function Update-Applications {
             $script:Stats.AppUpdatesCount = $updateCount
             Write-Log "Application updates completed successfully" -Level SUCCESS
         } else {
-            # Don't count as successful updates if winget returned an error
-            Write-Log "Application updates completed with code: $($upgradeProcess.ExitCode)" -Level WARNING
-            $script:Stats.WarningsCount++
+            # v2.16: decode the exit code. A bare number ("code: -1978335188") tells the
+            # user nothing, and adjacent codes mean opposite things - 0x8A15002B is not
+            # an error at all, while 0x8A15002C means some upgrades genuinely failed.
+            # Values verified against the documented winget error list - do not edit
+            # from memory, adjacent codes have unrelated meanings.
+            $wingetErrors = @{
+                -1978335189 = '0x8A15002B - no applicable update found'
+                -1978335188 = '0x8A15002C - some applications failed to upgrade'
+                -1978335224 = '0x8A150008 - downloading installer failed'
+                -1978335225 = '0x8A150007 - manifest version newer than this winget client'
+                -1978335221 = '0x8A15000B - configured source information is corrupt'
+                -1978334967 = '0x8A150109 - restart required to finish installation'
+            }
+            $code = $upgradeProcess.ExitCode
+            $meaning = if ($wingetErrors.ContainsKey($code)) {
+                $wingetErrors[$code]
+            } else {
+                '0x{0:X8} - unrecognized winget exit code' -f $code
+            }
+
+            if ($code -eq -1978335189) {
+                # Nothing to upgrade is a normal outcome, not a warning
+                $script:Stats.AppUpdatesCount = $updateCount
+                Write-Log "Application updates: $meaning" -Level DETAIL
+            } else {
+                Write-Log "Application updates finished with $meaning" -Level WARNING
+                $script:Stats.WarningsCount++
+            }
         }
 
     } catch {
@@ -1491,8 +1565,11 @@ function Clear-TempFiles {
 
     foreach ($item in $tempPaths) {
         # Exclude the active log file - it lives in $env:TEMP by default and would
-        # otherwise be deleted mid-run, losing everything logged so far
-        Remove-FolderContent -Path $item.Path -Category "Temp" -Description $item.Desc -ExcludeFile $script:LogPath
+        # otherwise be deleted mid-run, losing everything logged so far.
+        # MinAgeDays (v2.16): TEMP holds working files of running installers and
+        # applications; deleting today's entries can break them mid-operation.
+        Remove-FolderContent -Path $item.Path -Category "Temp" -Description $item.Desc `
+            -ExcludeFile $script:LogPath -MinAgeDays 1
     }
 }
 
@@ -1663,6 +1740,24 @@ function Clear-WindowsUpdateCache {
         Stop-Service -Name wuauserv, bits -Force -ErrorAction SilentlyContinue
         $servicesStopped = $true
 
+        # v2.16: Stop-Service returns before the service has actually reached Stopped,
+        # and its failure was swallowed by -ErrorAction SilentlyContinue. Cleaning while
+        # the service still holds the files silently leaves the cache in place.
+        $stillRunning = @()
+        foreach ($svcName in @('wuauserv', 'bits')) {
+            $svc = Get-Service -Name $svcName -ErrorAction SilentlyContinue
+            if (-not $svc) { continue }
+            try {
+                $svc.WaitForStatus([System.ServiceProcess.ServiceControllerStatus]::Stopped, [timespan]::FromSeconds(30))
+            } catch {
+                $stillRunning += $svcName
+            }
+        }
+        if ($stillRunning.Count -gt 0) {
+            Write-Log "Service(s) still running after 30s: $($stillRunning -join ', ') - cache may be partially locked" -Level WARNING
+            $script:Stats.WarningsCount++
+        }
+
         # Clean
         Remove-FolderContent -Path "$env:SystemRoot\SoftwareDistribution\Download" -Category "WinUpdate" -Description "Windows Update cache"
     } finally {
@@ -1824,17 +1919,34 @@ function Clear-SystemCaches {
 
     # Delivery Optimization cache: files are owned by the DO service, so raw folder
     # deletion usually fails silently - use the supported cmdlet instead (v2.14)
-    $doPath = "$env:ProgramData\Microsoft\Windows\DeliveryOptimization"
+    #
+    # v2.16: the cache lives under the NetworkService profile, not in ProgramData.
+    # The old ProgramData path does not exist on Windows 11 (verified on 25H2), so
+    # every size measurement returned 0 and multi-gigabyte cleanups were reported as
+    # "0 B". Both locations are probed - the ProgramData one is kept for older builds.
+    # Note: Get-DeliveryOptimizationPerfSnap.CacheSizeBytes is NOT usable here - it
+    # reflects recent transfer activity (490 MB) rather than cache size on disk (7.5 GB).
+    $doPaths = @(
+        "$env:SystemRoot\ServiceProfiles\NetworkService\AppData\Local\Microsoft\Windows\DeliveryOptimization"
+        "$env:ProgramData\Microsoft\Windows\DeliveryOptimization"
+    ) | Where-Object { Test-Path $_ -ErrorAction SilentlyContinue }
+
+    $doSizeOf = {
+        $total = 0
+        foreach ($p in $doPaths) { $total += Get-FolderSize -Path $p }
+        $total
+    }
+
     if ($ReportOnly) {
-        $doSize = Get-FolderSize -Path $doPath
+        $doSize = & $doSizeOf
         if ($doSize -gt 0) {
             Write-Log "Would clean: Delivery Optimization - $(Format-FileSize $doSize)" -Level DETAIL
         }
     } elseif (Get-Command Delete-DeliveryOptimizationCache -ErrorAction SilentlyContinue) {
         try {
-            $doSizeBefore = Get-FolderSize -Path $doPath
+            $doSizeBefore = & $doSizeOf
             Delete-DeliveryOptimizationCache -Force -ErrorAction Stop
-            $doFreed = [math]::Max(0, $doSizeBefore - (Get-FolderSize -Path $doPath))
+            $doFreed = [math]::Max(0, $doSizeBefore - (& $doSizeOf))
             if ($doFreed -gt 0) {
                 $script:Stats.TotalFreedBytes += $doFreed
                 if (-not $script:Stats.FreedByCategory.ContainsKey("System")) {
@@ -1846,10 +1958,14 @@ function Clear-SystemCaches {
                 Write-Log "Delivery Optimization cache cleaned" -Level DETAIL
             }
         } catch {
-            Remove-FolderContent -Path $doPath -Category "System" -Description "Delivery Optimization"
+            foreach ($p in $doPaths) {
+                Remove-FolderContent -Path $p -Category "System" -Description "Delivery Optimization"
+            }
         }
     } else {
-        Remove-FolderContent -Path $doPath -Category "System" -Description "Delivery Optimization"
+        foreach ($p in $doPaths) {
+            Remove-FolderContent -Path $p -Category "System" -Description "Delivery Optimization"
+        }
     }
 }
 
@@ -2603,7 +2719,7 @@ function Invoke-DISMCleanup {
         Runs DISM component cleanup
     #>
     # Clear any existing progress bar before DISM outputs to console
-    Write-Progress -Activity "Cleanup" -Completed
+    Clear-AllProgress
 
     Write-Log "Windows Component Cleanup (DISM)" -Level SECTION
 
@@ -2763,14 +2879,31 @@ function Invoke-StorageSense {
         # Note (v2.14): "Previous Installations" removed - Windows.old deletion must go
         # through Clear-WindowsOld which asks for user confirmation.
         # "Windows ESD installation files" removed - ESD files are needed for "Reset this PC".
+        #
+        # v2.16: list reconciled with the actual registry on Windows 11 25H2.
+        # Removed (no such handler exists, they were silently skipped by Test-Path):
+        #   "Memory Dump Files", "Windows Error Reporting Archive Files",
+        #   "Windows Error Reporting Queue Files"
+        # Added: "Windows Error Reporting Files" (the real handler name),
+        #   "Device Driver Packages", "D3D Shader Cache", "Language Pack",
+        #   "Windows Reset Log Files", "Feedback Hub Archive log files",
+        #   "Diagnostic Data Viewer database files", "RetailDemo Offline Content".
+        # Deliberately NOT added, despite existing in the registry:
+        #   "DownloadsFolder"       - that is the user's Downloads folder
+        #   "Delivery Optimization Files" - handled by Clear-SystemCaches via the
+        #                             supported cmdlet, with measurable statistics
+        #   "Windows Defender", "Content Indexer Cleaner", "Offline Pages Files"
+        #                           - security/search state, no meaningful gain
         $categories = @(
-            "Active Setup Temp Folders", "BranchCache", "Downloaded Program Files",
-            "Internet Cache Files", "Memory Dump Files", "Old ChkDsk Files",
-            "Recycle Bin", "Setup Log Files",
+            "Active Setup Temp Folders", "BranchCache", "D3D Shader Cache",
+            "Device Driver Packages", "Diagnostic Data Viewer database files",
+            "Downloaded Program Files", "Feedback Hub Archive log files",
+            "Internet Cache Files", "Language Pack", "Old ChkDsk Files",
+            "Recycle Bin", "RetailDemo Offline Content", "Setup Log Files",
             "System error memory dump files", "System error minidump files",
             "Temporary Files", "Temporary Setup Files", "Thumbnail Cache",
             "Update Cleanup", "Upgrade Discarded Files", "User file versions",
-            "Windows Error Reporting Archive Files", "Windows Error Reporting Queue Files",
+            "Windows Error Reporting Files", "Windows Reset Log Files",
             "Windows Upgrade Log Files"
         )
 
@@ -2787,7 +2920,10 @@ function Invoke-StorageSense {
             $cleanmgr = Start-Process -FilePath "cleanmgr.exe" -ArgumentList "/sagerun:$sageset" `
                 -WindowStyle Hidden -PassThru
 
-            $maxWait = 420  # 7 minutes max (was 10 minutes)
+            # v2.16: raised from 420s. cleanmgr regularly needs longer on a workstation
+            # with a large component store, and killing it produced a warning on every
+            # single run while cleanmgr kept working in the background anyway.
+            $maxWait = 900  # 15 minutes
             $elapsed = 0
             $checkInterval = 10
 
@@ -2802,19 +2938,20 @@ function Invoke-StorageSense {
             }
 
             if (-not $cleanmgr.HasExited) {
+                # Not a warning: cleanmgr continues its work after we stop waiting, so
+                # this is "we moved on", not "something went wrong" (v2.16)
                 $cleanmgr | Stop-Process -Force -ErrorAction SilentlyContinue
-                Write-Log "Disk Cleanup timed out after $maxWait seconds" -Level WARNING
-                $script:Stats.WarningsCount++
+                Write-Log "Disk Cleanup exceeded $maxWait seconds - continuing without waiting" -Level INFO
             } else {
                 Write-Log "Disk Cleanup completed" -Level SUCCESS
             }
         } finally {
-            # Cleanup: remove StateFlags to avoid leaving traces in registry
-            foreach ($category in $categories) {
-                $categoryPath = Join-Path $regPath $category
-                if (Test-Path $categoryPath) {
-                    Remove-ItemProperty -Path $categoryPath -Name "StateFlags$sageset" -Force -ErrorAction SilentlyContinue
-                }
+            # Remove StateFlags to avoid leaving traces in the registry.
+            # v2.16: sweep every handler, not just the ones from $categories - flags left
+            # by an interrupted run or by an older version of this list stayed forever
+            # (four such leftovers were found on a live machine).
+            Get-ChildItem -Path $regPath -ErrorAction SilentlyContinue | ForEach-Object {
+                Remove-ItemProperty -Path $_.PSPath -Name "StateFlags$sageset" -Force -ErrorAction SilentlyContinue
             }
         }
     }
@@ -2876,7 +3013,7 @@ function Show-FinalStatistics {
     $totalSize = [math]::Round(($drive.Used + $drive.Free) / 1GB, 2)
     $freePercent = [math]::Round(($drive.Free / ($drive.Used + $drive.Free)) * 100, 1)
 
-    Write-Progress -Activity "Complete" -Completed
+    Clear-AllProgress
 
     # Box dimensions
     $boxWidth = 70    # Inner width (matches banner)
@@ -3047,6 +3184,9 @@ function Write-ResultJson {
             WarningsCount       = $script:Stats.WarningsCount
             ErrorsCount         = $script:Stats.ErrorsCount
             RebootRequired      = [bool]$script:Stats.RebootRequired
+            # v2.16: when true, cleanup figures are understated - Defender blocked
+            # some deletions without reporting an error
+            ControlledFolderAccess = [bool]$script:Stats.ControlledFolderAccess
             LogPath             = $script:LogPath
         }
 
@@ -3115,6 +3255,22 @@ function Start-WinClean {
     $updateInfo = Test-ScriptUpdate
     if ($updateInfo) {
         Invoke-ScriptUpdate -UpdateInfo $updateInfo
+    }
+
+    # Controlled Folder Access silently blocks deletions inside protected folders while
+    # every delete call still reports success, so cleanup looks fine in the log but frees
+    # nothing. Warn once up front instead of leaving the user with a misleading report (v2.16).
+    $script:Stats.ControlledFolderAccess = $false
+    try {
+        $mp = Get-MpPreference -ErrorAction Stop
+        if ($mp.EnableControlledFolderAccess -eq 1) {
+            $script:Stats.ControlledFolderAccess = $true
+            Write-Log "Controlled Folder Access is enabled - some deletions may be blocked silently" -Level WARNING
+            Write-Log "Add pwsh.exe to the allowed apps list, or cleanup results will be understated" -Level DETAIL
+            $script:Stats.WarningsCount++
+        }
+    } catch {
+        # Defender cmdlets unavailable (third-party AV or a stripped image) - not an error
     }
 
     try {
