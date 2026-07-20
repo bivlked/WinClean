@@ -505,12 +505,16 @@ Describe "v2.16: TEMP age filter" -Tag "Fix", "V216" {
     It "Directories are checked recursively" {
         # A parent's LastWriteTime does not move when a grandchild changes, so a
         # top-level-only check would delete fresh files nested deeper
-        $scriptContent | Should -Match '(?s)if \(\$_\.PSIsContainer\).*?Get-ChildItem -LiteralPath \$_\.FullName -Recurse'
+        $scriptContent | Should -Match '(?s)if \(\$item\.PSIsContainer\).*?Get-ChildItem -LiteralPath \$item\.FullName -Recurse'
     }
 
-    It "ReportOnly measures only eligible entries when filtering by age" {
-        # Otherwise the report would promise more than the run deletes
-        $scriptContent | Should -Match '\$getEligible'
+    It "ReportOnly measures the same candidates the real run would delete" {
+        # v2.17: eligibility and size are decided in one shared enumeration pass, used
+        # by both branches - $candidates - instead of a separate scriptblock re-run for
+        # each. Otherwise the report could promise more than the run actually deletes.
+        $body = Get-FunctionBody -Name 'Remove-FolderContent'
+        $body | Should -Match '\$candidates \+= \[pscustomobject\]'
+        $body | Should -Match 'if \(\$ReportOnly\)'
     }
 }
 
@@ -759,12 +763,17 @@ Describe "v2.16: silent failures are reported" -Tag "Fix", "V216", "SilentFailur
     }
 
     It "A cleanup that frees nothing from a non-empty folder is reported" {
-        $scriptContent | Should -Match 'nothing freed, \$\(Format-FileSize \$sizeBefore\) still present'
+        # v2.17: the baseline for this message is $totalSize (sum of what was actually
+        # eligible), not a Get-FolderSize of the whole path - see Remove-FolderContent
+        $scriptContent | Should -Match 'nothing freed, \$\(Format-FileSize \$totalSize\) still present'
     }
 
     It "The age filter fails closed when a subtree cannot be read" {
-        # Failing open would silently defeat the protection the filter exists for
-        $scriptContent | Should -Match 'if \(\$walkErrors\) \{ return \$false \}'
+        # Failing open would silently defeat the protection the filter exists for.
+        # v2.17: no longer a Where-Object predicate returning $false - a plain foreach
+        # skipping the candidate with `continue` - but the fail-closed guard is the same
+        $body = Get-FunctionBody -Name 'Remove-FolderContent'
+        $body | Should -Match 'if \(\$walkErrors\) \{ continue \}'
     }
 
     It "ReportOnly measures the same set the real run deletes" {

@@ -155,6 +155,24 @@ Main script:
   gateway container id and its SOCKS proxy addresses moved out of the (public) repo
   into the gitignored stand config
 
+### Fixed (fourth pass: MyAI-dtx8, "group B" - the highest-risk item of the audit)
+
+- **`Remove-FolderContent` walked the folder it was cleaning three to four full times**
+  (size before, the age filter's own recursive check, the delete, size after) - the
+  single largest performance item the audit found, and it runs roughly 35 times per
+  run, including against multi-gigabyte TEMP and SoftwareDistribution. One enumeration
+  pass now decides eligibility and measures size together; after deletion, each
+  candidate is checked individually instead of re-walking the whole folder - fully
+  gone contributes its pre-measured size, a directory that only partially emptied (a
+  locked file survives inside it) gets re-measured on its own, scoped to just that
+  subtree. A mutation test proved this specific accuracy path had no coverage of its
+  own - removing it left the whole suite green - so it now has a dedicated one:
+  a directory with one locked file and one free file inside must report exactly the
+  free file's size, not the whole directory and not zero
+- Removed the `-RemoveFolder` switch: dead since at least v2.16 (no caller left), and
+  it would have kept a second, untested code path alive through this rewrite for
+  nothing
+
 ### Changed
 
 - Self-update check is now gated by `-SkipUpdates`, and the disk space report by
@@ -166,7 +184,7 @@ Main script:
 
 ### Tests
 
-- 264 Pester tests (was 222 earlier in 2.17, 141 in 2.15). The 42 new tests close part
+- 268 Pester tests (was 222 earlier in 2.17, 141 in 2.15). The 46 new tests close part
   of a coverage gap the second audit pass found: 39 functions with no behavioral test at
   all, including 8 that delete files. `Get-SupersededDriverCandidate` (the pure
   candidate-selection logic split out of `Get-RedundantDriverPackage` for exactly this)

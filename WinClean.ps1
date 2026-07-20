@@ -1143,6 +1143,20 @@ function Remove-FolderContent {
     <#
     .SYNOPSIS
         Safely removes folder contents with size tracking
+    .DESCRIPTION
+        v2.17 (p.1 of the audit, the single largest performance item in the script):
+        this used to walk $Path in full three to four times - Get-FolderSize before,
+        the age filter's own recursive check, the delete, Get-FolderSize after - called
+        ~35 times per run, including against multi-gigabyte TEMP and
+        SoftwareDistribution. Now one enumeration pass decides eligibility AND measures
+        size at the same time (a directory's age check and its size come from the same
+        recursive Get-ChildItem instead of two separate walks), and after deletion each
+        candidate is checked individually - Test-Path for "fully gone", a single
+        Get-FolderSize scoped to just that candidate for "partially gone" (some locked
+        file inside) - instead of re-walking the whole of $Path a second time.
+
+        -RemoveFolder was removed: it had no caller left (dead since at least v2.16) and
+        kept a second, untested code path alive through this rewrite for nothing.
     #>
     param(
         [Parameter(Mandatory)]
@@ -1152,8 +1166,6 @@ function Remove-FolderContent {
         [string]$Category,
 
         [string]$Description,
-
-        [switch]$RemoveFolder,
 
         [string[]]$ExcludeFile = @(),
 
@@ -1172,72 +1184,84 @@ function Remove-FolderContent {
         return
     }
 
-    # Selects top-level entries eligible for removal. Used by both the report and the
-    # real run so that "would clean" never promises more than the run actually deletes.
-    $getEligible = {
-        Get-ChildItem -LiteralPath $Path -Force -ErrorAction SilentlyContinue | Where-Object {
-            # Skip excluded files and any directory that contains one.
-            # Deliberately conservative: a directory holding an excluded file is
-            # kept whole rather than partially cleaned (safe > thorough here)
-            $item = $_
-            -not ($ExcludeFile | Where-Object {
-                $_ -and (($item.FullName -ieq $_) -or
-                         $_.StartsWith($item.FullName + '\', [System.StringComparison]::OrdinalIgnoreCase))
-            })
-        } | Where-Object {
-            # Age filter (v2.16). Directories are checked recursively: a folder's own
-            # LastWriteTime only moves when its direct children change, so a fresh file
-            # nested deeper would otherwise be deleted along with its old-looking parent.
-            if ($MinAgeDays -le 0) { return $true }
-            $cutoff = (Get-Date).AddDays(-$MinAgeDays)
-            if ($_.PSIsContainer) {
+    $cutoff = if ($MinAgeDays -gt 0) { (Get-Date).AddDays(-$MinAgeDays) } else { $null }
+
+    # Single top-level enumeration. Eligibility and size are decided together, and used
+    # by both the report and the real run so "would clean" never promises more than the
+    # run actually deletes.
+    $candidates = @()
+    foreach ($item in (Get-ChildItem -LiteralPath $Path -Force -ErrorAction SilentlyContinue)) {
+        # Skip excluded files and any directory that contains one. Deliberately
+        # conservative: a directory holding an excluded file is kept whole rather than
+        # partially cleaned (safe > thorough here)
+        $isExcluded = [bool]($ExcludeFile | Where-Object {
+            $_ -and (($item.FullName -ieq $_) -or
+                     $_.StartsWith($item.FullName + '\', [System.StringComparison]::OrdinalIgnoreCase))
+        })
+        if ($isExcluded) { continue }
+
+        if ($item.PSIsContainer) {
+            if ($cutoff) {
+                # A folder's own LastWriteTime only moves when its direct children
+                # change, so a fresh file nested deeper would otherwise be deleted
+                # along with its old-looking parent - the age check must be recursive.
                 # Fail closed: if the subtree cannot be fully read (ACL, path length,
-                # locked folder), we cannot prove the directory is stale, so we keep it.
-                # Failing open here would defeat the entire point of the age filter.
+                # locked folder), staleness cannot be proven, so the directory is kept.
                 $walkErrors = $null
-                $newer = Get-ChildItem -LiteralPath $_.FullName -Recurse -Force `
-                            -ErrorAction SilentlyContinue -ErrorVariable walkErrors |
-                         Where-Object { $_.LastWriteTime -ge $cutoff } | Select-Object -First 1
-                if ($walkErrors) { return $false }
-                (-not $newer) -and $_.LastWriteTime -lt $cutoff
+                $children = Get-ChildItem -LiteralPath $item.FullName -Recurse -Force `
+                                -ErrorAction SilentlyContinue -ErrorVariable walkErrors
+                if ($walkErrors) { continue }
+                if ($children | Where-Object { $_.LastWriteTime -ge $cutoff } | Select-Object -First 1) { continue }
+                # Same walk also gives the size - no second pass needed for it
+                $size = ($children | Where-Object { -not $_.PSIsContainer } |
+                         Measure-Object -Property Length -Sum).Sum
             } else {
-                $_.LastWriteTime -lt $cutoff
+                $size = Get-FolderSize -Path $item.FullName
             }
+        } else {
+            if ($cutoff -and $item.LastWriteTime -ge $cutoff) { continue }
+            $size = $item.Length
         }
+
+        $candidates += [pscustomobject]@{ Item = $item; Size = [long]($size ?? 0) }
     }
 
+    $totalSize = [long](($candidates | Measure-Object -Property Size -Sum).Sum ?? 0)
+
     if ($ReportOnly) {
-        # Always measured through $getEligible so the preview cannot promise more than
-        # the real run deletes - excluded files and fresh entries are left out of both
-        $size = 0
-        foreach ($entry in (& $getEligible)) {
-            $size += if ($entry.PSIsContainer) { Get-FolderSize -Path $entry.FullName } else { $entry.Length }
-        }
-        if ($size -gt 0 -and $Description) {
-            Write-Log "Would clean: $Description - $(Format-FileSize $size)" -Level DETAIL
+        if ($totalSize -gt 0 -and $Description) {
+            Write-Log "Would clean: $Description - $(Format-FileSize $totalSize)" -Level DETAIL
         }
         return
     }
 
-    $sizeBefore = Get-FolderSize -Path $Path
+    if ($candidates.Count -eq 0) {
+        return
+    }
 
     try {
-        if ($RemoveFolder) {
-            Remove-Item -LiteralPath $Path -Recurse -Force -ErrorAction SilentlyContinue
-        } else {
-            & $getEligible | ForEach-Object {
-                try {
-                    # Handle read-only files
-                    if ($_.Attributes -band [System.IO.FileAttributes]::ReadOnly) {
-                        $_.Attributes = $_.Attributes -band (-bnot [System.IO.FileAttributes]::ReadOnly)
-                    }
-                    Remove-Item -LiteralPath $_.FullName -Recurse -Force -ErrorAction SilentlyContinue
-                } catch { }
-            }
-        }
+        $freed = 0
+        foreach ($c in $candidates) {
+            $item = $c.Item
+            try {
+                # Handle read-only files
+                if ($item.Attributes -band [System.IO.FileAttributes]::ReadOnly) {
+                    $item.Attributes = $item.Attributes -band (-bnot [System.IO.FileAttributes]::ReadOnly)
+                }
+                Remove-Item -LiteralPath $item.FullName -Recurse -Force -ErrorAction SilentlyContinue
+            } catch { }
 
-        $sizeAfter = Get-FolderSize -Path $Path
-        $freed = $sizeBefore - $sizeAfter
+            if (-not (Test-Path -LiteralPath $item.FullName -ErrorAction SilentlyContinue)) {
+                # Fully gone - the size measured before deletion is exactly what was freed
+                $freed += $c.Size
+            } elseif ($item.PSIsContainer) {
+                # Partially deleted (some locked file inside) - re-measure only this one
+                # subtree, not the whole of $Path
+                $remaining = Get-FolderSize -Path $item.FullName
+                $freed += [math]::Max(0, $c.Size - $remaining)
+            }
+            # A file that still exists (locked) contributes 0 - correctly nothing freed
+        }
 
         if ($freed -gt 0) {
             # Update statistics (synchronized hashtable handles thread-safety)
@@ -1252,7 +1276,7 @@ function Remove-FolderContent {
             if ($Description) {
                 Write-Log "$Description - $(Format-FileSize $freed)" -Level SUCCESS
             }
-        } elseif ($sizeBefore -gt 0 -and $Description) {
+        } elseif ($totalSize -gt 0 -and $Description) {
             # v2.16: silence here is indistinguishable from "there was nothing to do".
             # Say it out loud - this is exactly how the Controlled Folder Access bug hid:
             # deletions were blocked without an error and the log simply stayed quiet.
@@ -1264,7 +1288,7 @@ function Remove-FolderContent {
                 'unknown' { ' (files are probably locked, or Controlled Folder Access is blocking it - the check itself failed)' }
                 default   { ' (files are probably locked by a running process)' }
             }
-            Write-Log "$Description - nothing freed, $(Format-FileSize $sizeBefore) still present$reason" -Level WARNING
+            Write-Log "$Description - nothing freed, $(Format-FileSize $totalSize) still present$reason" -Level WARNING
             $script:Stats.WarningsCount++
         }
     } catch {

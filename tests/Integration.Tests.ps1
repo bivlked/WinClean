@@ -357,6 +357,62 @@ Describe "Sandbox: temp age filter is recursive" -Tag "Integration" -Skip:(-not 
     }
 }
 
+Describe "Sandbox: Remove-FolderContent partial-deletion accuracy" -Tag "Integration" -Skip:(-not $IsElevated) {
+    <#
+    v2.17 (p.1 of the audit): Remove-FolderContent no longer re-walks the whole $Path to
+    measure what got freed - after the delete attempt, a candidate that is fully gone
+    contributes its pre-measured size, one that still exists gets re-measured on its own
+    (not the whole of $Path). A mutation test proved this specific branch has no other
+    coverage: removing it outright left the full suite green. This is the target: a
+    directory candidate that partially empties (one locked file inside survives, the
+    rest of its contents do not) must report exactly what was freed - not the whole
+    directory's size, not zero.
+    #>
+
+    BeforeAll {
+        $root = New-Sandbox
+        $container = Join-Path $root 'Users\test\AppData\Roaming\PartialDelete'
+        $subdir = Join-Path $container 'subdir'
+        New-Item -ItemType Directory -Path $subdir -Force | Out-Null
+
+        $lockedFile = Join-Path $subdir 'locked.bin'
+        $freeFile = Join-Path $subdir 'free.bin'
+        [System.IO.File]::WriteAllBytes($lockedFile, [byte[]]::new(4096))
+        [System.IO.File]::WriteAllBytes($freeFile, [byte[]]::new(8192))
+
+        # Held from THIS process: Windows enforces sharing violations across processes,
+        # so the child sandbox's Remove-Item -Recurse will delete free.bin but fail on
+        # locked.bin - and therefore fail to remove 'subdir' itself, which is exactly
+        # the "partially deleted directory" case this test targets.
+        $lockStream = [System.IO.File]::Open($lockedFile, [System.IO.FileMode]::Open,
+            [System.IO.FileAccess]::Read, [System.IO.FileShare]::None)
+        try {
+            $result = Invoke-Sandbox -Root $root -Body @"
+Remove-FolderContent -Path '$container' -Category 'PartialTest' -Description 'partial delete test'
+"@
+        } finally {
+            $lockStream.Dispose()
+        }
+    }
+
+    It "Runs without errors" {
+        $result.ExitCode | Should -Be 0
+    }
+
+    It "Keeps the locked file and the directory that holds it" {
+        Test-Path $lockedFile | Should -BeTrue
+        Test-Path $subdir | Should -BeTrue
+    }
+
+    It "Removes the file that was not locked" {
+        Test-Path $freeFile | Should -BeFalse
+    }
+
+    It "Reports exactly the freed file's size - not the whole subdirectory, not zero" {
+        [long]$result.Stats.FreedByCategory.PartialTest | Should -Be 8192
+    }
+}
+
 # v2.17: the audit (MyAI-dtx8, item 22) found 39 functions with zero behavioral tests,
 # including 8 that delete files. Everything below closes that gap for the functions
 # that can be exercised safely. Four of the eight (Clear-EventLogs, Clear-
