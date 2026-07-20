@@ -318,3 +318,41 @@ Write-ResultJson -Path $ResultJsonPath
         $json.PSObject.Properties.Name | Should -Contain 'FreedByCategory'
     }
 }
+
+Describe "Sandbox: temp age filter is recursive" -Tag "Integration" -Skip:(-not $IsElevated) {
+
+    BeforeAll {
+        $root = New-Sandbox
+        $tempRoot = Join-Path $root 'Users\test\AppData\Local\Temp'
+        $old = (Get-Date).AddDays(-10)
+
+        # Old-looking directory holding a freshly written file deeper inside.
+        # A parent's LastWriteTime does not move when a grandchild changes, so a
+        # non-recursive age check would delete the fresh file along with the parent.
+        $nested = Join-Path $tempRoot 'oldlooking\inner'
+        New-Item -ItemType Directory -Path $nested -Force | Out-Null
+        [System.IO.File]::WriteAllText((Join-Path $nested 'fresh-inside.txt'), 'x' * 512)
+        (Get-Item (Join-Path $tempRoot 'oldlooking') -Force).LastWriteTime = $old
+
+        # Directory that is old all the way down: must still be removed
+        $stale = Join-Path $tempRoot 'fullyold'
+        New-Item -ItemType Directory -Path $stale -Force | Out-Null
+        [System.IO.File]::WriteAllText((Join-Path $stale 'old.txt'), 'x' * 512)
+        (Get-Item (Join-Path $stale 'old.txt') -Force).LastWriteTime = $old
+        (Get-Item $stale -Force).LastWriteTime = $old
+
+        $result = Invoke-Sandbox -Root $root -Body 'Clear-TempFiles'
+    }
+
+    It "Runs without errors" {
+        $result.ExitCode | Should -Be 0
+    }
+
+    It "Keeps a directory that holds a fresh file deeper inside" {
+        Test-Path (Join-Path $root 'Users\test\AppData\Local\Temp\oldlooking\inner\fresh-inside.txt') | Should -BeTrue
+    }
+
+    It "Still removes a directory that is old all the way down" {
+        Test-Path (Join-Path $root 'Users\test\AppData\Local\Temp\fullyold') | Should -BeFalse
+    }
+}

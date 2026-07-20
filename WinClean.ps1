@@ -978,9 +978,18 @@ function Remove-FolderContent {
                          $_.StartsWith($item.FullName + '\', [System.StringComparison]::OrdinalIgnoreCase))
             })
         } | Where-Object {
-            # Age filter (v2.16). A directory's LastWriteTime moves when its contents
-            # change, so an actively used folder is kept even if it was created earlier.
-            $MinAgeDays -le 0 -or $_.LastWriteTime -lt (Get-Date).AddDays(-$MinAgeDays)
+            # Age filter (v2.16). Directories are checked recursively: a folder's own
+            # LastWriteTime only moves when its direct children change, so a fresh file
+            # nested deeper would otherwise be deleted along with its old-looking parent.
+            if ($MinAgeDays -le 0) { return $true }
+            $cutoff = (Get-Date).AddDays(-$MinAgeDays)
+            if ($_.PSIsContainer) {
+                $newer = Get-ChildItem -LiteralPath $_.FullName -Recurse -Force -ErrorAction SilentlyContinue |
+                         Where-Object { $_.LastWriteTime -ge $cutoff } | Select-Object -First 1
+                (-not $newer) -and $_.LastWriteTime -lt $cutoff
+            } else {
+                $_.LastWriteTime -lt $cutoff
+            }
         }
     }
 
@@ -1540,10 +1549,16 @@ function Update-Applications {
             }
 
             if ($code -eq -1978335189) {
-                # Nothing to upgrade is a normal outcome, not a warning
-                $script:Stats.AppUpdatesCount = $updateCount
+                # Nothing to upgrade is a normal outcome, not a warning. AppUpdatesCount
+                # stays at zero: nothing was installed, and counting it would show up as
+                # "Updates installed" in the summary.
                 Write-Log "Application updates: $meaning" -Level DETAIL
             } else {
+                if ($code -eq -1978334967) {
+                    # Installation finished but needs a reboot to take effect
+                    $script:Stats.AppUpdatesCount = $updateCount
+                    $script:Stats.RebootRequired = $true
+                }
                 Write-Log "Application updates finished with $meaning" -Level WARNING
                 $script:Stats.WarningsCount++
             }
@@ -1769,12 +1784,14 @@ function Clear-WindowsUpdateCache {
             }
         }
         if ($stillRunning.Count -gt 0) {
-            Write-Log "Service(s) still running after 30s: $($stillRunning -join ', ') - cache may be partially locked" -Level WARNING
+            # Skip entirely rather than half-delete: with the service holding the files,
+            # cleanup would remove an arbitrary subset and report a misleading number
+            Write-Log "Service(s) still running after 30s: $($stillRunning -join ', ') - skipping cache cleanup" -Level WARNING
             $script:Stats.WarningsCount++
+        } else {
+            # Clean
+            Remove-FolderContent -Path "$env:SystemRoot\SoftwareDistribution\Download" -Category "WinUpdate" -Description "Windows Update cache"
         }
-
-        # Clean
-        Remove-FolderContent -Path "$env:SystemRoot\SoftwareDistribution\Download" -Category "WinUpdate" -Description "Windows Update cache"
     } finally {
         # Always restart services
         if ($servicesStopped) {
@@ -3126,18 +3143,22 @@ function Invoke-StorageSense {
         #   "Memory Dump Files", "Windows Error Reporting Archive Files",
         #   "Windows Error Reporting Queue Files"
         # Added: "Windows Error Reporting Files" (the real handler name),
-        #   "Device Driver Packages", "D3D Shader Cache", "Language Pack",
-        #   "Windows Reset Log Files", "Feedback Hub Archive log files",
-        #   "Diagnostic Data Viewer database files", "RetailDemo Offline Content".
+        #   "D3D Shader Cache", "Language Pack", "Windows Reset Log Files",
+        #   "Feedback Hub Archive log files", "Diagnostic Data Viewer database files",
+        #   "RetailDemo Offline Content".
         # Deliberately NOT added, despite existing in the registry:
         #   "DownloadsFolder"       - that is the user's Downloads folder
+        #   "Device Driver Packages" - cleanmgr picks driver packages by its own closed
+        #                             heuristic, which would bypass the conservative rule
+        #                             in Clear-DriverStore (unused AND superseded) and is
+        #                             neither previewable nor measurable
         #   "Delivery Optimization Files" - handled by Clear-SystemCaches via the
         #                             supported cmdlet, with measurable statistics
         #   "Windows Defender", "Content Indexer Cleaner", "Offline Pages Files"
         #                           - security/search state, no meaningful gain
         $categories = @(
             "Active Setup Temp Folders", "BranchCache", "D3D Shader Cache",
-            "Device Driver Packages", "Diagnostic Data Viewer database files",
+            "Diagnostic Data Viewer database files",
             "Downloaded Program Files", "Feedback Hub Archive log files",
             "Internet Cache Files", "Language Pack", "Old ChkDsk Files",
             "Recycle Bin", "RetailDemo Offline Content", "Setup Log Files",
@@ -3179,10 +3200,10 @@ function Invoke-StorageSense {
             }
 
             if (-not $cleanmgr.HasExited) {
-                # Not a warning: cleanmgr continues its work after we stop waiting, so
-                # this is "we moved on", not "something went wrong" (v2.16)
-                $cleanmgr | Stop-Process -Force -ErrorAction SilentlyContinue
-                Write-Log "Disk Cleanup exceeded $maxWait seconds - continuing without waiting" -Level INFO
+                # Let it finish in the background instead of killing it. Not a warning
+                # either: cleanmgr simply takes longer than we are willing to wait, and
+                # killing it mid-delete was both pointless and misreported as "continuing" (v2.16)
+                Write-Log "Disk Cleanup exceeded $maxWait seconds - leaving it to finish in the background" -Level INFO
             } else {
                 Write-Log "Disk Cleanup completed" -Level SUCCESS
             }

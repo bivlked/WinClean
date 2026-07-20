@@ -466,7 +466,13 @@ Describe "v2.16: TEMP age filter" -Tag "Fix", "V216" {
     }
 
     It "Age filter compares LastWriteTime against the cutoff" {
-        $scriptContent | Should -Match '\$MinAgeDays -le 0 -or \$_\.LastWriteTime -lt \(Get-Date\)\.AddDays\(-\$MinAgeDays\)'
+        $scriptContent | Should -Match '\$_\.LastWriteTime -lt \$cutoff'
+    }
+
+    It "Directories are checked recursively" {
+        # A parent's LastWriteTime does not move when a grandchild changes, so a
+        # top-level-only check would delete fresh files nested deeper
+        $scriptContent | Should -Match '(?s)if \(\$_\.PSIsContainer\).*?Get-ChildItem -LiteralPath \$_\.FullName -Recurse'
     }
 
     It "ReportOnly measures only eligible entries when filtering by age" {
@@ -522,9 +528,14 @@ Describe "v2.16: Disk Cleanup categories match the registry" -Tag "Fix", "V216" 
         $categoriesBlock | Should -Match '"Windows Error Reporting Files"'
     }
 
-    It "Driver packages and shader cache are covered" {
-        $categoriesBlock | Should -Match '"Device Driver Packages"'
+    It "Shader cache is covered" {
         $categoriesBlock | Should -Match '"D3D Shader Cache"'
+    }
+
+    It "Driver packages are left to Clear-DriverStore" {
+        # cleanmgr would pick packages by its own closed heuristic, bypassing the
+        # conservative unused-AND-superseded rule and giving no measurable result
+        $categoriesBlock | Should -Not -Match '"Device Driver Packages"'
     }
 
     It "The user Downloads folder is never a cleanup target" {
@@ -580,7 +591,12 @@ Describe "v2.16: Disk Cleanup timeout" -Tag "Fix", "V216" {
     }
 
     It "Exceeding the wait is not counted as a warning" {
-        $scriptContent | Should -Match 'continuing without waiting'
+        $scriptContent | Should -Match 'leaving it to finish in the background'
+    }
+
+    It "cleanmgr is not killed on timeout" {
+        # Killing it mid-delete achieved nothing and contradicted the log message
+        $scriptContent | Should -Not -Match '\$cleanmgr \| Stop-Process'
     }
 }
 
@@ -599,7 +615,7 @@ Describe "v2.16: driver store cleanup" -Tag "Feature", "V216" {
     }
 
     It "Never uses /force" {
-        $scriptContent | Should -Not -Match 'pnputil[^
+        $scriptContent | Should -Not -Match 'pnputil[^
 ]*/force'
     }
 

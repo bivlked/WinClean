@@ -1,7 +1,7 @@
 # WinClean - Инструкции для Claude
 
-> Последнее обновление: 2026-07-18
-> Текущая версия скрипта: 2.15
+> Последнее обновление: 2026-07-20
+> Текущая версия скрипта: 2.16
 
 ---
 
@@ -11,7 +11,7 @@
 
 | Параметр | Значение |
 |----------|----------|
-| **Версия** | 2.15 |
+| **Версия** | 2.16 |
 | **Язык** | PowerShell 7.1+ |
 | **Платформа** | Windows 11 (23H2/24H2/25H2) |
 | **Лицензия** | MIT |
@@ -22,7 +22,7 @@
 ### Статус публикации
 
 - **GitHub**: ✅ Опубликован, активно развивается
-- **PSGallery**: ✅ Опубликован (v2.13, 18.01.2026; v2.15 готов к публикации)
+- **PSGallery**: ✅ Опубликован (v2.13, 18.01.2026; v2.15 и v2.16 не публиковались - решение за пользователем)
 - **CI/CD**: ✅ GitHub Actions (PSScriptAnalyzer + Pester)
 
 ---
@@ -43,10 +43,10 @@ CleanScript/
 │   └── logo.svg              # Логотип проекта
 ├── get.ps1                   # Bootstrap: разовый запуск одной командой (irm | iex)
 ├── install.ps1               # Bootstrap: установка/обновление + ярлык (RunAs admin)
-├── tests/                    # Pester тесты (141 всего)
+├── tests/                    # Pester тесты (181 всего)
 │   ├── Helpers.Tests.ps1     # Unit-тесты helper-функций (65 тестов)
-│   ├── Fixes.Tests.ps1       # Валидационные тесты исправлений (52 теста)
-│   └── Integration.Tests.ps1 # Интеграционные тесты в песочнице ФС (24 теста)
+│   ├── Fixes.Tests.ps1       # Валидационные тесты исправлений (91 тест)
+│   └── Integration.Tests.ps1 # Интеграционные тесты в песочнице ФС (25 тестов)
 ├── tools/                    # Тестовая инфраструктура (не публикуется в PSGallery)
 │   ├── Invoke-SmokeTest.ps1  # Смоук: ReportOnly + JSON + геометрия рамок
 │   ├── BoxGeometry.ps1       # Автопроверка геометрии консольных рамок
@@ -79,22 +79,22 @@ WinClean.ps1 - монолитный скрипт (3185 строк) с модул
 
 | Строки | Секция (`#region`) | Что внутри |
 |--------|--------------------|------------|
-| 1-236 | PSScriptInfo + Help + param() | Метаданные PSGallery, comment-based help, блок параметров (~232-243) |
-| 238-288 | INITIALIZATION | Константы, `$script:Stats`, `$script:Version` (274), `$script:ProtectedPaths` |
-| 290-404 | LOGGING FUNCTIONS | `Write-Log`, `Update-Progress`, `Test-InteractiveConsole` |
-| 406-1100 | HELPER FUNCTIONS | `Test-*`, `Format-FileSize`, `ConvertFrom-HumanReadableSize`, `Remove-FolderContent` (892), `New-SystemRestorePoint`, self-update |
-| 1102-1469 | UPDATE FUNCTIONS | `Update-WindowsSystem` (1106), `Update-Applications` (1300) |
-| 1471-2204 | CLEANUP FUNCTIONS | temp, браузеры, кэш WU, корзина, системные кэши, журналы, DNS, privacy, телеметрия, Windows.old |
-| 2206-2344 | DEVELOPER CLEANUP | `Clear-DeveloperCaches` (npm/yarn/pnpm/pip/uv/go/gradle/nuget) |
-| 2346-2505 | DOCKER/WSL CLEANUP | `Clear-DockerWSL`, компактирование VHDX |
-| 2507-2594 | VISUAL STUDIO CLEANUP | `Clear-VisualStudio` |
-| 2596-2823 | SYSTEM CLEANUP | `Invoke-DISMCleanup` (2600), `Invoke-StorageSense` (2682, cleanmgr) |
-| 2825-3185 | MAIN EXECUTION | `Show-Banner`, `Show-FinalStatistics`, `Write-ResultJson` (3017), `Start-WinClean` (3065) |
+| 1-251 | PSScriptInfo + Help + param() | Метаданные PSGallery, comment-based help, блок параметров |
+| 253-307 | INITIALIZATION | Константы, `$script:Stats`, `$script:Version` (293), `$script:ProtectedPaths` |
+| 309-447 | LOGGING FUNCTIONS | `Write-Log`, `Update-Progress`, `Clear-AllProgress` |
+| 449-1173 | HELPER FUNCTIONS | `Test-*`, `Format-FileSize`, `Remove-FolderContent`, `New-SystemRestorePoint`, self-update |
+| 1175-1573 | UPDATE FUNCTIONS | `Update-WindowsSystem`, `Update-Applications` |
+| 1575-2352 | CLEANUP FUNCTIONS | temp, браузеры, кэш WU, корзина, системные кэши, журналы, DNS, privacy, телеметрия, Windows.old |
+| 2354-2492 | DEVELOPER CLEANUP | `Clear-DeveloperCaches` |
+| 2494-2653 | DOCKER/WSL CLEANUP | `Clear-DockerWSL`, компактирование VHDX |
+| 2655-2742 | VISUAL STUDIO CLEANUP | `Clear-VisualStudio` |
+| 2744-3222 | SYSTEM CLEANUP | `Clear-KernelDumps`, `Show-DiskSpaceReport`, `Clear-DriverStore`, `Invoke-DISMCleanup`, `Invoke-StorageSense` |
+| 3224-конец | MAIN EXECUTION | `Show-Banner`, `Show-FinalStatistics`, `Write-ResultJson`, `Start-WinClean` |
 
 ### Ключевые переменные
 
 ```powershell
-$script:Version = "2.15"           # Единый источник версии
+$script:Version = "2.16"           # Единый источник версии
 $script:Stats = [hashtable]::Synchronized(@{...})  # Thread-safe статистика
 $script:LogPath = "..."            # Путь к лог-файлу
 $script:ProtectedPaths = @(...)    # Защищённые пути (никогда не удаляются)
@@ -131,18 +131,18 @@ $script:ProtectedPaths = @(...)    # Защищённые пути (никогд
 
 ### Версионирование
 
-При выпуске новой версии обновить (номера строк сверены 20.07.2026 для v2.15; проверять `grep -n 'VERSION\|script:Version' WinClean.ps1`):
-1. `$script:Version` в WinClean.ps1 (строка 274)
+При выпуске новой версии обновить (номера строк сверены 20.07.2026 после выпуска v2.16; проверять `grep -n 'VERSION\|script:Version' WinClean.ps1`):
+1. `$script:Version` в WinClean.ps1 (строка 293)
 2. `.VERSION` в PSScriptInfo (строка 2)
 3. `.RELEASENOTES` в PSScriptInfo (строки 14-21)
-4. `SYNOPSIS` (строка 26)
-5. `NOTES` секция (строки 41, 43) - `Version:` и "Changes in X.X"
+4. `SYNOPSIS` (строка 28)
+5. `NOTES` секция (строки 42, 44) - `Version:` и "Changes in X.X"
 6. Badges в README.md и README_RU.md (строка 9 в обоих)
 7. Диаграмму "Execution Flow" в README (версия в заголовке, строка 339 в обоих)
 8. CHANGELOG.md - новая запись в начале
 9. `CONTRIBUTING.md` - счётчик тестов, если он менялся (строки 131 и 239)
 
-⚠️ **Счётчик тестов считать только прогоном Pester**, не грепом `It`: 7 блоков размножаются через `-ForEach`, поэтому наивный подсчёт даёт 112 вместо реальных 141.
+⚠️ **Счётчик тестов считать только прогоном Pester**, не грепом `It`: 7 блоков размножаются через `-ForEach`, поэтому наивный подсчёт занижает результат.
 
 🔴 **9. GitHub Release с ассетами - ОБЯЗАТЕЛЕН, иначе one-liner'ы отдают СТАРУЮ версию.**
 `get.ps1` и `install.ps1` берут скрипт из **последнего GitHub Release** (fail-closed, без отката на main) и сверяют SHA256 с ассетом `WinClean.ps1.sha256`. Просто `git push` новую версию НЕ публикует - пользователи продолжат получать предыдущий релиз.
@@ -189,7 +189,7 @@ Publish-PSResource -Path .\WinClean.ps1 -Repository PSGallery -ApiKey $env:PSGAL
 **Проверки (3 job'а):**
 1. **lint** - PSScriptAnalyzer (Warning, Error)
 2. **syntax** - Проверка синтаксиса PowerShell
-3. **test** - Pester тесты (141, запускается после lint и syntax; интеграционные требуют admin - на GitHub runners это выполняется)
+3. **test** - Pester тесты (181, запускается после lint и syntax; интеграционные требуют admin - на GitHub runners это выполняется)
 
 **Исключения PSScriptAnalyzer** (допустимые для CLI):
 - PSAvoidUsingWriteHost - это интерактивная утилита
@@ -198,7 +198,7 @@ Publish-PSResource -Path .\WinClean.ps1 -Repository PSGallery -ApiKey $env:PSGAL
 
 ### Pester тесты (v2.13+)
 
-- `tests/Helpers.Tests.ps1` - 65 unit-тестов, `tests/Fixes.Tests.ps1` - 52 теста, `tests/Integration.Tests.ps1` - 24 интеграционных (песочница ФС, требуют admin)
+- `tests/Helpers.Tests.ps1` - 65 unit-тестов, `tests/Fixes.Tests.ps1` - 91 тест, `tests/Integration.Tests.ps1` - 25 интеграционных (песочница ФС, требуют admin)
 - Особенности: функции в BeforeAll (не AST), regex для locale-независимости, отдельные It блоки
 
 ---
@@ -206,23 +206,25 @@ Publish-PSResource -Path .\WinClean.ps1 -Repository PSGallery -ApiKey $env:PSGAL
 ## 7. Текущие задачи
 
 ### В работе
-- [ ] **Публикация v2.15 в PSGallery** (решение за пользователем; GitHub Release v2.15 уже выпущен, one-liner'ы работают). Команда - в разделе "Публикация в PSGallery" ниже
-- [ ] Публикация статьи на Хабре (`docs/habr-article.md` - текст готов, ждёт скриншоты). ⚠️ Текст писался под старую версию - сверить с v2.15 (появились get.ps1/install.ps1, стенд, ночные прогоны)
+- [ ] **Публикация v2.15 / v2.16 в PSGallery** (решение за пользователем; GitHub Release выпускается всегда, one-liner'ы работают от него). Команда - в разделе "Публикация в PSGallery" ниже
+- [ ] Публикация статьи на Хабре (`docs/habr-article.md` - текст готов, ждёт скриншоты). ⚠️ Текст писался под старую версию - сверить с v2.16 (появились get.ps1/install.ps1, стенд, ночные прогоны, очистка Driver Store)
 
-### v2.16 - scope утверждён 19.07.2026, реализация НЕ начата (ждёт команды пользователя)
+### v2.16 - ВЫПУЩЕНА 20.07.2026
 
-Эпик **`MyAI-y8j4`** + 6 дочерних (`.1`-`.6`). Все замеры в задачах фактические (HYPERPC), не оценочные. Полный список отклонённого с обоснованием - в описании эпика, **не переоткрывать** (winget-драйверы, вендорские SDK, автоустановка драйверов, sfc/ScanHealth, defrag-анализ, `Get-ComputerInfo`).
+Эпик **`MyAI-y8j4`**. Полный список отклонённого с обоснованием - в описании эпика, **не переоткрывать** (winget-драйверы, вендорские SDK, автоустановка драйверов, sfc/ScanHealth, defrag-анализ, `Get-ComputerInfo`).
 
-| Задача | Что | Замер |
-|--------|-----|-------|
-| `.1` P1 | Очистка Driver Store (лишние версии пакетов) | 451.8 МБ из 4.1 ГБ, 31 пакет |
-| `.5` P1 | Отчёт "куда ушло место" + чистка старых дампов ядра | ~9 ГБ в `LiveKernelReports` |
-| `.2` P2 | Показ обновлений драйверов из WU (только показ) | +4-30 сек к прогону |
-| `.3` P2 | Инвентарь драйверов + проблемные устройства | 0.4 сек |
-| `.4` P2 | Быстрая секция здоровья (SMART, целостность образа, WinRE, pending reboot) | ~1 сек |
-| `.6` P2 | Дельта между прогонами + сбор событий ДО очистки журналов + HTML-отчёт | - |
+| Задача | Что | Статус |
+|--------|-----|--------|
+| `.1` | Очистка Driver Store | ✅ сделано, замер 451.8 МБ / 31 пакет |
+| `.5` | Отчёт "куда ушло место" + чистка дампов ядра | ✅ сделано, дампы 8.78 ГБ |
+| `.7` | Гигиена документации | ✅ сделано |
+| `MyAI-kwvt` + `MyAI-g7rc` | 10 дефектов аудита | ✅ сделано (кроме п.1, см. ниже) |
+| `.2` | Показ обновлений драйверов из WU | отложено на следующий релиз |
+| `.3` | Инвентарь драйверов + проблемные устройства | отложено |
+| `.4` | Быстрая секция здоровья (SMART, целостность образа, WinRE) | отложено |
+| `.6` | Дельта между прогонами + сбор событий + HTML | отложено |
 
-🔴 **Блокирующие баги, чинить в этом же релизе**: `MyAI-kwvt` (неверный путь Delivery Optimization - 5 ГБ не попадают в статистику) и `MyAI-g7rc` (7 дефектов: скрытые обновления драйверов в счётчике, остаточные `StateFlags9999`, TEMP без фильтра по возрасту, кэш WU без гарантии остановки службы, непроверяемый Controlled Folder Access, мёртвые категории cleanmgr).
+🔴 **`MyAI-g7rc` п.1 НЕ исправлен намеренно - требует живой проверки на стенде.** Статический анализ и эксперимент противоречат друг другу: в `PSWindowsUpdate.dll` зашита строка `" and IsHidden = 0"` (по ней скрытые исключаются сами), но прогон 19.07 дал `-UpdateType Driver` -> 0 против `-Category "Drivers"` -> 1, и это был именно скрытый драйвер. **Не чинить вслепую**: сначала воспроизвести на VM 190/191.
 
 🔴 **Durable-факты разведки** (проверено, не теория): драйверов в winget НЕТ; exit code DISM и sfc НЕ отражает здоровье (оба вернули 0 при найденном повреждении); `pnputil` меняет язык вывода от кодовой страницы консоли - парсить только `/format xml`; WU способен предлагать драйвер СТАРШЕ установленного. Подробности: память `windows-driver-and-health-facts`.
 
@@ -270,7 +272,7 @@ Publish-PSResource -Path .\WinClean.ps1 -Repository PSGallery -ApiKey $env:PSGAL
 ## 9. Тестирование
 
 ```powershell
-Invoke-Pester ./tests -Output Detailed              # 141 Pester тест (65+52+24)
+Invoke-Pester ./tests -Output Detailed              # 181 Pester тест (65+91+25)
 pwsh tools/Invoke-SmokeTest.ps1                     # Смоук: ReportOnly + геометрия UI
 pwsh tools/proxmox/Invoke-StandTest.ps1 -Mode Report # Стенд на Proxmox (RU=VM 190, EN: -ConfigPath ...en.json = VM 191)
 # Ночная матрица: cron 03:30 на proxmos (/opt/winclean-stand, /etc/cron.d/winclean-stand), отчёт в Telegram
