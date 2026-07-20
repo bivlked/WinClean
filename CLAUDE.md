@@ -43,10 +43,10 @@ CleanScript/
 │   └── logo.svg              # Логотип проекта
 ├── get.ps1                   # Bootstrap: разовый запуск одной командой (irm | iex)
 ├── install.ps1               # Bootstrap: установка/обновление + ярлык (RunAs admin)
-├── tests/                    # Pester тесты (222 всего)
-│   ├── Helpers.Tests.ps1     # Unit-тесты helper-функций (66 тестов, дот-сорсят продукт - нужны права админа)
+├── tests/                    # Pester тесты (264 всего)
+│   ├── Helpers.Tests.ps1     # Unit-тесты helper-функций (84 теста, дот-сорсят продукт - нужны права админа)
 │   ├── Fixes.Tests.ps1       # Валидационные тесты исправлений (127 тестов)
-│   └── Integration.Tests.ps1 # Интеграционные тесты в песочнице ФС (29 тестов)
+│   └── Integration.Tests.ps1 # Интеграционные тесты в песочнице ФС (53 теста)
 ├── tools/                    # Тестовая инфраструктура (не публикуется в PSGallery)
 │   ├── Invoke-ReleaseCheck.ps1 # 🔴 Единая проверка перед релизом (fail-closed)
 │   ├── Invoke-SmokeTest.ps1  # Смоук: ReportOnly + JSON + геометрия рамок
@@ -72,25 +72,25 @@ CleanScript/
 
 ## 3. Архитектура скрипта
 
-WinClean.ps1 - монолитный скрипт (3185 строк) с модульной структурой на `#region`.
+WinClean.ps1 - монолитный скрипт (4241 строка на 20.07.2026, проверять `wc -l WinClean.ps1` - число растёт с каждым релизом) с модульной структурой на `#region`.
 
 ### Основные секции
 
-⚠️ Границы ниже соответствуют реальным `#region` (сверено 20.07.2026). При правках проверять командой, а не доверять таблице: `grep -n "^#region" WinClean.ps1`.
+⚠️ Границы ниже соответствуют реальным `#region` (сверено 20.07.2026, после группы A аудита MyAI-dtx8). При правках проверять командой, а не доверять таблице: `grep -n "^#region" WinClean.ps1`.
 
 | Строки | Секция (`#region`) | Что внутри |
 |--------|--------------------|------------|
-| 1-251 | PSScriptInfo + Help + param() | Метаданные PSGallery, comment-based help, блок параметров |
-| 253-307 | INITIALIZATION | Константы, `$script:Stats`, `$script:Version` (293), `$script:ProtectedPaths` |
-| 309-447 | LOGGING FUNCTIONS | `Write-Log`, `Update-Progress`, `Clear-AllProgress` |
-| 449-1173 | HELPER FUNCTIONS | `Test-*`, `Format-FileSize`, `Remove-FolderContent`, `New-SystemRestorePoint`, self-update |
-| 1175-1573 | UPDATE FUNCTIONS | `Update-WindowsSystem`, `Update-Applications` |
-| 1575-2352 | CLEANUP FUNCTIONS | temp, браузеры, кэш WU, корзина, системные кэши, журналы, DNS, privacy, телеметрия, Windows.old |
-| 2354-2492 | DEVELOPER CLEANUP | `Clear-DeveloperCaches` |
-| 2494-2653 | DOCKER/WSL CLEANUP | `Clear-DockerWSL`, компактирование VHDX |
-| 2655-2742 | VISUAL STUDIO CLEANUP | `Clear-VisualStudio` |
-| 2744-3222 | SYSTEM CLEANUP | `Clear-KernelDumps`, `Show-DiskSpaceReport`, `Clear-DriverStore`, `Invoke-DISMCleanup`, `Invoke-StorageSense` |
-| 3224-конец | MAIN EXECUTION | `Show-Banner`, `Show-FinalStatistics`, `Write-ResultJson`, `Start-WinClean` |
+| 1-265 | PSScriptInfo + Help + param() | Метаданные PSGallery, comment-based help, блок параметров |
+| 266-328 | INITIALIZATION | Константы, `$script:Stats`, `$script:Version`, `$script:ProtectedPaths` |
+| 329-485 | LOGGING FUNCTIONS | `Write-Log` (персистентный StreamWriter), `Update-Progress`, `Clear-AllProgress` |
+| 486-1436 | HELPER FUNCTIONS | `Test-*`, `Format-FileSize`, `Get-WindowsUpdateWithTimeout`, `Get-FolderSizeChecked`, `Remove-FolderContent`, `Remove-FilesByPattern`, `New-SystemRestorePoint`, self-update |
+| 1437-1868 | UPDATE FUNCTIONS | `Update-WindowsSystem`, `Update-Applications` |
+| 1869-2709 | CLEANUP FUNCTIONS | temp, браузеры, кэш WU, корзина, системные кэши, журналы, DNS, privacy, телеметрия, Windows.old |
+| 2710-2849 | DEVELOPER CLEANUP | `Clear-DeveloperCaches` |
+| 2850-3010 | DOCKER/WSL CLEANUP | `Clear-DockerWSL`, компактирование VHDX |
+| 3011-3093 | VISUAL STUDIO CLEANUP | `Clear-VisualStudio` |
+| 3094-3782 | SYSTEM CLEANUP | `Clear-KernelDumps`, `Show-DiskSpaceReport`, `Get-SupersededDriverCandidate`, `Get-RedundantDriverPackage`, `Clear-DriverStore`, `Invoke-DISMCleanup`, `Invoke-StorageSense` |
+| 3783-конец | MAIN EXECUTION | `Show-Banner`, `Show-FinalStatistics`, `Write-ResultJson`, `Start-WinClean` |
 
 ### Ключевые переменные
 
@@ -133,7 +133,7 @@ $script:ProtectedPaths = @(...)    # Защищённые пути (никогд
 ### Версионирование
 
 При выпуске новой версии обновить (номера строк сверены 20.07.2026 после выпуска v2.16; проверять `grep -n 'VERSION\|script:Version' WinClean.ps1`):
-1. `$script:Version` в WinClean.ps1 (строка 293)
+1. `$script:Version` в WinClean.ps1 (строка 313; проверять `grep -n '\$script:Version =' WinClean.ps1` - номер плывёт)
 2. `.VERSION` в PSScriptInfo (строка 2)
 3. `.RELEASENOTES` в PSScriptInfo (строки 14-21)
 4. `SYNOPSIS` (строка 28)
@@ -192,7 +192,7 @@ Publish-PSResource -Path .\WinClean.ps1 -Repository PSGallery -ApiKey $env:PSGAL
 **Проверки (3 job'а):**
 1. **lint** - PSScriptAnalyzer (Warning, Error)
 2. **syntax** - Проверка синтаксиса PowerShell
-3. **test** - Pester тесты (222, запускается после lint и syntax; интеграционные требуют admin - на GitHub runners это выполняется)
+3. **test** - Pester тесты (264, запускается после lint и syntax; интеграционные требуют admin - на GitHub runners это выполняется)
 
 **Исключения PSScriptAnalyzer** (допустимые для CLI):
 - PSAvoidUsingWriteHost - это интерактивная утилита
@@ -299,7 +299,7 @@ pwsh tools/Invoke-ReleaseCheck.ps1                  # версия во всех
 pwsh tools/Invoke-ReleaseCheck.ps1 -IncludeStand    # + боевой прогон на VM (минуты)
 pwsh tools/Invoke-ReleaseCheck.ps1 -VerifyPublished # ПОСЛЕ выпуска: ассеты релиза и SHA256
 
-Invoke-Pester ./tests -Output Detailed              # 222 Pester теста (66+127+29)
+Invoke-Pester ./tests -Output Detailed              # 264 Pester теста (84+127+53)
 pwsh tools/Invoke-SmokeTest.ps1                     # Смоук: ReportOnly + геометрия UI
 pwsh tools/proxmox/Invoke-StandTest.ps1 -Mode Report # Стенд на Proxmox (RU=VM 190, EN: -ConfigPath ...en.json = VM 191)
 # Ночная матрица: cron 03:30 на proxmos (/opt/winclean-stand, /etc/cron.d/winclean-stand), отчёт в Telegram

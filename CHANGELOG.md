@@ -115,6 +115,46 @@ Main script:
 - Removed dead code: an unused `-RemoveFolder` parameter, a "MEF Cache" section pointing
   at a folder Visual Studio never creates, a duplicate DNS flush, an empty Firefox entry
 
+### Fixed (third pass: MyAI-dtx8, "group A" of the remaining audit)
+
+- **`Test-InternetConnection` ran twice per update phase**, up to 15s each on an
+  offline machine. Memoized for the run
+- **`Write-Log` reopened, appended to and closed the log file on every single call**
+  (hundreds per run). A persistent `StreamWriter` is kept open instead, with the same
+  per-line durability
+- **`Show-DiskSpaceReport` could not tell "nothing above 100 MB" from "could not
+  check"** - both looked identical when a folder walk hit an access error
+- **`New-SystemRestorePoint` and the Windows Update search had no timeout** - VSS and a
+  stuck WU agent could hang the whole script forever, fatal for an unattended nightly
+  stand run. `Install-WindowsUpdate` itself is deliberately left unwrapped: killing that
+  job would not necessarily cancel the in-flight WU agent call
+- **`ConvertFrom-HumanReadableSize` failed on real-world localized input**: a
+  space-grouped thousands separator did not match at all, `"1.234,5 MB"` (EU
+  dot-thousands/comma-decimal) threw an unhandled exception instead of returning 0, the
+  word form of bytes and `MiB`/`GiB`-style binary units were not recognized
+- **`Remove-FilesByPattern` was the only delete path with no protected-path check and no
+  age filter** - safe today because its one caller passes a single fixed pattern, but a
+  latent risk for the next one. Now mirrors `Remove-FolderContent`'s guards
+- **`Show-FinalStatistics` ran inside `Start-WinClean`'s `finally` block with no
+  exception boundary** - a divide-by-zero from an unusual drive provider would have
+  replaced whatever error the run was already reporting
+- The script now **exits 1 when the run logged any errors** - it used to always exit 0
+- `Get-RedundantDriverPackage` **hashed every FileRepository folder (700-1500 on a
+  typical machine) before knowing whether there was anything to remove.** Candidate
+  selection now runs first from pnputil's own metadata alone, and the FileRepository
+  walk (needed to size each candidate) stops as soon as every candidate is matched
+  instead of always hashing the whole store. Deletion accuracy is unaffected -
+  `pnputil /delete-driver` has always worked from the package's own Oem id, never from
+  this size-reporting map
+- Ambiguous-width `↑`/`✗` in the final summary box replaced with ASCII, the same fix
+  `⚠` already got in v2.14
+- Nightly stand: the Telegram bot token no longer sits in `curl`'s argv (readable via
+  `ps aux` on a shared host) - a `curl -K` config file keeps it out of the process
+  arguments. The "no stand configs found" branch now sends a Telegram alert before
+  exiting instead of failing silently exactly when the channel is needed most. The
+  gateway container id and its SOCKS proxy addresses moved out of the (public) repo
+  into the gitignored stand config
+
 ### Changed
 
 - Self-update check is now gated by `-SkipUpdates`, and the disk space report by
@@ -126,7 +166,16 @@ Main script:
 
 ### Tests
 
-- 222 Pester tests (was 141 in 2.15)
+- 264 Pester tests (was 222 earlier in 2.17, 141 in 2.15). The 42 new tests close part
+  of a coverage gap the second audit pass found: 39 functions with no behavioral test at
+  all, including 8 that delete files. `Get-SupersededDriverCandidate` (the pure
+  candidate-selection logic split out of `Get-RedundantDriverPackage` for exactly this)
+  gets fixture-based unit tests; the 8 deleting functions get sandboxed integration
+  tests where that is safe, and fixture-shadowed tests (fake `pnputil.exe`/`docker`/
+  `wsl`/etc. functions swapped in after dot-sourcing) where the real call touches OS
+  state a test must not - the real Recycle Bin, the real Event Log service, the real
+  driver store, real System Restore. That remaining destructive surface needs the
+  Proxmox stand for real coverage, same as always
 - **The helper test suite now dot-sources WinClean.ps1 instead of testing pasted copies
   of its functions.** The copies were a tautology - a bug in the product could not fail
   them - and they had already drifted apart from it, which the change immediately

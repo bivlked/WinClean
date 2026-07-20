@@ -158,6 +158,44 @@ Describe "ConvertFrom-HumanReadableSize" -Tag "Unit", "Helper" {
         ConvertFrom-HumanReadableSize -SizeString "2,5 GB" | Should -Be 2684354560
     }
 
+    Context "Widened localization (v2.17, p.17 of the audit)" {
+
+        It "Handles a space-grouped thousands separator: '1 234 MB'" {
+            ConvertFrom-HumanReadableSize -SizeString "1 234 MB" | Should -Be 1293942784
+        }
+
+        It "Handles EU-style dot-thousands/comma-decimal: '1.234,5 MB'" {
+            ConvertFrom-HumanReadableSize -SizeString "1.234,5 MB" | Should -Be 1294467072
+        }
+
+        It "Handles US-style comma-thousands/dot-decimal: '1,234.5 MB'" {
+            ConvertFrom-HumanReadableSize -SizeString "1,234.5 MB" | Should -Be 1294467072
+        }
+
+        It "Does not throw on an ambiguous separator format that used to raise an exception" {
+            # Old implementation blindly replaced ',' with '.', turning "1.234,5" into the
+            # unparseable "1.234.5" and letting [double] throw instead of returning 0
+            { ConvertFrom-HumanReadableSize -SizeString "1.234,5 MB" } | Should -Not -Throw
+        }
+
+        It "Converts the word form of bytes: '<SizeString>'" -ForEach @(
+            @{ SizeString = "976 bytes"; Expected = 976 }
+            @{ SizeString = "1 byte";    Expected = 1 }
+            @{ SizeString = "976 байт";  Expected = 976 }
+            @{ SizeString = "976 байта"; Expected = 976 }
+        ) {
+            ConvertFrom-HumanReadableSize -SizeString $SizeString | Should -Be $Expected
+        }
+
+        It "Converts binary-unit spellings: '<SizeString>'" -ForEach @(
+            @{ SizeString = "1 MiB";   Expected = 1048576 }
+            @{ SizeString = "1.5 GiB"; Expected = 1610612736 }
+            @{ SizeString = "1KiB";    Expected = 1024 }
+        ) {
+            ConvertFrom-HumanReadableSize -SizeString $SizeString | Should -Be $Expected
+        }
+    }
+
     Context "Localized units (v2.14: Shell GetDetailsOf on Russian Windows)" {
 
         It "Converts Cyrillic units: '<SizeString>'" -ForEach @(
@@ -179,6 +217,92 @@ Describe "ConvertFrom-HumanReadableSize" -Tag "Unit", "Helper" {
             $nnbsp = [char]0x202F
             ConvertFrom-HumanReadableSize -SizeString "1,5${nnbsp}MB" | Should -Be 1572864
         }
+    }
+}
+
+#endregion
+
+#region Get-SupersededDriverCandidate Tests
+
+Describe "Get-SupersededDriverCandidate" -Tag "Unit", "Helper" {
+    <#
+    v2.17 (p.6/p.23 of the audit): fixture-based tests for the pure candidate-selection
+    logic extracted from Get-RedundantDriverPackage. No pnputil.exe, no FileRepository -
+    just hand-built package objects shaped like the parsed pnputil XML.
+    #>
+
+    BeforeAll {
+        # Pester 5: a bare `function` statement in a Describe body only runs during
+        # Discovery, not Run - It blocks would not see it. Must live in BeforeAll.
+        function New-DriverPackage {
+            param($Oem, $Inf, $Provider = 'Acme', $Class = 'Net', $Version, $Date = '2024-01-01', $InUse = $false)
+            [pscustomobject]@{
+                Oem = $Oem; Inf = $Inf; Provider = $Provider; Class = $Class
+                Version = [version]$Version; Date = [datetime]$Date; InUse = [bool]$InUse
+            }
+        }
+    }
+
+    It "Flags the older package as a candidate when a newer sibling exists" {
+        $pkgs = @(
+            New-DriverPackage -Oem 'oem10.inf' -Inf 'sample.inf' -Version '1.0.0.0'
+            New-DriverPackage -Oem 'oem11.inf' -Inf 'sample.inf' -Version '2.0.0.0'
+        )
+        $result = @(Get-SupersededDriverCandidate -Packages $pkgs)
+        $result.Count | Should -Be 1
+        $result[0].Oem | Should -Be 'oem10.inf'
+        $result[0].KeptVersion | Should -Be ([version]'2.0.0.0')
+        $result[0].Bytes | Should -Be 0
+    }
+
+    It "Never flags a package that has no newer sibling, even if unused" {
+        $pkgs = @(New-DriverPackage -Oem 'oem10.inf' -Inf 'lonely.inf' -Version '1.0.0.0' -InUse $false)
+        @(Get-SupersededDriverCandidate -Packages $pkgs).Count | Should -Be 0
+    }
+
+    It "Never flags a package currently in use, even when superseded" {
+        # This is the guard that separates this from an aggressive driver cleaner: a
+        # device that is merely unplugged right now must not lose its driver package
+        $pkgs = @(
+            New-DriverPackage -Oem 'oem10.inf' -Inf 'sample.inf' -Version '1.0.0.0' -InUse $true
+            New-DriverPackage -Oem 'oem11.inf' -Inf 'sample.inf' -Version '2.0.0.0'
+        )
+        @(Get-SupersededDriverCandidate -Packages $pkgs).Count | Should -Be 0
+    }
+
+    It "Does not cross-supersede identical INF names shipped by different vendors" {
+        # usbaudio.inf/hidusb.inf-style generic names: grouping by Inf name alone would
+        # let one vendor's newer package declare a different vendor's package superseded
+        $pkgs = @(
+            New-DriverPackage -Oem 'oem20.inf' -Inf 'usbaudio.inf' -Provider 'VendorA' -Version '1.0.0.0'
+            New-DriverPackage -Oem 'oem21.inf' -Inf 'usbaudio.inf' -Provider 'VendorB' -Version '5.0.0.0'
+        )
+        @(Get-SupersededDriverCandidate -Packages $pkgs).Count | Should -Be 0
+    }
+
+    It "Breaks a tie on identical versions using the date" {
+        $pkgs = @(
+            New-DriverPackage -Oem 'oem30.inf' -Inf 'x.inf' -Version '1.0.0.0' -Date '2020-01-01'
+            New-DriverPackage -Oem 'oem31.inf' -Inf 'x.inf' -Version '1.0.0.0' -Date '2025-01-01'
+        )
+        $result = @(Get-SupersededDriverCandidate -Packages $pkgs)
+        $result.Count | Should -Be 1
+        $result[0].Oem | Should -Be 'oem30.inf'
+    }
+
+    It "Flags every older version, not just one, when there are several" {
+        $pkgs = @(
+            New-DriverPackage -Oem 'oem40.inf' -Inf 'x.inf' -Version '1.0.0.0'
+            New-DriverPackage -Oem 'oem41.inf' -Inf 'x.inf' -Version '2.0.0.0'
+            New-DriverPackage -Oem 'oem42.inf' -Inf 'x.inf' -Version '3.0.0.0'
+        )
+        $result = @(Get-SupersededDriverCandidate -Packages $pkgs)
+        $result.Count | Should -Be 2
+        ($result.Oem | Sort-Object) | Should -Be @('oem40.inf', 'oem41.inf')
+    }
+
+    It "Returns nothing for an empty package list" {
+        @(Get-SupersededDriverCandidate -Packages @()).Count | Should -Be 0
     }
 }
 

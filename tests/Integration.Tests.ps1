@@ -357,6 +357,335 @@ Describe "Sandbox: temp age filter is recursive" -Tag "Integration" -Skip:(-not 
     }
 }
 
+# v2.17: the audit (MyAI-dtx8, item 22) found 39 functions with zero behavioral tests,
+# including 8 that delete files. Everything below closes that gap for the functions
+# that can be exercised safely. Four of the eight (Clear-EventLogs, Clear-
+# WinCleanRecycleBin's real delete path, Clear-DriverStore's real pnputil call, New-
+# SystemRestorePoint's real Checkpoint-Computer call) touch OS state that cannot be
+# redirected into the sandbox - the real Event Log service, the real Recycle Bin, the
+# real driver store, real System Restore. Those are shadowed with fixtures instead of
+# left untested: the decision/reporting logic gets real coverage, the destructive
+# external call itself does not run. Full end-to-end coverage of that remaining
+# surface needs the Proxmox stand (VM 190/191), consistent with project policy that
+# destructive runs never happen on the workstation - not left as a silent gap.
+
+Describe "Sandbox: Remove-FilesByPattern" -Tag "Integration" -Skip:(-not $IsElevated) {
+
+    BeforeAll {
+        $root = New-Sandbox
+        $patternDir = Join-Path $root 'Users\test\AppData\Roaming\PatternTest'
+        New-Item -ItemType Directory -Path $patternDir -Force | Out-Null
+        [System.IO.File]::WriteAllText((Join-Path $patternDir 'a.roslynobjectin'), 'x' * 4096)
+        [System.IO.File]::WriteAllText((Join-Path $patternDir 'keep.txt'), 'must survive')
+
+        $result = Invoke-Sandbox -Root $root -Body @"
+Remove-FilesByPattern -Pattern '$patternDir\*.roslynobjectin' -Category 'VS' -Description 'Roslyn Temp'
+"@
+    }
+
+    It "Removes the matching file" {
+        Test-Path (Join-Path $patternDir 'a.roslynobjectin') | Should -BeFalse
+    }
+
+    It "Keeps files that do not match the pattern" {
+        Test-Path (Join-Path $patternDir 'keep.txt') | Should -BeTrue
+    }
+
+    It "Counts freed space in the category" {
+        [long]$result.Stats.FreedByCategory.VS | Should -BeGreaterThan 0
+    }
+}
+
+Describe "Sandbox: Remove-FilesByPattern safety guards (v2.17, p.18)" -Tag "Integration", "Security" -Skip:(-not $IsElevated) {
+
+    BeforeAll {
+        $root = New-Sandbox
+        # Sits directly in a protected root: the pattern would match it, but its
+        # containing folder is one of $script:ProtectedPaths
+        [System.IO.File]::WriteAllText((Join-Path $root 'Windows\marker.tmp'), 'must survive')
+
+        $ageDir = Join-Path $root 'Users\test\AppData\Roaming\AgeTest'
+        New-Item -ItemType Directory -Path $ageDir -Force | Out-Null
+        [System.IO.File]::WriteAllText((Join-Path $ageDir 'old.tmp'), 'x')
+        [System.IO.File]::WriteAllText((Join-Path $ageDir 'fresh.tmp'), 'x')
+        (Get-Item (Join-Path $ageDir 'old.tmp')).LastWriteTime = (Get-Date).AddDays(-5)
+
+        $result = Invoke-Sandbox -Root $root -Body @"
+Remove-FilesByPattern -Pattern '$root\Windows\*.tmp' -Category 'Test' -Description 'protected test'
+Remove-FilesByPattern -Pattern '$ageDir\*.tmp' -Category 'Test' -Description 'age test' -MinAgeDays 1
+"@
+    }
+
+    It "Refuses to delete a file whose folder is a protected root" {
+        Test-Path (Join-Path $root 'Windows\marker.tmp') | Should -BeTrue
+    }
+
+    It "Removes only the file older than MinAgeDays" {
+        Test-Path (Join-Path $ageDir 'old.tmp') | Should -BeFalse
+        Test-Path (Join-Path $ageDir 'fresh.tmp') | Should -BeTrue
+    }
+}
+
+Describe "Sandbox: Clear-WindowsOld" -Tag "Integration" -Skip:(-not $IsElevated) {
+
+    BeforeAll {
+        $root = New-Sandbox
+        $windowsOld = Join-Path $root 'Windows.old'
+        New-Item -ItemType Directory -Path $windowsOld -Force | Out-Null
+        [System.IO.File]::WriteAllText((Join-Path $windowsOld 'old.dat'), 'x' * 4096)
+    }
+
+    It "Does nothing when Windows.old is absent" {
+        # Clear-WindowsOld returns before its first Write-Log call in this case, so the
+        # log file itself is never created - asserting on its content would pass either
+        # way (missing file also fails to match) and prove nothing
+        $emptyRoot = New-Sandbox
+        $result = Invoke-Sandbox -Root $emptyRoot -Body 'Clear-WindowsOld'
+        $result.ExitCode | Should -Be 0
+        [long]$result.Stats.TotalFreedBytes | Should -Be 0
+    }
+
+    It "ReportOnly reports the size without deleting" {
+        $result = Invoke-Sandbox -Root $root -Body @'
+$ReportOnly = $true
+Clear-WindowsOld
+'@
+        Get-Content $result.Stats.LogPath -Raw | Should -Match 'Would clean: Windows\.old'
+        Test-Path $windowsOld | Should -BeTrue
+    }
+
+    It "Skips deletion in non-interactive mode without prompting (safe default)" {
+        $result = Invoke-Sandbox -Root $root -Body 'Clear-WindowsOld'
+        Get-Content $result.Stats.LogPath -Raw | Should -Match 'Non-interactive mode - skipping Windows\.old deletion'
+        Test-Path $windowsOld | Should -BeTrue
+    }
+}
+
+Describe "Sandbox: Clear-SystemCaches" -Tag "Integration" -Skip:(-not $IsElevated) {
+
+    BeforeAll {
+        $root = New-Sandbox
+        $prefetch = Join-Path $root 'Windows\Prefetch'
+        New-Item -ItemType Directory -Path $prefetch -Force | Out-Null
+        [System.IO.File]::WriteAllText((Join-Path $prefetch 'app.pf'), 'x' * 4096)
+
+        $iconCache = Join-Path $root 'Users\test\AppData\Local\IconCache.db'
+        [System.IO.File]::WriteAllText($iconCache, 'x' * 2048)
+
+        # Delivery Optimization is shadowed with a no-op: Delete-DeliveryOptimizationCache
+        # is a real built-in cmdlet (auto-loaded, not something a sandbox can redirect)
+        # that operates on real, non-redirectable OS state.
+        $result = Invoke-Sandbox -Root $root -Body @'
+function Delete-DeliveryOptimizationCache { [CmdletBinding()] param([switch]$Force) }
+Clear-SystemCaches
+'@
+    }
+
+    It "Runs without errors" {
+        $result.ExitCode | Should -Be 0
+        $result.Stats.ErrorsCount | Should -Be 0
+    }
+
+    It "Empties the Prefetch folder (Remove-FolderContent branch)" {
+        (Get-ChildItem $prefetch -Force -ErrorAction SilentlyContinue).Count | Should -Be 0
+    }
+
+    It "Removes the single-file IconCache.db (file branch)" {
+        Test-Path $iconCache | Should -BeFalse
+    }
+
+    It "Counts freed space in the System category" {
+        [long]$result.Stats.FreedByCategory.System | Should -BeGreaterThan 0
+    }
+}
+
+Describe "Sandbox: Clear-DriverStore" -Tag "Integration" -Skip:(-not $IsElevated) {
+    <#
+    Get-RedundantDriverPackage and pnputil.exe are shadowed with fixtures: the real
+    driver store and pnputil operate on actual installed drivers on whatever machine
+    runs the tests, which a test may not touch.
+    #>
+
+    BeforeAll {
+        $root = New-Sandbox
+    }
+
+    It "ReportOnly reports candidates without calling pnputil" {
+        $result = Invoke-Sandbox -Root $root -Body @'
+$ReportOnly = $true
+function Get-RedundantDriverPackage {
+    @([pscustomobject]@{ Oem = 'oem10.inf'; Inf = 'sample.inf'; Bytes = 1048576; KeptVersion = [version]'2.0.0.0' })
+}
+function pnputil.exe { throw "pnputil must not run in ReportOnly mode" }
+Clear-DriverStore
+'@
+        $result.ExitCode | Should -Be 0
+        Get-Content $result.Stats.LogPath -Raw | Should -Match 'Would clean: 1 superseded driver package'
+    }
+
+    It "Aggregates freed bytes and removed count on success" {
+        $result = Invoke-Sandbox -Root $root -Body @'
+function Get-RedundantDriverPackage {
+    @(
+        [pscustomobject]@{ Oem = 'oem10.inf'; Inf = 'a.inf'; Bytes = 1048576 }
+        [pscustomobject]@{ Oem = 'oem11.inf'; Inf = 'b.inf'; Bytes = 2097152 }
+    )
+}
+function pnputil.exe { $global:LASTEXITCODE = 0 }
+Clear-DriverStore
+'@
+        [long]$result.Stats.FreedByCategory.DriverStore | Should -Be 3145728
+        Get-Content $result.Stats.LogPath -Raw | Should -Match 'Removed 2 superseded driver package'
+    }
+
+    It "Counts a refused package as failed, not removed, and warns" {
+        $result = Invoke-Sandbox -Root $root -Body @'
+function Get-RedundantDriverPackage {
+    @(
+        [pscustomobject]@{ Oem = 'oem10.inf'; Inf = 'a.inf'; Bytes = 1048576 }
+        [pscustomobject]@{ Oem = 'oem_fail.inf'; Inf = 'b.inf'; Bytes = 2097152 }
+    )
+}
+function pnputil.exe {
+    if ($args -contains 'oem_fail.inf') { $global:LASTEXITCODE = 1 } else { $global:LASTEXITCODE = 0 }
+}
+Clear-DriverStore
+'@
+        [long]$result.Stats.FreedByCategory.DriverStore | Should -Be 1048576
+        $result.Stats.WarningsCount | Should -BeGreaterThan 0
+        Get-Content $result.Stats.LogPath -Raw | Should -Match '1 of 2 package\(s\) refused removal'
+    }
+
+    It "Reports nothing to clean when there are no candidates" {
+        $result = Invoke-Sandbox -Root $root -Body @'
+function Get-RedundantDriverPackage { @() }
+Clear-DriverStore
+'@
+        Get-Content $result.Stats.LogPath -Raw | Should -Match 'No superseded driver packages found'
+    }
+}
+
+Describe "Sandbox: Clear-DockerWSL ReportOnly" -Tag "Integration" -Skip:(-not $IsElevated) {
+    <#
+    docker/wsl are shadowed with fixtures: a real docker system prune or wsl/diskpart
+    compaction mutates real container/VHDX state a test may not touch. Only the
+    ReportOnly (measure-only) branch is exercised for real.
+    #>
+
+    BeforeAll {
+        $root = New-Sandbox
+        $wslDir = Join-Path $root 'Users\test\AppData\Local\Packages\CanonicalGroupLimitedUbuntu_abc\LocalState'
+        New-Item -ItemType Directory -Path $wslDir -Force | Out-Null
+        [System.IO.File]::WriteAllText((Join-Path $wslDir 'ext4.vhdx'), 'x' * 8192)
+
+        $result = Invoke-Sandbox -Root $root -Body @'
+$ReportOnly = $true
+function docker { $global:LASTEXITCODE = 0 }
+function wsl { $global:LASTEXITCODE = 0 }
+Clear-DockerWSL
+'@
+    }
+
+    It "Runs without errors" {
+        $result.ExitCode | Should -Be 0
+    }
+
+    It "Reports the Docker prune it would run" {
+        Get-Content $result.Stats.LogPath -Raw | Should -Match 'Would run: docker system prune'
+    }
+
+    It "Reports the WSL/Docker disk it would compact, without touching the file" {
+        Get-Content $result.Stats.LogPath -Raw | Should -Match 'Would optimize 1 WSL2/Docker disk'
+        Test-Path (Join-Path $wslDir 'ext4.vhdx') | Should -BeTrue
+    }
+}
+
+Describe "Sandbox: Clear-EventLogs ReportOnly" -Tag "Integration" -Skip:(-not $IsElevated) {
+    <#
+    Only the ReportOnly branch is exercised. The real path calls wevtutil against the
+    actual Windows Event Log service on whatever machine runs the tests.
+    #>
+
+    BeforeAll {
+        $root = New-Sandbox
+        $result = Invoke-Sandbox -Root $root -Body @'
+$ReportOnly = $true
+Clear-EventLogs
+'@
+    }
+
+    It "Reports without touching real event logs" {
+        $result.ExitCode | Should -Be 0
+        Get-Content $result.Stats.LogPath -Raw | Should -Match 'Would clean: Windows Event Logs'
+    }
+}
+
+Describe "Sandbox: Clear-WinCleanRecycleBin safe branches" -Tag "Integration" -Skip:(-not $IsElevated) {
+    <#
+    Get-RecycleBinItemCount/Get-RecycleBinSize are shadowed with fixtures. The real
+    deletion path (Clear-RecycleBin / Shell.Application) operates on the actual
+    Recycle Bin of whatever machine runs the tests.
+    #>
+
+    BeforeAll {
+        $root = New-Sandbox
+    }
+
+    It "Does nothing when the bin is already empty" {
+        $result = Invoke-Sandbox -Root $root -Body @'
+function Get-RecycleBinItemCount { 0 }
+function Get-RecycleBinSize { 0 }
+Clear-WinCleanRecycleBin
+'@
+        Get-Content $result.Stats.LogPath -Raw | Should -Match 'Recycle Bin is already empty'
+        [long]$result.Stats.TotalFreedBytes | Should -Be 0
+    }
+
+    It "ReportOnly reports the size without emptying" {
+        $result = Invoke-Sandbox -Root $root -Body @'
+$ReportOnly = $true
+function Get-RecycleBinItemCount { 3 }
+function Get-RecycleBinSize { 5242880 }
+Clear-WinCleanRecycleBin
+'@
+        Get-Content $result.Stats.LogPath -Raw | Should -Match 'Would clean: Recycle Bin'
+        [long]$result.Stats.TotalFreedBytes | Should -Be 0
+    }
+}
+
+Describe "Sandbox: New-SystemRestorePoint safe branches" -Tag "Integration" -Skip:(-not $IsElevated) {
+    <#
+    Only the -SkipRestore and -ReportOnly early-return paths are exercised. Real
+    restore-point creation spawns Windows PowerShell running Checkpoint-Computer and
+    mutates real System Restore state - project policy is that destructive runs only
+    happen on the Proxmox stand (VM 190/191), never on the workstation.
+    #>
+
+    BeforeAll {
+        $root = New-Sandbox
+    }
+
+    It "Returns true and does nothing when SkipRestore is set" {
+        $result = Invoke-Sandbox -Root $root -Body @'
+$SkipRestore = $true
+$created = New-SystemRestorePoint
+Write-Log "RESULT=$created" -Level INFO
+'@
+        Get-Content $result.Stats.LogPath -Raw | Should -Match 'RESULT=True'
+        Get-Content $result.Stats.LogPath -Raw | Should -Match 'Restore point creation skipped'
+    }
+
+    It "Returns true and does nothing in ReportOnly mode" {
+        $result = Invoke-Sandbox -Root $root -Body @'
+$ReportOnly = $true
+$created = New-SystemRestorePoint
+Write-Log "RESULT=$created" -Level INFO
+'@
+        Get-Content $result.Stats.LogPath -Raw | Should -Match 'RESULT=True'
+        Get-Content $result.Stats.LogPath -Raw | Should -Match 'Would create restore point'
+    }
+}
+
 Describe "Integration suite coverage" -Tag "Integration" {
     It "The integration suite actually ran" {
         # v2.17: every other Describe here is -Skip'd without administrator rights, so

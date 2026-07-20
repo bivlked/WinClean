@@ -3216,11 +3216,15 @@ function Show-DiskSpaceReport {
     }
 }
 
-function Get-RedundantDriverPackage {
+function Get-SupersededDriverCandidate {
     <#
     .SYNOPSIS
-        Finds superseded third-party driver packages in the driver store (v2.16)
+        Decides which parsed driver packages are superseded - pure logic, no I/O
     .DESCRIPTION
+        Split out of Get-RedundantDriverPackage (v2.17, p.6/p.23 of the audit) so the
+        decision logic can be unit-tested against hand-built package arrays instead of
+        needing a real pnputil.exe and a real FileRepository to exercise it.
+
         A package is a candidate only when BOTH conditions hold:
           1. pnputil reports no device bound to it, and
           2. a newer package with the same OriginalName exists.
@@ -3228,6 +3232,39 @@ function Get-RedundantDriverPackage {
         devices that are merely unplugged right now (docks, printers, external storage).
         That distinction is what separates this from the aggressive "driver cleaners"
         that break machines.
+
+        Grouped by INF *and* vendor/class. Generic names (usbaudio.inf, hidusb.inf) are
+        shipped by several vendors, and grouping on the name alone could declare one
+        vendor's package "superseded" by another's - then delete a working driver whose
+        device merely happens to be unplugged right now.
+    .PARAMETER Packages
+        Parsed pnputil packages: objects with Oem, Inf, Provider, Class, Version, Date,
+        InUse (the shape Get-RedundantDriverPackage builds from pnputil's XML).
+    .OUTPUTS
+        Candidate objects (a subset of the input, decorated with Bytes=0 and
+        KeptVersion). Bytes is filled in later by the caller once a FileRepository
+        folder is matched - this function never touches the filesystem.
+    #>
+    param([object[]]$Packages)
+
+    $Packages | Group-Object { "$($_.Inf)|$($_.Provider)|$($_.Class)" } | ForEach-Object {
+        $newest = $_.Group | Sort-Object Version, Date -Descending | Select-Object -First 1
+        foreach ($pkg in $_.Group) {
+            if ($pkg.Oem -eq $newest.Oem -or $pkg.InUse) { continue }
+            $pkg | Add-Member -NotePropertyName Bytes -NotePropertyValue ([long]0) -PassThru |
+                   Add-Member -NotePropertyName KeptVersion -NotePropertyValue $newest.Version -PassThru
+        }
+    }
+}
+
+function Get-RedundantDriverPackage {
+    <#
+    .SYNOPSIS
+        Finds superseded third-party driver packages in the driver store (v2.16)
+    .DESCRIPTION
+        Candidate selection itself lives in Get-SupersededDriverCandidate; this function
+        handles the I/O around it - running pnputil, parsing its XML, and matching each
+        candidate to a FileRepository folder for size reporting.
 
         Output is machine-readable XML on purpose: the plain text output of pnputil
         switches between English and the system language depending on the console code
@@ -3305,24 +3342,12 @@ function Get-RedundantDriverPackage {
         return @()
     }
 
-    # v2.17: grouped by INF *and* vendor/class. Generic names (usbaudio.inf, hidusb.inf)
-    # are shipped by several vendors, and grouping on the name alone could declare one
-    # vendor's package "superseded" by another's - then delete a working driver whose
-    # device merely happens to be unplugged right now.
-    #
     # p.6 of the audit: figure out WHICH packages are superseded first, from pnputil's
-    # own metadata alone - no filesystem access needed for that. Only once there is at
-    # least one candidate do we pay for hashing FileRepository folders (700-1500 on a
-    # typical machine), and that walk stops as soon as every candidate is matched
-    # instead of always hashing every folder in the store.
-    $candidates = $packages | Group-Object { "$($_.Inf)|$($_.Provider)|$($_.Class)" } | ForEach-Object {
-        $newest = $_.Group | Sort-Object Version, Date -Descending | Select-Object -First 1
-        foreach ($pkg in $_.Group) {
-            if ($pkg.Oem -eq $newest.Oem -or $pkg.InUse) { continue }
-            $pkg | Add-Member -NotePropertyName Bytes -NotePropertyValue ([long]0) -PassThru |
-                   Add-Member -NotePropertyName KeptVersion -NotePropertyValue $newest.Version -PassThru
-        }
-    }
+    # own metadata alone (Get-SupersededDriverCandidate - no filesystem access needed
+    # for that). Only once there is at least one candidate do we pay for hashing
+    # FileRepository folders (700-1500 on a typical machine), and that walk stops as
+    # soon as every candidate is matched instead of always hashing every folder.
+    $candidates = @(Get-SupersededDriverCandidate -Packages $packages)
 
     if (-not $candidates) {
         return @()
