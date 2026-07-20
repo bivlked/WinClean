@@ -43,9 +43,15 @@ function Stop-Bootstrap {
 function Assert-GitHubUri {
     <# The URLs come from an API response; make sure they still point at GitHub #>
     param([string]$Uri)
+    # Exact-host allowlist (v2.18). A release browser_download_url is always github.com.
+    # The old suffix match also accepted ANY *.github.com / *.githubusercontent.com
+    # subdomain, which this function never legitimately needs. Redirects to the asset CDN
+    # are followed by Invoke-WebRequest internally and are NOT re-validated here, so the
+    # CDN hosts are deliberately left out - adding them would only widen accepted API
+    # values without securing the redirect step.
+    $allowedHosts = @('github.com')
     $parsed = [uri]$Uri
-    if ($parsed.Scheme -ne 'https' -or
-        $parsed.Host -notmatch '(^|\.)(github\.com|githubusercontent\.com)$') {
+    if ($parsed.Scheme -ne 'https' -or $parsed.Host -notin $allowedHosts) {
         throw "Refusing to download from an unexpected host: $($parsed.Host)"
     }
     return $Uri

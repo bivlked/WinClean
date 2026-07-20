@@ -280,14 +280,30 @@ Describe "Get-SupersededDriverCandidate" -Tag "Unit", "Helper" {
         @(Get-SupersededDriverCandidate -Packages $pkgs).Count | Should -Be 0
     }
 
-    It "Breaks a tie on identical versions using the date" {
+    It "Does not flag same-version packages even when their dates differ" {
+        # v2.18: 'superseded' requires a STRICTLY newer version. Two packages tied at the
+        # same version are both kept - a newer date alone is not obsolescence, and deleting
+        # one would be wider than the documented safety contract. (Replaces the old
+        # date-tie-breaker test, which asserted exactly the behavior now removed.)
         $pkgs = @(
             New-DriverPackage -Oem 'oem30.inf' -Inf 'x.inf' -Version '1.0.0.0' -Date '2020-01-01'
             New-DriverPackage -Oem 'oem31.inf' -Inf 'x.inf' -Version '1.0.0.0' -Date '2025-01-01'
         )
+        @(Get-SupersededDriverCandidate -Packages $pkgs).Count | Should -Be 0
+    }
+
+    It "Flags a strictly older version but keeps a same-version sibling" {
+        # Mixed group: v1 is strictly older (flagged), the two v2 packages are tied at the
+        # max version (both kept). If the guard regressed to comparing Oem instead of
+        # Version, the older-dated v2 package would be wrongly flagged and Count would be 2.
+        $pkgs = @(
+            New-DriverPackage -Oem 'oem50.inf' -Inf 'x.inf' -Version '1.0.0.0'
+            New-DriverPackage -Oem 'oem51.inf' -Inf 'x.inf' -Version '2.0.0.0' -Date '2020-01-01'
+            New-DriverPackage -Oem 'oem52.inf' -Inf 'x.inf' -Version '2.0.0.0' -Date '2025-01-01'
+        )
         $result = @(Get-SupersededDriverCandidate -Packages $pkgs)
         $result.Count | Should -Be 1
-        $result[0].Oem | Should -Be 'oem30.inf'
+        $result[0].Oem | Should -Be 'oem50.inf'
     }
 
     It "Flags every older version, not just one, when there are several" {
@@ -490,6 +506,67 @@ Describe "Get-FolderSize" -Tag "Unit", "Helper" {
 
         # The fix adds -File flag to Get-ChildItem in Get-FolderSize
         $content | Should -Match 'Get-ChildItem.*-File'
+    }
+}
+
+Describe "Test-DiskpartCompactionFailed" -Tag "Unit", "Helper" {
+    # v2.18 (#1 of the external review): the diskpart failure decision, unit-tested
+    # without a real VHDX. A non-zero exit OR an English error marker means failure.
+
+    It "Treats a non-zero exit code as failure regardless of output" {
+        Test-DiskpartCompactionFailed -Output 'DiskPart successfully compacted the virtual disk file.' -ExitCode 1 | Should -BeTrue
+    }
+
+    It "Treats exit 0 with clean output as success" {
+        Test-DiskpartCompactionFailed -Output "DiskPart successfully compacted the virtual disk file.`n" -ExitCode 0 | Should -BeFalse
+    }
+
+    It "Treats exit 0 with empty output as success" {
+        Test-DiskpartCompactionFailed -Output '' -ExitCode 0 | Should -BeFalse
+    }
+
+    It "Catches an error marker even when the exit code is 0" -ForEach @(
+        @{ Text = 'DiskPart has encountered an error: The parameter is incorrect.' }
+        @{ Text = 'Virtual Disk Service error: The volume is not offline.' }
+        @{ Text = 'There is no virtual disk selected.' }
+        @{ Text = 'Access is denied.' }
+    ) {
+        Test-DiskpartCompactionFailed -Output $Text -ExitCode 0 | Should -BeTrue
+    }
+}
+
+Describe "Get-FolderSizeChecked" -Tag "Unit", "Helper" {
+    # v2.18 (+A of the external review): distinguishes "empty" (0) from "could not
+    # measure" ($null). A genuinely absent path must be 0, not $null.
+
+    BeforeAll {
+        $fscRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("wc-fsc-" + [guid]::NewGuid().ToString('N'))
+        New-Item -ItemType Directory -Path $fscRoot -Force | Out-Null
+    }
+    AfterAll {
+        Remove-Item $fscRoot -Recurse -Force -ErrorAction SilentlyContinue
+    }
+
+    It "Returns 0 (not null) for a genuinely absent path" {
+        # A NotFound must read as 'empty', never as 'unmeasurable' - Should -Be 0 also
+        # fails on $null, so it pins both the value and the not-null contract.
+        Get-FolderSizeChecked -Path (Join-Path $fscRoot 'no-such-dir') | Should -Be 0
+    }
+
+    It "Returns 0 for an empty folder" {
+        $empty = Join-Path $fscRoot 'empty'
+        New-Item -ItemType Directory -Path $empty -Force | Out-Null
+        Get-FolderSizeChecked -Path $empty | Should -Be 0
+    }
+
+    It "Sums file sizes across subfolders" {
+        $tree = Join-Path $fscRoot 'tree'
+        $sub = Join-Path $tree 'sub'
+        New-Item -ItemType Directory -Path $sub -Force | Out-Null
+        [System.IO.File]::WriteAllText((Join-Path $tree 'a.txt'), 'hello')
+        [System.IO.File]::WriteAllText((Join-Path $sub 'b.txt'), 'world!!')
+        $expected = (Get-Item (Join-Path $tree 'a.txt')).Length + (Get-Item (Join-Path $sub 'b.txt')).Length
+        Get-FolderSizeChecked -Path $tree | Should -Be $expected
     }
 }
 

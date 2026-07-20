@@ -652,8 +652,11 @@ Describe "v2.16: driver store cleanup" -Tag "Feature", "V216" {
         $scriptContent | Should -Match "'/enum-drivers', '/devices', '/format', 'xml'"
     }
 
-    It "Only removes packages with no bound device AND a newer sibling" {
-        $scriptContent | Should -Match '\$pkg\.Oem -eq \$newest\.Oem -or \$pkg\.InUse'
+    It "Only removes packages with no bound device AND a strictly newer sibling (v2.18)" {
+        # Behavioral coverage lives in the Get-SupersededDriverCandidate tests; this pins
+        # the guard text so a regression to an Oem/date comparison (which deleted a same-
+        # version package with an older date) is also caught here.
+        $scriptContent | Should -Match '\$pkg\.InUse -or \$pkg\.Version -ge \$newest\.Version'
     }
 
     It "Never uses /force" {
@@ -735,7 +738,9 @@ Describe "v2.16: silent failures are reported" -Tag "Fix", "V216", "SilentFailur
     }
 
     It "Driver store falls back to measuring the repository when sizes are unknown" {
-        $scriptContent | Should -Match 'per-package size unavailable'
+        # v2.18: repo delta is authoritative whenever ANY removed package lacks a trusted
+        # size, not only when the total is zero (the old wording was "unavailable").
+        $scriptContent | Should -Match 'per-package size incomplete'
     }
 
     It "Delivery Optimization no longer claims success without measuring" {
@@ -863,6 +868,56 @@ Describe "v2.17: bootstrap verification is mandatory" -Tag "Fix", "V217" {
         # elevated shortcut at its own binary
         $installScript | Should -Match "\[Environment\]::GetFolderPath\(\[Environment\+SpecialFolder\]::ProgramFiles\)"
         $installScript | Should -Not -Match "Join-Path \`$env:ProgramFiles"
+    }
+}
+
+Describe "v2.18: bootstrap host allowlist is exact, not a broad suffix" -Tag "Fix", "V218" -ForEach @(
+    @{ Name = 'get.ps1' }, @{ Name = 'install.ps1' }
+) {
+    <#
+    #7 of the external review. The old suffix match accepted any *.github.com /
+    *.githubusercontent.com subdomain; a release browser_download_url is always github.com.
+    Exercise the real function (extracted so the bootstrap body does not run) to prove the
+    allowlist is now exact.
+    #>
+    BeforeAll {
+        $src = Get-Content (Join-Path $PSScriptRoot '..' $Name) -Raw
+        if ($src -notmatch '(?ms)^(function Assert-GitHubUri \{.*?\n\})') {
+            throw "Assert-GitHubUri not found in $Name"
+        }
+        Invoke-Expression $Matches[1]
+    }
+
+    It "Accepts a real release asset URL on github.com" {
+        Assert-GitHubUri 'https://github.com/bivlked/WinClean/releases/download/v2.18/WinClean.ps1' |
+            Should -Be 'https://github.com/bivlked/WinClean/releases/download/v2.18/WinClean.ps1'
+    }
+
+    It "Rejects <Url>" -ForEach @(
+        @{ Url = 'https://evil.com/x' }                       # unrelated host
+        @{ Url = 'https://github.com.evil.com/x' }            # look-alike suffix
+        @{ Url = 'https://objects.githubusercontent.com/x' }  # CDN subdomain, now refused
+        @{ Url = 'http://github.com/x' }                      # wrong scheme
+    ) {
+        { Assert-GitHubUri $Url } | Should -Throw
+    }
+}
+
+Describe "v2.18: silent-failure and honesty fixes" -Tag "Fix", "V218" {
+    BeforeAll {
+        $scriptContent = Get-Content (Join-Path $PSScriptRoot '..' 'WinClean.ps1') -Raw
+    }
+
+    It "Clear-DockerWSL bumps WarningsCount when a single VHDX fails to compact (#2)" {
+        # Body-scoped: the per-VHDX catch must increment the counter, not just log, or the
+        # stand/CI reads WarningsCount=0 on a real failure.
+        $body = Get-FunctionBody -Name 'Clear-DockerWSL'
+        $body | Should -Match '(?s)Could not compact.{0,160}WarningsCount\+\+'
+    }
+
+    It "Clear-BrowserCaches ReportOnly distinguishes empty from a real cleanup (#5)" {
+        $body = Get-FunctionBody -Name 'Clear-BrowserCaches'
+        $body | Should -Match 'but they are empty'
     }
 }
 

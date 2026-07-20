@@ -1,5 +1,5 @@
 <#PSScriptInfo
-.VERSION 2.17
+.VERSION 2.18
 .GUID 8f7c3b2a-1d4e-5f6a-9b8c-0d1e2f3a4b5c
 .AUTHOR bivlked
 .COMPANYNAME
@@ -12,6 +12,7 @@
 .REQUIREDSCRIPTS
 .EXTERNALSCRIPTDEPENDENCIES
 .RELEASENOTES
+    v2.18: Correctness and hardening follow-up from external code review - diskpart failure detection, driver-store accounting, strict superseded-version rule, exact bootstrap host allowlist
     v2.17: Silent failure hardening - operations that quietly do nothing now say so instead of reporting success
     v2.16: Driver store cleanup, disk space report, kernel dump cleanup, 9 audit fixes (Delivery Optimization path, TEMP age filter, winget exit codes)
     v2.15: ResultJsonPath for automated testing, one-command install/run (get.ps1, install.ps1), integration test suite
@@ -26,7 +27,7 @@
 
 <#
 .SYNOPSIS
-    WinClean - Ultimate Windows 11 Maintenance Script v2.17
+    WinClean - Ultimate Windows 11 Maintenance Script v2.18
 .DESCRIPTION
     Комплексный скрипт для обновления и очистки Windows 11:
     - Обновление Windows (включая драйверы)
@@ -40,8 +41,20 @@
     - Подробный цветной вывод + лог-файл
 .NOTES
     Author: biv
-    Version: 2.17
+    Version: 2.18
     Requires: PowerShell 7.1+, Windows 11, Administrator rights
+    Changes in 2.18:
+    - WSL/Docker VHDX compaction now detects a diskpart failure instead of reporting
+      "no space saved", and a failed WSL shutdown skips compaction rather than
+      touching a live disk
+    - Driver store falls back to the repository delta whenever ANY removed package
+      lacks a trusted per-package size, not only when the total is zero
+    - Driver store "superseded" now requires a strictly newer version, never a mere
+      newer date at the same version
+    - The per-VHDX compaction failure is now counted as a warning
+    - The one-line install scripts validate the download host against an exact
+      allowlist instead of a broad *.github.com / *.githubusercontent.com suffix
+    - Folder size measurement distinguishes an unreadable folder from an empty one
     Changes in 2.17:
     - Cleanups that free nothing from a non-empty folder now say so instead of
       staying silent, which was indistinguishable from "there was nothing to do"
@@ -317,7 +330,7 @@ if (-not $LogPath) {
 }
 
 # Script version (single source of truth for version checking)
-$script:Version = "2.17"
+$script:Version = "2.18"
 
 # Protected paths that should never be deleted
 $script:ProtectedPaths = @(
@@ -1151,8 +1164,16 @@ function Get-FolderSizeChecked {
     #>
     param([string]$Path)
 
-    if (-not (Test-Path -LiteralPath $Path -ErrorAction SilentlyContinue)) {
+    # v2.18: Test-Path returns $false for BOTH "absent" and "present but access-denied",
+    # so an unreadable folder used to report 0 (= "empty") instead of $null (= "could not
+    # measure"). GetAttributes throws a *NotFound* exception only when the path is truly
+    # absent; an access error surfaces as a different exception and must yield $null.
+    try {
+        $null = [System.IO.File]::GetAttributes($Path)
+    } catch [System.IO.FileNotFoundException], [System.IO.DirectoryNotFoundException] {
         return 0
+    } catch {
+        return $null
     }
 
     $walkErrors = $null
@@ -1358,6 +1379,11 @@ function Remove-FolderContent {
         })
         if ($isExcluded) { continue }
 
+        # v2.18: carry whether Size is a real measurement. Only the no-cutoff directory
+        # branch below can produce a genuinely unmeasurable size ($null from
+        # Get-FolderSizeChecked); every other path is measured, an empty dir included.
+        $measured = $true
+
         if ($item.PSIsContainer) {
             if ($cutoff) {
                 # BOTH halves are required, and each covers a case the other misses:
@@ -1384,15 +1410,17 @@ function Remove-FolderContent {
             } else {
                 # Checked variant: plain Get-FolderSize returns 0 both for "empty" and
                 # for "could not read", and that 0 would later be reported as freed
-                # bytes. $null here means "unmeasured" and is carried as such.
+                # bytes. $null here means "unmeasured" and is now genuinely carried as
+                # such (Measured=$false) instead of being flattened to a silent 0.
                 $size = Get-FolderSizeChecked -Path $item.FullName
+                $measured = ($null -ne $size)
             }
         } else {
             if ($cutoff -and $item.LastWriteTime -ge $cutoff) { continue }
             $size = $item.Length
         }
 
-        $candidates += [pscustomobject]@{ Item = $item; Size = [long]($size ?? 0) }
+        $candidates += [pscustomobject]@{ Item = $item; Size = [long]($size ?? 0); Measured = $measured }
     }
 
     $totalSize = [long](($candidates | Measure-Object -Property Size -Sum).Sum ?? 0)
@@ -1400,6 +1428,13 @@ function Remove-FolderContent {
     if ($ReportOnly) {
         if ($totalSize -gt 0 -and $Description) {
             Write-Log "Would clean: $Description - $(Format-FileSize $totalSize)" -Level DETAIL
+        }
+        # v2.18: an unmeasurable candidate contributes 0 to $totalSize, so a set that is
+        # entirely unmeasurable would otherwise report nothing at all. Name it instead of
+        # staying silent (the estimate genuinely excludes these).
+        $unmeasuredCount = @($candidates | Where-Object { -not $_.Measured }).Count
+        if ($unmeasuredCount -gt 0 -and $Description) {
+            Write-Log "$Description - $unmeasuredCount item(s) present but not measurable (excluded from the estimate)" -Level DETAIL
         }
         return
     }
@@ -1410,6 +1445,7 @@ function Remove-FolderContent {
 
     try {
         $freed = 0
+        $unmeasuredRemoved = 0
         foreach ($c in $candidates) {
             $item = $c.Item
             try {
@@ -1421,8 +1457,10 @@ function Remove-FolderContent {
             } catch { }
 
             if (-not (Test-Path -LiteralPath $item.FullName -ErrorAction SilentlyContinue)) {
-                # Fully gone - the size measured before deletion is exactly what was freed
-                $freed += $c.Size
+                # Fully gone. Credit the pre-deletion size only if it was a real
+                # measurement; an unmeasured directory (v2.18) is removed but its freed
+                # bytes are unknown, so it is counted apart rather than booked as 0.
+                if ($c.Measured) { $freed += $c.Size } else { $unmeasuredRemoved++ }
             } elseif ($item.PSIsContainer) {
                 # Partially deleted (some locked file inside) - re-measure only this one
                 # subtree, not the whole of $Path. Get-FolderSizeChecked, not
@@ -1434,8 +1472,17 @@ function Remove-FolderContent {
                     $freed += [math]::Max(0, $c.Size - $remaining)
                 }
                 # $null: the remainder is unknown, so claim nothing rather than overstate
+                # v2.18: a directory that was unmeasurable to begin with and only partially
+                # deleted freed an unknown amount too - count it so it is not silently lost.
+                if (-not $c.Measured) { $unmeasuredRemoved++ }
             }
             # A file that still exists (locked) contributes 0 - correctly nothing freed
+        }
+
+        if ($unmeasuredRemoved -gt 0) {
+            # Honest about the gap instead of silently understating: these directories
+            # were deleted but their size could not be measured beforehand.
+            Write-Log "Removed $unmeasuredRemoved item(s) whose size could not be measured; freed space is underreported for them" -Level DETAIL
         }
 
         if ($freed -gt 0) {
@@ -2234,8 +2281,21 @@ function Clear-BrowserCaches {
         $sizeBefore = ($allPaths | ForEach-Object { Get-FolderSize -Path $_.Path } | Measure-Object -Sum).Sum
 
         if ($ReportOnly) {
-            # In ReportOnly mode, just show what would be cleaned
-            Write-Log "Would clean browser caches ($browserNames) - $(Format-FileSize $sizeBefore)" -Level DETAIL
+            # v2.18: $sizeBefore comes from Get-FolderSize, which returns 0 for BOTH an
+            # empty cache and an unreadable one, so "Would clean ... - 0 B" announced a
+            # cleanup that would free nothing. Re-measure with the checked variant to tell
+            # "empty" (confirmed 0) from "could not measure" ($null) and word it honestly.
+            $checked = @($allPaths | ForEach-Object { Get-FolderSizeChecked -Path $_.Path })
+            if ($checked -contains $null) {
+                Write-Log "Browser caches ($browserNames): present, size could not be fully measured" -Level DETAIL
+            } else {
+                $checkedSum = [long](($checked | Measure-Object -Sum).Sum ?? 0)
+                if ($checkedSum -gt 0) {
+                    Write-Log "Would clean browser caches ($browserNames) - $(Format-FileSize $checkedSum)" -Level DETAIL
+                } else {
+                    Write-Log "Browser cache folders found ($browserNames), but they are empty" -Level DETAIL
+                }
+            }
         } else {
             # Actual cleanup
             $allPaths | ForEach-Object -Parallel {
@@ -3117,6 +3177,33 @@ function Clear-DeveloperCaches {
 #                          DOCKER/WSL CLEANUP FUNCTIONS
 #═══════════════════════════════════════════════════════════════════════════════
 
+function Test-DiskpartCompactionFailed {
+    <#
+    .SYNOPSIS
+        Decides whether a diskpart "compact vdisk" run failed - pure logic, no I/O
+    .DESCRIPTION
+        Split out (v2.18) so the failure decision is unit-testable without a real VHDX.
+        diskpart is unreliable at signalling a sub-command failure through its exit code
+        (it can exit 0 after "compact vdisk" errored), so a non-zero exit OR a known error
+        marker in the output both count as failure. The output is localized, so this only
+        catches English error text; on a non-English console a failure may surface only as
+        a non-zero exit, or as the file not shrinking (the caller treats "no shrink" as a
+        neutral "no space saved", not a failure, so a silent localized error can still be
+        missed - a limitation of the diskpart text interface, noted deliberately).
+    .PARAMETER Output
+        The combined stdout/stderr text diskpart produced.
+    .PARAMETER ExitCode
+        diskpart's process exit code.
+    #>
+    param([string]$Output, [int]$ExitCode)
+
+    if ($ExitCode -ne 0) { return $true }
+    if ([string]::IsNullOrWhiteSpace($Output)) { return $false }
+    return [bool]($Output -match ('DiskPart has encountered an error|Virtual Disk Service error|' +
+        'DiskPart failed|The arguments specified for this command are not valid|' +
+        'There is no virtual disk selected|Access is denied|The system cannot find'))
+}
+
 function Clear-DockerWSL {
     <#
     .SYNOPSIS
@@ -3224,6 +3311,15 @@ function Clear-DockerWSL {
                     # Shutdown WSL first (this also stops Docker WSL backends)
                     Write-Log "Shutting down WSL..." -Level INFO
                     wsl --shutdown
+                    $wslShutdownExit = $LASTEXITCODE
+                    if ($wslShutdownExit -ne 0) {
+                        # v2.18: compacting a VHDX WSL may still hold open is unsafe and
+                        # pointless, so a failed shutdown skips compaction (emptying the
+                        # list) with a warning instead of touching a live disk.
+                        Write-Log "wsl --shutdown exit $wslShutdownExit - skipping VHDX compaction to avoid touching a live disk" -Level WARNING
+                        $script:Stats.WarningsCount++
+                        $vhdxFiles = @()
+                    }
                     Start-Sleep -Seconds 2
 
                     # Compact each VHDX file
@@ -3240,23 +3336,39 @@ select vdisk file="$vhdx"
 compact vdisk
 exit
 "@
-                            $diskpartScript | diskpart | Out-Null
+                            # v2.18: capture output AND exit code. The old "| Out-Null"
+                            # discarded both, so a diskpart failure fell straight through to
+                            # "no space saved" (INFO) and read as success to the stand/CI.
+                            $diskpartOutput = $diskpartScript | diskpart 2>&1
+                            $diskpartExit = $LASTEXITCODE
+                            $diskpartText = ($diskpartOutput | Out-String)
 
-                            $sizeAfter = (Get-Item $vhdx).Length
-                            $saved = $sizeBefore - $sizeAfter
-
-                            if ($saved -gt 0) {
-                                Write-Log "Compacted $($vhdxFile.Name): $(Format-FileSize $saved) saved" -Level SUCCESS
-                                $script:Stats.TotalFreedBytes += $saved
-                                if (-not $script:Stats.FreedByCategory.ContainsKey("WSL")) {
-                                    $script:Stats.FreedByCategory["WSL"] = 0
-                                }
-                                $script:Stats.FreedByCategory["WSL"] += $saved
+                            if (Test-DiskpartCompactionFailed -Output $diskpartText -ExitCode $diskpartExit) {
+                                Write-Log "Could not compact $($vhdxFile.Name): diskpart reported an error (exit $diskpartExit)" -Level WARNING
+                                $tail = (($diskpartText -split "`r?`n" | Where-Object { $_.Trim() }) | Select-Object -Last 2) -join ' | '
+                                if ($tail) { Write-Log "diskpart: $tail" -Level DETAIL }
+                                $script:Stats.WarningsCount++
                             } else {
-                                Write-Log "Compacted $($vhdxFile.Name): no space saved" -Level INFO
+                                $sizeAfter = (Get-Item $vhdx).Length
+                                $saved = $sizeBefore - $sizeAfter
+
+                                if ($saved -gt 0) {
+                                    Write-Log "Compacted $($vhdxFile.Name): $(Format-FileSize $saved) saved" -Level SUCCESS
+                                    $script:Stats.TotalFreedBytes += $saved
+                                    if (-not $script:Stats.FreedByCategory.ContainsKey("WSL")) {
+                                        $script:Stats.FreedByCategory["WSL"] = 0
+                                    }
+                                    $script:Stats.FreedByCategory["WSL"] += $saved
+                                } else {
+                                    Write-Log "Compacted $($vhdxFile.Name): no space saved" -Level INFO
+                                }
                             }
                         } catch {
+                            # v2.18: the outer catch bumps WarningsCount but this per-VHDX
+                            # one did not, so a real compaction failure could leave the JSON
+                            # WarningsCount at 0 and read as a clean run to the stand/CI.
                             Write-Log "Could not compact $($vhdxFile.Name): $_" -Level WARNING
+                            $script:Stats.WarningsCount++
                         }
                     }
                 }
@@ -3493,7 +3605,8 @@ function Get-SupersededDriverCandidate {
 
         A package is a candidate only when BOTH conditions hold:
           1. pnputil reports no device bound to it, and
-          2. a newer package with the same OriginalName exists.
+          2. a package with a STRICTLY newer version and the same OriginalName exists
+             (a mere newer date at an equal version does not count - v2.18).
         Packages without a newer sibling are left alone even when unused - they serve
         devices that are merely unplugged right now (docks, printers, external storage).
         That distinction is what separates this from the aggressive "driver cleaners"
@@ -3516,7 +3629,13 @@ function Get-SupersededDriverCandidate {
     $Packages | Group-Object { "$($_.Inf)|$($_.Provider)|$($_.Class)" } | ForEach-Object {
         $newest = $_.Group | Sort-Object Version, Date -Descending | Select-Object -First 1
         foreach ($pkg in $_.Group) {
-            if ($pkg.Oem -eq $newest.Oem -or $pkg.InUse) { continue }
+            # v2.18: "superseded" means a STRICTLY NEWER version exists. A package tied at
+            # the newest version is kept even when unused - same-version duplicates are not
+            # proof of obsolescence, and removing one would be wider than the documented
+            # safety contract (older code deleted a same-version package that merely had an
+            # older date). Date is no longer a selection tie-breaker: every package at the
+            # max version is retained; it only decides which object represents $newest.
+            if ($pkg.InUse -or $pkg.Version -ge $newest.Version) { continue }
             $pkg | Add-Member -NotePropertyName Bytes -NotePropertyValue ([long]0) -PassThru |
                    Add-Member -NotePropertyName KeptVersion -NotePropertyValue $newest.Version -PassThru
         }
@@ -3677,22 +3796,27 @@ function Clear-DriverStore {
         return
     }
 
-    # Measured as a fallback: per-package sizes come from matching INF hashes, and if
-    # that matching fails the packages still get deleted while the statistics read 0 B
+    # Repository size before removal, used as the authoritative freed total whenever any
+    # removed package lacks a trustworthy per-package size (see the accounting below).
     $repoPath = Join-Path $env:SystemRoot 'System32\DriverStore\FileRepository'
     $repoBefore = Get-FolderSize -Path $repoPath
 
-    $freed = 0
+    $perPackageBytes = 0
     $removed = 0
     $failed = 0
+    $allMeasured = $true
     foreach ($pkg in $candidates) {
         # No /force here: it deletes packages even when a device is using them, which is
         # exactly how driver cleaners break systems. Exit code is the verdict - the text
         # output is localized.
         $null = & pnputil.exe /delete-driver $pkg.Oem 2>&1
         if ($LASTEXITCODE -eq 0) {
-            $freed += $pkg.Bytes
             $removed++
+            # v2.18: a candidate whose FileRepository folder was never matched (unmatched
+            # INF hash, or a shared hash that overwrote another candidate in the lookup)
+            # keeps Bytes=0. Summing those as-is understates the total, so remember that at
+            # least one removed package had no trustworthy size.
+            if ($pkg.Bytes -gt 0) { $perPackageBytes += $pkg.Bytes } else { $allMeasured = $false }
         } else {
             $failed++
             Write-Log "Skipped $($pkg.Oem) ($($pkg.Inf)): pnputil exit $LASTEXITCODE" -Level DETAIL
@@ -3700,13 +3824,17 @@ function Clear-DriverStore {
     }
 
     if ($removed -gt 0) {
-        if ($freed -eq 0) {
-            # Packages went away but no size could be attributed to them - fall back to
-            # the difference in the repository itself rather than reporting a false zero
-            $repoDelta = [math]::Max(0, $repoBefore - (Get-FolderSize -Path $repoPath))
-            Write-Log "Removed $removed package(s); per-package size unavailable, driver store shrank by $(Format-FileSize $repoDelta)" -Level WARNING
+        if ($allMeasured) {
+            # Every removed package had a matched, measured size - use the precise sum.
+            $freed = $perPackageBytes
+        } else {
+            # At least one removed package had no per-package size, so the sum would
+            # understate even when it is non-zero (the old "only fall back when total==0"
+            # missed exactly this partial case). The repository delta captures every
+            # removal at once and is authoritative here.
+            $freed = [math]::Max(0, $repoBefore - (Get-FolderSize -Path $repoPath))
+            Write-Log "Removed $removed package(s); per-package size incomplete, driver store shrank by $(Format-FileSize $freed)" -Level WARNING
             $script:Stats.WarningsCount++
-            $freed = $repoDelta
         }
 
         $script:Stats.TotalFreedBytes += $freed

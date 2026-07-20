@@ -438,6 +438,72 @@ Remove-FolderContent -Path '$container' -Category 'PartialTest' -Description 'pa
     }
 }
 
+Describe "Sandbox: Remove-FolderContent unmeasured directory" -Tag "Integration" -Skip:(-not $IsElevated) {
+    <#
+    v2.18 (+B): a directory whose size cannot be measured before deletion ($null from
+    Get-FolderSizeChecked, no age filter) used to be flattened to Size 0, deleted, and
+    booked as 0 freed with no notice - the comment claimed the $null was "carried as such"
+    but it was not. Now it is still removed, but reported as unmeasured instead of silently
+    understated. Get-FolderSizeChecked is shadowed to force the $null path deterministically.
+    #>
+
+    BeforeAll {
+        $root = New-Sandbox
+        $container = Join-Path $root 'Users\test\AppData\Roaming\Unmeasured'
+        $subdir = Join-Path $container 'sub'
+        New-Item -ItemType Directory -Path $subdir -Force | Out-Null
+        [System.IO.File]::WriteAllBytes((Join-Path $subdir 'x.bin'), [byte[]]::new(4096))
+
+        $result = Invoke-Sandbox -Root $root -Body @"
+function Get-FolderSizeChecked { param(`$Path) `$null }
+Remove-FolderContent -Path '$container' -Category 'UnmeasuredTest' -Description 'unmeasured test'
+"@
+    }
+
+    It "Runs without errors" {
+        $result.ExitCode | Should -Be 0
+    }
+
+    It "Still deletes the unmeasurable directory" {
+        Test-Path $subdir | Should -BeFalse
+    }
+
+    It "Reports it as unmeasured rather than crediting a silent zero" {
+        Get-Content $result.Stats.LogPath -Raw | Should -Match 'could not be measured'
+    }
+
+    It "Does not credit bogus freed bytes for it" {
+        [long]($result.Stats.FreedByCategory.UnmeasuredTest ?? 0) | Should -Be 0
+    }
+}
+
+Describe "Sandbox: Remove-FolderContent ReportOnly names unmeasurable items" -Tag "Integration" -Skip:(-not $IsElevated) {
+    # v2.18 (+B / Codex second pass): a ReportOnly set that is entirely unmeasurable used
+    # to print nothing at all (totalSize 0). It now names the excluded items instead of
+    # staying silent, and of course deletes nothing.
+    BeforeAll {
+        $root = New-Sandbox
+        $container = Join-Path $root 'Users\test\AppData\Roaming\UnmeasuredReport'
+        New-Item -ItemType Directory -Path (Join-Path $container 'sub') -Force | Out-Null
+        [System.IO.File]::WriteAllBytes((Join-Path $container 'sub\y.bin'), [byte[]]::new(2048))
+
+        $result = Invoke-Sandbox -Root $root -Body @"
+`$ReportOnly = `$true
+function Get-FolderSizeChecked { param(`$Path) `$null }
+Remove-FolderContent -Path '$container' -Category 'UnmReport' -Description 'unmeasured report test'
+"@
+    }
+
+    It "Runs without errors and keeps everything" {
+        $result.ExitCode | Should -Be 0
+        Test-Path (Join-Path $container 'sub') | Should -BeTrue
+    }
+
+    It "Names the unmeasurable items instead of printing nothing" {
+        Get-Content $result.Stats.LogPath -Raw | Should -Match 'not measurable'
+    }
+}
+
 # v2.17: the audit (MyAI-dtx8, item 22) found 39 functions with zero behavioral tests,
 # including 8 that delete files. Everything below closes that gap for the functions
 # that can be exercised safely. Four of the eight (Clear-EventLogs, Clear-
@@ -617,6 +683,29 @@ Clear-DriverStore
 '@
         [long]$result.Stats.FreedByCategory.DriverStore | Should -Be 3145728
         Get-Content $result.Stats.LogPath -Raw | Should -Match 'Removed 2 superseded driver package'
+    }
+
+    It "Falls back to the repo delta when a removed package has no measured size" {
+        # v2.18 (#4): the old code summed per-package Bytes and fell back to the repo delta
+        # only when the TOTAL was zero, so a mix of measured + unmeasured (Bytes=0)
+        # understated the freed total by crediting just the measured 1 MB. Now ANY
+        # unmeasured removed package makes the repo delta authoritative. pnputil is mocked
+        # so nothing really leaves the store -> the delta is ~0, and crucially NOT 1 MB.
+        $result = Invoke-Sandbox -Root $root -Body @'
+function Get-RedundantDriverPackage {
+    @(
+        [pscustomobject]@{ Oem = 'oem10.inf'; Inf = 'a.inf'; Bytes = 1048576 }
+        [pscustomobject]@{ Oem = 'oem11.inf'; Inf = 'b.inf'; Bytes = 0 }
+    )
+}
+function pnputil.exe { $global:LASTEXITCODE = 0 }
+Clear-DriverStore
+'@
+        # The warning + message prove the fallback path ran (allMeasured = false).
+        $result.Stats.WarningsCount | Should -BeGreaterThan 0
+        Get-Content $result.Stats.LogPath -Raw | Should -Match 'per-package size incomplete'
+        # And the credited total is the repo delta, not the naive per-package 1 MB sum.
+        [long]$result.Stats.FreedByCategory.DriverStore | Should -BeLessThan 1048576
     }
 
     It "Counts a refused package as failed, not removed, and warns" {

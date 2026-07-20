@@ -14,6 +14,44 @@ Windows Update driver listing, run-to-run delta and HTML report. See CLAUDE.md.
 
 ---
 
+## [2.18] - 2026-07-20
+
+A correctness and hardening follow-up to 2.17, driven by an external code review (seven
+findings) and an independent Codex second opinion (two more). No new features. Every item
+was verified against the code first; the two that touch driver deletion were confirmed on
+the Windows 11 stand VMs (ru-RU and en-US) before release.
+
+### Fixed
+
+- **WSL/Docker VHDX compaction ignored diskpart's result.** A failed `compact vdisk` fell
+  straight through to "no space saved" (an informational line), indistinguishable from a
+  real success with no gain. diskpart's output and exit code are now checked and a failure is
+  logged as a warning. A per-VHDX compaction failure is counted too, and a failed
+  `wsl --shutdown` now skips compaction instead of touching a possibly-live disk
+- **Driver store "superseded" was wider than documented.** It could delete a package of the
+  same version that merely had an older date; it now requires a strictly newer version
+- **Driver store freed size could be understated.** When some removed packages had a measured
+  size and others did not, the per-package sum was reported as-is; the repository delta is now
+  authoritative whenever any removed package lacks a trusted size, not only when the total was zero
+- **`Get-FolderSizeChecked` reported an unreadable folder as empty** (0) instead of "could not
+  measure"; an absent path and an access-denied path are now told apart
+- **A folder deleted without a measurable size was booked as 0 freed silently**; it is now
+  removed but reported as unmeasured rather than quietly understated
+
+### Security
+
+- **The one-line install scripts widened their host allowlist too far.** `get.ps1` and
+  `install.ps1` accepted any `*.github.com` / `*.githubusercontent.com` subdomain for a
+  release asset URL; they now match the exact host a release actually uses
+
+### Tests
+
+- 279 to 309 automated tests, covering the diskpart failure decision, the strict
+  superseded-version rule, the driver-store repository-delta fallback, and the exact
+  host allowlist
+
+---
+
 ## [2.17] - 2026-07-20
 
 A correctness and hardening release: no new features, five review passes over the 2.16

@@ -45,9 +45,13 @@ function Stop-Install {
 
 function Assert-GitHubUri {
     param([string]$Uri)
+    # Exact-host allowlist (v2.18). A release browser_download_url is always github.com;
+    # the old suffix match accepted any *.github.com / *.githubusercontent.com subdomain
+    # this never needs. Redirects to the asset CDN are followed internally and not
+    # re-validated here, so CDN hosts are deliberately excluded.
+    $allowedHosts = @('github.com')
     $parsed = [uri]$Uri
-    if ($parsed.Scheme -ne 'https' -or
-        $parsed.Host -notmatch '(^|\.)(github\.com|githubusercontent\.com)$') {
+    if ($parsed.Scheme -ne 'https' -or $parsed.Host -notin $allowedHosts) {
         throw "Refusing to download from an unexpected host: $($parsed.Host)"
     }
     return $Uri
