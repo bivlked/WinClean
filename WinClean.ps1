@@ -494,6 +494,99 @@ function Clear-AllProgress {
 #                              HELPER FUNCTIONS
 #═══════════════════════════════════════════════════════════════════════════════
 
+function Get-RunMarkerPath {
+    Join-Path $env:TEMP 'WinClean.recovery-marker.json'
+}
+
+function Set-RunMarker {
+    <#
+    .SYNOPSIS
+        Records that a risky, hard-to-undo operation is about to start
+    .DESCRIPTION
+        v2.17 (p.13 of the audit): Ctrl+C already unwinds through try/finally - the
+        gap is a HARD kill (taskkill /F, a closed terminal, a reset VM), which skips
+        every finally block, including the ones that restore
+        SystemRestorePointCreationFrequency or restart wuauserv/bits. This marker lets
+        the next run detect that and recover - a plain "is the value 0 right now"
+        check cannot tell an interrupted run from a value the user or IT policy set on
+        purpose, and blindly overwriting that would be the wrong kind of surprise.
+        Best-effort: a failed marker write must never block the real operation.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$Phase,
+        [hashtable]$Data = @{}
+    )
+    try {
+        $marker = [ordered]@{ Phase = $Phase; Pid = $PID; Timestamp = (Get-Date).ToString('o') }
+        foreach ($key in $Data.Keys) { $marker[$key] = $Data[$key] }
+        $marker | ConvertTo-Json -Compress | Set-Content -LiteralPath (Get-RunMarkerPath) -Encoding utf8 -ErrorAction Stop
+    } catch { }
+}
+
+function Clear-RunMarker {
+    Remove-Item -LiteralPath (Get-RunMarkerPath) -Force -ErrorAction SilentlyContinue
+}
+
+function Invoke-StaleMarkerRecovery {
+    <#
+    .SYNOPSIS
+        Recovers system state left behind by a hard-killed previous run, if any
+    .DESCRIPTION
+        v2.17 (p.13 of the audit). Called once at the start of a run. A marker left by
+        THIS run's own process id is not evidence of anything (re-entrant call, or a
+        race) - only a marker from a different, necessarily-dead process means the
+        previous run never reached its cleanup.
+    #>
+    $markerPath = Get-RunMarkerPath
+    if (-not (Test-Path -LiteralPath $markerPath -ErrorAction SilentlyContinue)) { return }
+
+    try {
+        $marker = Get-Content -LiteralPath $markerPath -Raw -ErrorAction Stop | ConvertFrom-Json
+    } catch {
+        Remove-Item -LiteralPath $markerPath -Force -ErrorAction SilentlyContinue
+        return
+    }
+
+    if ($marker.Pid -eq $PID) { return }
+
+    Write-Log "Recovery marker found from an interrupted previous run (phase: $($marker.Phase), pid $($marker.Pid)) - checking for leftover state" -Level WARNING
+    $script:Stats.WarningsCount++
+
+    switch ($marker.Phase) {
+        'RestorePointFrequencyOverride' {
+            try {
+                $srKey = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\SystemRestore'
+                $current = (Get-ItemProperty -Path $srKey -Name SystemRestorePointCreationFrequency -ErrorAction SilentlyContinue).SystemRestorePointCreationFrequency
+                if ($current -eq 0) {
+                    if ($null -ne $marker.PreviousValue) {
+                        Set-ItemProperty -Path $srKey -Name SystemRestorePointCreationFrequency -Value $marker.PreviousValue -Type DWord -Force
+                    } else {
+                        Remove-ItemProperty -Path $srKey -Name SystemRestorePointCreationFrequency -ErrorAction SilentlyContinue
+                    }
+                    Write-Log "Restored SystemRestorePointCreationFrequency, left at 0 by the interrupted run" -Level INFO
+                }
+            } catch {
+                Write-Log "Could not restore SystemRestorePointCreationFrequency: $_" -Level WARNING
+            }
+        }
+        'WUServiceStop' {
+            foreach ($svcName in @('wuauserv', 'bits')) {
+                try {
+                    $svc = Get-Service -Name $svcName -ErrorAction SilentlyContinue
+                    if ($svc -and $svc.Status -eq 'Stopped') {
+                        Start-Service -Name $svcName -ErrorAction Stop
+                        Write-Log "Restarted $svcName, left stopped by the interrupted run" -Level INFO
+                    }
+                } catch {
+                    Write-Log "Could not restart $svcName : $_" -Level WARNING
+                }
+            }
+        }
+    }
+
+    Remove-Item -LiteralPath $markerPath -Force -ErrorAction SilentlyContinue
+}
+
 function Test-InteractiveConsole {
     <#
     .SYNOPSIS
@@ -1453,6 +1546,16 @@ function New-SystemRestorePoint {
         # with no timeout at all, and VSS is known to hang for minutes.
         $outFile = [System.IO.Path]::GetTempFileName()
         $errFile = [System.IO.Path]::GetTempFileName()
+
+        # v2.17 (p.13 of the audit): a hard kill of this process (or of the child, e.g.
+        # via "End process tree") skips the child's own finally above, leaving
+        # SystemRestorePointCreationFrequency at 0 forever. Read the current value from
+        # out here so the marker can restore the RIGHT value on the next run instead of
+        # just assuming the shipped default.
+        $srKeyOuter = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\SystemRestore'
+        $prevFreqOuter = (Get-ItemProperty -Path $srKeyOuter -Name SystemRestorePointCreationFrequency -ErrorAction SilentlyContinue).SystemRestorePointCreationFrequency
+        Set-RunMarker -Phase 'RestorePointFrequencyOverride' -Data @{ PreviousValue = $prevFreqOuter }
+
         try {
             $proc = Start-Process -FilePath 'powershell.exe' `
                 -ArgumentList @('-NoProfile', '-NoLogo', '-ExecutionPolicy', 'Bypass', '-Command', $scriptBlock) `
@@ -1467,6 +1570,7 @@ function New-SystemRestorePoint {
             $result = (Get-Content -LiteralPath $outFile -Raw -ErrorAction SilentlyContinue)
         } finally {
             Remove-Item $outFile, $errFile -Force -ErrorAction SilentlyContinue
+            Clear-RunMarker
         }
 
         if ($result -like "SUCCESS*") {
@@ -2124,9 +2228,12 @@ function Clear-WindowsUpdateCache {
         return
     }
 
-    # Stop services with try/finally to ensure they restart
+    # Stop services with try/finally to ensure they restart. v2.17 (p.13 of the audit):
+    # a hard kill of this process skips that finally too, leaving wuauserv/bits
+    # stopped forever - the marker lets the NEXT run detect and recover that.
     Write-Log "Stopping Windows Update services..." -Level DETAIL -NoLog
     $servicesStopped = $false
+    Set-RunMarker -Phase 'WUServiceStop'
     try {
         Stop-Service -Name wuauserv, bits -Force -ErrorAction SilentlyContinue
         $servicesStopped = $true
@@ -2158,6 +2265,7 @@ function Clear-WindowsUpdateCache {
         if ($servicesStopped) {
             Start-Service -Name wuauserv, bits -ErrorAction SilentlyContinue
         }
+        Clear-RunMarker
     }
 }
 
@@ -4150,6 +4258,12 @@ function Start-WinClean {
     # Initialize log
     "WinClean v$($script:Version) - Started at $(Get-Date)" | Out-File -FilePath $script:LogPath -Encoding utf8
     "=" * 70 | Out-File -FilePath $script:LogPath -Append -Encoding utf8
+
+    # v2.17 (p.13 of the audit): recover from a hard-killed previous run before doing
+    # anything else - not in ReportOnly, which promises no changes
+    if (-not $ReportOnly) {
+        Invoke-StaleMarkerRecovery
+    }
 
     # Enable TLS 1.2 for all HTTPS connections (required by PowerShell Gallery, NuGet, etc.)
     # This must be set before any network operations

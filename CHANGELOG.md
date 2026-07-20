@@ -188,6 +188,14 @@ Main script:
   "Critical error" line to show for it. Each phase now has its own boundary and is
   recorded in the result JSON as `PhasesCompleted`/`PhasesFailed`, so an automated
   stand can tell "everything ran" from "phase 6 threw and the rest are just missing"
+- **A hard kill (not Ctrl+C - that already unwinds through `try`/`finally`) during
+  restore-point creation or the Windows Update cache cleanup left permanent damage**:
+  `SystemRestorePointCreationFrequency` stuck at 0, or `wuauserv`/`bits` stopped, with
+  no way for a later run to tell that apart from a value the user or IT policy set on
+  purpose. Both operations now write a marker before starting and clear it when they
+  finish; the next run checks for a leftover marker at startup and, only if it finds
+  one left by a *different* (necessarily dead) process, restores the recorded value or
+  restarts the recorded service - never a blind "fix this on every run"
 
 ### Changed
 
@@ -200,8 +208,8 @@ Main script:
 
 ### Tests
 
-- 268 Pester tests (was 222 earlier in 2.17, 141 in 2.15). The 46 new tests close part
-  of a coverage gap the second audit pass found: 39 functions with no behavioral test at
+- 274 Pester tests (was 222 earlier in 2.17, 141 in 2.15). Most of the growth closes a
+  coverage gap the second audit pass found: 39 functions with no behavioral test at
   all, including 8 that delete files. `Get-SupersededDriverCandidate` (the pure
   candidate-selection logic split out of `Get-RedundantDriverPackage` for exactly this)
   gets fixture-based unit tests; the 8 deleting functions get sandboxed integration
@@ -209,7 +217,9 @@ Main script:
   `wsl`/etc. functions swapped in after dot-sourcing) where the real call touches OS
   state a test must not - the real Recycle Bin, the real Event Log service, the real
   driver store, real System Restore. That remaining destructive surface needs the
-  Proxmox stand for real coverage, same as always
+  Proxmox stand for real coverage, same as always. The recovery-marker lifecycle (p.13)
+  gets the same treatment: the marker file itself is fully tested, the actual registry/
+  service recovery it triggers is not
 - **The helper test suite now dot-sources WinClean.ps1 instead of testing pasted copies
   of its functions.** The copies were a tautology - a bug in the product could not fail
   them - and they had already drifted apart from it, which the change immediately

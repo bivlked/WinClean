@@ -308,6 +308,78 @@ Describe "Get-SupersededDriverCandidate" -Tag "Unit", "Helper" {
 
 #endregion
 
+#region Recovery Marker Tests (v2.17, p.13 of the audit)
+
+Describe "Set-RunMarker / Clear-RunMarker / Invoke-StaleMarkerRecovery" -Tag "Unit", "Helper" {
+    <#
+    Only the marker lifecycle (write/read/detect-foreign-pid/clean-up) is tested here.
+    The per-phase RECOVERY ACTIONS themselves (resetting a real registry value,
+    restarting real wuauserv/bits) touch actual OS state that a unit test must not
+    mutate - same reasoning as the sandboxed-vs-shadowed split in
+    Integration.Tests.ps1. A bogus, unrecognized phase name exercises the same
+    detect/warn/clean-up path without going anywhere near the registry or services.
+    #>
+
+    BeforeAll {
+        $markerPath = Get-RunMarkerPath
+    }
+
+    AfterEach {
+        Remove-Item -LiteralPath $markerPath -Force -ErrorAction SilentlyContinue
+    }
+
+    It "Writes a marker with Phase, Pid and any extra data" {
+        Set-RunMarker -Phase 'TestPhase' -Data @{ PreviousValue = 42 }
+        Test-Path $markerPath | Should -BeTrue
+        $marker = Get-Content $markerPath -Raw | ConvertFrom-Json
+        $marker.Phase | Should -Be 'TestPhase'
+        $marker.Pid | Should -Be $PID
+        $marker.PreviousValue | Should -Be 42
+    }
+
+    It "Clear-RunMarker removes the file" {
+        Set-RunMarker -Phase 'TestPhase'
+        Clear-RunMarker
+        Test-Path $markerPath | Should -BeFalse
+    }
+
+    It "Does nothing when no marker file exists" {
+        { Invoke-StaleMarkerRecovery } | Should -Not -Throw
+    }
+
+    It "Ignores a marker written by this same process (not evidence of a crash)" {
+        Set-RunMarker -Phase 'TestPhase'
+        $before = $script:Stats.WarningsCount
+        Invoke-StaleMarkerRecovery
+        $script:Stats.WarningsCount | Should -Be $before
+        Test-Path $markerPath | Should -BeTrue   # left alone - this run still owns it
+    }
+
+    It "Removes a marker with an unrecognized phase from a foreign pid without throwing" {
+        # A pid that is certainly not this process
+        [pscustomobject]@{ Phase = 'SomePhaseThisVersionDoesNotKnow'; Pid = 999999; Timestamp = (Get-Date).ToString('o') } |
+            ConvertTo-Json | Set-Content -LiteralPath $markerPath -Encoding utf8
+        { Invoke-StaleMarkerRecovery } | Should -Not -Throw
+        Test-Path $markerPath | Should -BeFalse
+    }
+
+    It "Warns when it finds a marker from a foreign pid" {
+        [pscustomobject]@{ Phase = 'SomePhaseThisVersionDoesNotKnow'; Pid = 999999; Timestamp = (Get-Date).ToString('o') } |
+            ConvertTo-Json | Set-Content -LiteralPath $markerPath -Encoding utf8
+        $before = $script:Stats.WarningsCount
+        Invoke-StaleMarkerRecovery
+        $script:Stats.WarningsCount | Should -BeGreaterThan $before
+    }
+
+    It "Removes a corrupted marker file instead of throwing" {
+        "not valid json {{{" | Set-Content -LiteralPath $markerPath -Encoding utf8
+        { Invoke-StaleMarkerRecovery } | Should -Not -Throw
+        Test-Path $markerPath | Should -BeFalse
+    }
+}
+
+#endregion
+
 #region Get-FolderSize Tests
 
 Describe "Get-FolderSize" -Tag "Unit", "Helper" {
