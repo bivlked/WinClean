@@ -114,7 +114,16 @@ function Copy-FileToGuest {
     $b64 = [Convert]::ToBase64String([System.IO.File]::ReadAllBytes($LocalPath))
     $qGuest = ConvertTo-PsSingleQuoted $GuestPath
     $qB64File = ConvertTo-PsSingleQuoted "$GuestPath.b64"
-    $chunkSize = 8000
+
+    # v2.17: was 8000, which silently stopped working - every chunk failed with
+    # "the value supplied to -EncodedCommand is not properly Base64 encoded", i.e. a
+    # TRUNCATED command line, not a malformed one. The budget is the ~8191-character
+    # Windows command line limit inside the guest, and the payload is inflated ~2.67x
+    # on the way there: the chunk goes into a PowerShell snippet, which is encoded as
+    # UTF-16LE (2 bytes per character) and then Base64'd (+33%). 3000 characters
+    # already produce ~8160 and fail; 2000 produce ~5500 and work. Measured against
+    # the live stand, not derived on paper.
+    $chunkSize = 2000
 
     $null = Invoke-GuestCommand -Config $Config -Script "Remove-Item -LiteralPath $qB64File -Force -ErrorAction SilentlyContinue"
 

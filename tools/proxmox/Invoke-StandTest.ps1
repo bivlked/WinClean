@@ -158,8 +158,15 @@ if (-not $jsonRaw) {
     $result = $jsonRaw | ConvertFrom-Json
     if ($result.ErrorsCount -ne 0) { $failures += "ErrorsCount = $($result.ErrorsCount) (expected 0)" }
 
-    # The JSON must belong to THIS run (v2.17)
-    $stamp = try { [datetime]::Parse($result.Timestamp).ToUniversalTime() } catch { $null }
+    # The JSON must belong to THIS run (v2.17). ConvertFrom-Json in PS7 already turns the
+    # ISO-8601 Timestamp into a [datetime], so [datetime]::Parse would re-stringify it via
+    # the current culture and then fail to read its own output back on a non-en-US locale
+    # (ru-RU: "20.07.2026" vs the "07/20/2026" Parse expects). Accept a [datetime] as-is;
+    # only Parse when it actually arrived as a string.
+    $stamp = try {
+        if ($result.Timestamp -is [datetime]) { $result.Timestamp.ToUniversalTime() }
+        else { [datetime]::Parse([string]$result.Timestamp, [cultureinfo]::InvariantCulture).ToUniversalTime() }
+    } catch { $null }
     if (-not $stamp) {
         $failures += "Result JSON has no parseable Timestamp"
     } elseif ($stamp -lt $runStartedUtc.AddMinutes(-1)) {

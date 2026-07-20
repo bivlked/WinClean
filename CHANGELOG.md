@@ -231,6 +231,22 @@ require a second WinClean running as administrator at the same time, which is no
 supported configuration; every recovery action is also a no-op when there is nothing to
 repair.
 
+### Fixed (sixth pass: caught by the on-VM stand run, invisible to the test suite)
+
+The whole release was then run for real on two clean Windows 11 VMs (one ru-RU, one
+en-US) before tagging. Both surfaced a defect the 279 tests could not, because the tests
+run in a filesystem sandbox that never invokes a real restore point:
+
+- 🔴 **Restore-point creation was broken by the timeout rewrite (p.14).** Passing the
+  child script via `Start-Process -ArgumentList @(..., '-Command', $scriptBlock)` was the
+  mistake: `Start-Process` joins ArgumentList with spaces and does not re-quote, so the
+  description "WinClean 2026-07-20 19:11" was split into positional arguments and
+  `Checkpoint-Computer` failed on every run. Every maintenance run since would have
+  created no restore point while logging only a warning. Now passed as `-EncodedCommand`
+  (base64 of the UTF-16LE script), which is immune to command-line quoting. Verified on
+  both VMs: restore point now created, all nine phases complete, ~1.2 GB (ru) / ~2.9 GB
+  (en) freed, one expected warning (a single busy event-log channel)
+
 ### Changed
 
 - Self-update check is now gated by `-SkipUpdates`, and the disk space report by

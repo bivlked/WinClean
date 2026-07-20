@@ -1600,6 +1600,17 @@ function New-SystemRestorePoint {
         # Use Windows PowerShell 5.1 (Checkpoint-Computer not available in PS7).
         # v2.17 (p.14 of the audit): this was the one external call in the whole script
         # with no timeout at all, and VSS is known to hang for minutes.
+        #
+        # v2.17 (regression caught on the stand): the timeout rewrite first passed the
+        # script via Start-Process -ArgumentList @(..., '-Command', $scriptBlock).
+        # Start-Process concatenates ArgumentList with spaces and does NOT re-quote its
+        # elements, so a $Description containing spaces (it always does - "WinClean
+        # 2026-07-20 19:00") was split into positional arguments and Checkpoint-Computer
+        # failed every time. -EncodedCommand (base64 of the UTF-16LE script) sidesteps
+        # command-line quoting entirely. Invisible to the test suite because a real
+        # Checkpoint-Computer only runs on a live machine, not in the sandbox.
+        $encodedCommand = [Convert]::ToBase64String([System.Text.Encoding]::Unicode.GetBytes($scriptBlock))
+
         $outFile = [System.IO.Path]::GetTempFileName()
         $errFile = [System.IO.Path]::GetTempFileName()
 
@@ -1615,7 +1626,7 @@ function New-SystemRestorePoint {
         $childKilled = $false
         try {
             $proc = Start-Process -FilePath 'powershell.exe' `
-                -ArgumentList @('-NoProfile', '-NoLogo', '-ExecutionPolicy', 'Bypass', '-Command', $scriptBlock) `
+                -ArgumentList @('-NoProfile', '-NoLogo', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', $encodedCommand) `
                 -NoNewWindow -PassThru -RedirectStandardOutput $outFile -RedirectStandardError $errFile
 
             $timeoutMs = 120000  # 2 minutes - a restore point should never legitimately take this long
