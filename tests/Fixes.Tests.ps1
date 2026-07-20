@@ -787,3 +787,100 @@ Describe "v2.16: silent failures are reported" -Tag "Fix", "V216", "SilentFailur
 }
 
 #endregion
+
+#region v2.17 Bootstrap and path safety (findings from the Codex review)
+
+Describe "v2.17: get.ps1 argument parser cannot silently disable a preview" -Tag "Fix", "V217" {
+
+    BeforeAll {
+        $getScript = Get-Content (Join-Path $PSScriptRoot '..' 'get.ps1') -Raw
+    }
+
+    It "Rejects an invalid switch value instead of treating it as false" {
+        # "-ReportOnly:yes" used to evaluate to $false and start a real cleanup
+        $getScript | Should -Match "Invalid value '\`$raw' for switch"
+        $getScript | Should -Match "\`$clean -notmatch '\^\(true\|false\)\`$'"
+    }
+
+    It "Does not consume a parameter name as a value" {
+        # "-LogPath -ReportOnly" used to set LogPath='-ReportOnly' and leave the
+        # preview flag off, turning a dry run into a real one
+        $getScript | Should -Match "\`$WinCleanArgs\[\`$i \+ 1\] -notmatch '\^-\{1,2\}\[A-Za-z\]'"
+    }
+
+    It "Validates parameter names before downloading anything" {
+        $getScript | Should -Match "Unknown parameter"
+    }
+}
+
+Describe "v2.17: bootstrap verification is mandatory" -Tag "Fix", "V217" {
+
+    BeforeAll {
+        $getScript = Get-Content (Join-Path $PSScriptRoot '..' 'get.ps1') -Raw
+        $installScript = Get-Content (Join-Path $PSScriptRoot '..' 'install.ps1') -Raw
+    }
+
+    It "Both scripts refuse a release without the hash asset" -ForEach @(
+        @{ Name = 'get.ps1' }, @{ Name = 'install.ps1' }
+    ) {
+        $content = if ($Name -eq 'get.ps1') { $getScript } else { $installScript }
+        $content | Should -Match 'does not publish both WinClean\.ps1 and WinClean\.ps1\.sha256'
+        # The old code hid verification inside "if ($hashAsset)", so a missing asset
+        # skipped it entirely and silently
+        $content | Should -Not -Match '(?m)^\s*if \(\$hashAsset\) \{'
+    }
+
+    It "Neither script falls back to a mutable branch or tag" {
+        $getScript | Should -Not -Match 'raw\.githubusercontent\.com/\$repo/\$\(\$release\.tag_name\)'
+        $installScript | Should -Not -Match 'raw\.githubusercontent\.com/\$repo/\$\(\$release\.tag_name\)'
+    }
+
+    It "Hashes are compared literally, not as a wildcard pattern" -ForEach @(
+        @{ Name = 'get.ps1' }, @{ Name = 'install.ps1' }
+    ) {
+        $content = if ($Name -eq 'get.ps1') { $getScript } else { $installScript }
+        # "-notlike" made a single "*" in the hash file verify any download
+        $content | Should -Not -Match '\$actual -notlike \$expected'
+        $content | Should -Match '\[string\]::Equals\(\$actual, \$expected'
+        $content | Should -Match "'\^\[0-9a-fA-F\]\{64\}\`$'"
+    }
+
+    It "install.ps1 still checks that the asset looks like WinClean" {
+        # The hash proves the two assets agree, not that the payload is our script
+        $installScript | Should -Match "Contains\('PSScriptInfo'\)"
+    }
+
+    It "install.ps1 does not trust user-writable environment variables" {
+        # $env:ProgramFiles is writable by a non-admin process and would let it aim an
+        # elevated shortcut at its own binary
+        $installScript | Should -Match "\[Environment\]::GetFolderPath\(\[Environment\+SpecialFolder\]::ProgramFiles\)"
+        $installScript | Should -Not -Match "Join-Path \`$env:ProgramFiles"
+    }
+}
+
+Describe "v2.17: volume roots are protected" -Tag "Fix", "V217" {
+
+    It "Test-PathProtected refuses a drive root" {
+        # TEMP set to "C:\", or an empty variable resolving to a root, would otherwise
+        # hand the whole drive to the cleanup routine
+        Test-PathProtected -Path 'C:\' | Should -BeTrue
+    }
+
+    It "Test-PathProtected refuses an empty path" {
+        Test-PathProtected -Path '' | Should -BeTrue
+    }
+
+    It "Test-PathProtected expands short (8.3) names" {
+        Test-PathProtected -Path 'C:\PROGRA~1' | Should -BeTrue
+    }
+
+    It "Test-PathProtected resolves relative traversal" {
+        Test-PathProtected -Path 'C:\Windows\..\Windows' | Should -BeTrue
+    }
+
+    It "Test-PathProtected still allows a normal cleanup target" {
+        Test-PathProtected -Path (Join-Path $env:SystemRoot 'Temp') | Should -BeFalse
+    }
+}
+
+#endregion

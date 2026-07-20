@@ -138,6 +138,15 @@ try {
     }
     Write-Host "SHA256 verified." -ForegroundColor DarkGray
 
+    # The hash proves the two assets agree with each other, not that the asset is
+    # WinClean. A packaging mistake in the release would otherwise replace a working
+    # installation with arbitrary content.
+    $head = Get-Content -LiteralPath $tempFile -TotalCount 5 -ErrorAction Stop
+    if (-not ($head -join "`n").Contains('PSScriptInfo')) {
+        Stop-Install "The downloaded asset does not look like WinClean.ps1 - keeping the existing installation."
+        return
+    }
+
     try {
         Move-Item -LiteralPath $tempFile -Destination $scriptPath -Force
     } catch {

@@ -955,11 +955,23 @@ function Test-PathProtected {
     if ([string]::IsNullOrWhiteSpace($Path)) { return $true }   # nothing sane to clean
 
     try {
-        $normalizedPath = [System.IO.Path]::GetFullPath($Path).TrimEnd('\', '/')
+        $fullPath = [System.IO.Path]::GetFullPath($Path)
+        $normalizedPath = $fullPath.TrimEnd('\', '/')
     } catch {
         # Unparseable path: refuse rather than guess
         return $true
     }
+
+    # A volume root is always protected (v2.17). It is not in $ProtectedPaths and would
+    # otherwise slip through: TEMP set to "C:\" - or an empty variable resolving to a
+    # root - would hand the entire drive to the cleanup routine, running elevated.
+    # Note GetFullPath does expand 8.3 names, so "C:\PROGRA~1" is caught by the list below.
+    try {
+        $root = [System.IO.Path]::GetPathRoot($fullPath)
+        if ($root -and ($fullPath.TrimEnd('\', '/') -ieq $root.TrimEnd('\', '/'))) {
+            return $true
+        }
+    } catch { return $true }
 
     foreach ($protected in $script:ProtectedPaths) {
         if ([string]::IsNullOrWhiteSpace($protected)) { continue }

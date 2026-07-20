@@ -91,18 +91,33 @@ for ($i = 0; $i -lt $WinCleanArgs.Count; $i++) {
 
     if ($switchName) {
         # A switch may be given as "-Flag", "-Flag:$false" or "-Flag false".
-        # Without this, "-ReportOnly $false" used to reach WinClean as the string
-        # "False" and fail with an opaque parameter binding error.
+        # Anything else is rejected rather than guessed: silently treating
+        # "-ReportOnly:yes" as $false would turn an intended preview into a real
+        # cleanup, which is exactly the incident this parser exists to prevent.
         $raw = if ($null -ne $inline) { $inline }
                elseif (($i + 1) -lt $WinCleanArgs.Count -and
                        $WinCleanArgs[$i + 1] -match '^\$?(true|false)$') { $WinCleanArgs[++$i] }
                else { 'true' }
-        $splat[$switchName] = [switch](($raw -replace '^\$', '') -eq 'true')
+
+        $clean = $raw -replace '^\$', ''
+        if ($clean -notmatch '^(true|false)$') {
+            Stop-Bootstrap "Invalid value '$raw' for switch -$switchName." `
+                           "Use -$switchName, -${switchName}:`$true or -${switchName}:`$false."
+            return
+        }
+        $splat[$switchName] = [switch]($clean -eq 'true')
     }
     elseif ($valueName) {
-        $value = if ($null -ne $inline) { $inline }
-                 elseif (($i + 1) -lt $WinCleanArgs.Count) { $WinCleanArgs[++$i] }
-                 else { $null }
+        $value = if ($null -ne $inline) {
+            $inline
+        } elseif (($i + 1) -lt $WinCleanArgs.Count -and $WinCleanArgs[$i + 1] -notmatch '^-{1,2}[A-Za-z]') {
+            # Do not swallow the next token if it looks like a parameter name:
+            # "-LogPath -ReportOnly" would otherwise consume the flag as a path value
+            # and start a real cleanup instead of a preview
+            $WinCleanArgs[++$i]
+        } else {
+            $null
+        }
         if ([string]::IsNullOrWhiteSpace($value)) {
             Stop-Bootstrap "Parameter -$valueName requires a value."
             return

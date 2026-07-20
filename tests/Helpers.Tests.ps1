@@ -24,7 +24,16 @@ BeforeAll {
     )).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 
     # WinClean.ps1 declares #Requires -RunAsAdministrator, so without elevation the
-    # dot-source throws. Fail loudly rather than silently testing nothing.
+    # dot-source throws a bare "requires elevation" error from Pester's container
+    # loader. Say what is actually wrong instead. Failing loudly is deliberate: these
+    # tests exist to check the product, and skipping them would hide that they did not.
+    #
+    # Note this also imports the script's process-level settings (console encoding and
+    # $PSDefaultParameterValues) into the test session - acceptable here, and the price
+    # of testing the real code rather than copies of it.
+    if (-not $script:IsElevated) {
+        throw "These tests dot-source WinClean.ps1, which requires administrator rights. Run Pester from an elevated shell."
+    }
     . $script:WinCleanPath
 
     # Route the log somewhere disposable - the product picks %TEMP% by default and the
