@@ -43,11 +43,12 @@ CleanScript/
 │   └── logo.svg              # Логотип проекта
 ├── get.ps1                   # Bootstrap: разовый запуск одной командой (irm | iex)
 ├── install.ps1               # Bootstrap: установка/обновление + ярлык (RunAs admin)
-├── tests/                    # Pester тесты (181 всего)
+├── tests/                    # Pester тесты (187 всего)
 │   ├── Helpers.Tests.ps1     # Unit-тесты helper-функций (65 тестов)
-│   ├── Fixes.Tests.ps1       # Валидационные тесты исправлений (91 тест)
-│   └── Integration.Tests.ps1 # Интеграционные тесты в песочнице ФС (25 тестов)
+│   ├── Fixes.Tests.ps1       # Валидационные тесты исправлений (94 теста)
+│   └── Integration.Tests.ps1 # Интеграционные тесты в песочнице ФС (28 тестов)
 ├── tools/                    # Тестовая инфраструктура (не публикуется в PSGallery)
+│   ├── Invoke-ReleaseCheck.ps1 # 🔴 Единая проверка перед релизом (fail-closed)
 │   ├── Invoke-SmokeTest.ps1  # Смоук: ReportOnly + JSON + геометрия рамок
 │   ├── BoxGeometry.ps1       # Автопроверка геометрии консольных рамок
 │   └── proxmox/              # Стенд на Proxmox (config/results в .gitignore)
@@ -144,6 +145,8 @@ $script:ProtectedPaths = @(...)    # Защищённые пути (никогд
 
 ⚠️ **Счётчик тестов считать только прогоном Pester**, не грепом `It`: 7 блоков размножаются через `-ForEach`, поэтому наивный подсчёт занижает результат.
 
+🔴 **Перед выпуском гонять `pwsh tools/Invoke-ReleaseCheck.ps1`** - он проверяет пункты 1-9 этого списка машинно. Ручная сверка стабильно расходится с реальностью: так разъехались счётчики тестов (94 / 139 / 141 в трёх файлах) и номера строк в самом чек-листе.
+
 🔴 **9. GitHub Release с ассетами - ОБЯЗАТЕЛЕН, иначе one-liner'ы отдают СТАРУЮ версию.**
 `get.ps1` и `install.ps1` берут скрипт из **последнего GitHub Release** (fail-closed, без отката на main) и сверяют SHA256 с ассетом `WinClean.ps1.sha256`. Просто `git push` новую версию НЕ публикует - пользователи продолжат получать предыдущий релиз.
 ```powershell
@@ -189,7 +192,7 @@ Publish-PSResource -Path .\WinClean.ps1 -Repository PSGallery -ApiKey $env:PSGAL
 **Проверки (3 job'а):**
 1. **lint** - PSScriptAnalyzer (Warning, Error)
 2. **syntax** - Проверка синтаксиса PowerShell
-3. **test** - Pester тесты (181, запускается после lint и syntax; интеграционные требуют admin - на GitHub runners это выполняется)
+3. **test** - Pester тесты (187, запускается после lint и syntax; интеграционные требуют admin - на GitHub runners это выполняется)
 
 **Исключения PSScriptAnalyzer** (допустимые для CLI):
 - PSAvoidUsingWriteHost - это интерактивная утилита
@@ -198,7 +201,7 @@ Publish-PSResource -Path .\WinClean.ps1 -Repository PSGallery -ApiKey $env:PSGAL
 
 ### Pester тесты (v2.13+)
 
-- `tests/Helpers.Tests.ps1` - 65 unit-тестов, `tests/Fixes.Tests.ps1` - 91 тест, `tests/Integration.Tests.ps1` - 25 интеграционных (песочница ФС, требуют admin)
+- `tests/Helpers.Tests.ps1` - 65 unit-тестов, `tests/Fixes.Tests.ps1` - 94 теста, `tests/Integration.Tests.ps1` - 28 интеграционных (песочница ФС, требуют admin)
 - Особенности: функции в BeforeAll (не AST), regex для locale-независимости, отдельные It блоки
 
 ---
@@ -272,7 +275,14 @@ Publish-PSResource -Path .\WinClean.ps1 -Repository PSGallery -ApiKey $env:PSGAL
 ## 9. Тестирование
 
 ```powershell
-Invoke-Pester ./tests -Output Detailed              # 181 Pester тест (65+91+25)
+# 🔴 ПЕРЕД РЕЛИЗОМ - одна команда вместо ручного чек-листа (exit 1 при провале):
+pwsh tools/Invoke-ReleaseCheck.ps1                  # версия во всех 9 местах, тире, счётчики
+                                                    # тестов в доках, CHANGELOG, синтаксис,
+                                                    # линтер, Pester, смоук, чистота git
+pwsh tools/Invoke-ReleaseCheck.ps1 -IncludeStand    # + боевой прогон на VM (минуты)
+pwsh tools/Invoke-ReleaseCheck.ps1 -VerifyPublished # ПОСЛЕ выпуска: ассеты релиза и SHA256
+
+Invoke-Pester ./tests -Output Detailed              # 187 Pester тест (65+94+28)
 pwsh tools/Invoke-SmokeTest.ps1                     # Смоук: ReportOnly + геометрия UI
 pwsh tools/proxmox/Invoke-StandTest.ps1 -Mode Report # Стенд на Proxmox (RU=VM 190, EN: -ConfigPath ...en.json = VM 191)
 # Ночная матрица: cron 03:30 на proxmos (/opt/winclean-stand, /etc/cron.d/winclean-stand), отчёт в Telegram

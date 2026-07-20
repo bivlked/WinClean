@@ -44,7 +44,7 @@ Windows Update driver listing, run-to-run delta and HTML report. See CLAUDE.md.
 
 ### Tests
 
-- 181 Pester tests (was 141): 38 new validation tests covering every fix and feature above, plus an integration test proving that freshly written temp files survive cleanup
+- 187 Pester tests (was 141): 44 new validation tests covering every fix and feature above, plus an integration test proving that freshly written temp files survive cleanup
 
 ---
 
