@@ -55,9 +55,91 @@ place where that could happen.
 - winget source update timeouts and result JSON write failures now count as warnings; the
   latter matters because an automated stand would otherwise read the previous run's file
 
+### Fixed (second pass: full-codebase audit)
+
+Bootstrap scripts, the most security-sensitive code here since they download and run
+elevated code from the internet:
+
+- **SHA256 verification was optional.** It sat inside `if ($hashAsset)`, so a release
+  published without the hash asset ran completely unverified, silently. Removing a file
+  is easier than forging one, which made this the obvious thing to attack. Both assets
+  are now mandatory
+- **A missing asset fell back to `raw.githubusercontent.com` at the release tag**, which
+  the comment right above it described as "fail closed". Git tags are movable; release
+  assets are not. The fallback is gone
+- **Hashes were compared with `-notlike`**, so the published hash was treated as a
+  wildcard pattern: a single `*` in that file would "verify" any download and print
+  `SHA256 verified.` Now a literal, case-insensitive comparison with a format check
+- `install.ps1` **trusted `$env:ProgramFiles`**, a user-writable environment variable, to
+  locate `pwsh.exe` and the install directory - and then pointed an elevated desktop
+  shortcut at them. Resolved through `[Environment]::GetFolderPath` instead, with the
+  install path rejected if it contains characters that would inject into the shortcut
+  command line
+- Download URLs from the API response are validated (https, GitHub host only), redirects
+  are capped, failures set a non-zero exit code, and `-ReportOnly $false` no longer
+  produces an opaque binding error after the download
+
+Main script:
+
+- **Windows Update cache was wiped right after updates were downloaded.** Payloads
+  waiting for a reboot live in that folder, so the run reported freed gigabytes that had
+  to be downloaded all over again
+- **The Recycle Bin was read with the wrong column**: index 2 is "Date deleted", not
+  "Size", so the fallback parsed a date as a size. Emptiness is now decided by item
+  count - a size of zero can equally mean "the shell would not say"
+- **Path protection did not normalize**, so `C:\PROGRA~1` and `C:\Windows\..\Windows`
+  bypassed it entirely
+- **Empty environment variables produced dangerous paths**: under SYSTEM
+  `"$env:LOCALAPPDATA\Temp"` collapses to `\Temp`, which resolves against the current
+  drive, and an empty `$env:TEMP` made the whole temp cleanup throw
+- **DISM exit code 3010** ("success, reboot required") was reported as a warning and
+  never set the reboot flag, painting successful runs yellow; code 87 was labelled
+  "cleanup not needed" when it actually means an invalid parameter
+- **`pnputil` output was merged with stderr** before being cast to XML, so a single
+  warning line made driver store cleanup fail silently every week
+- **Driver packages were grouped by INF name alone.** Generic names are shipped by
+  several vendors, so one vendor's package could be declared superseded by another's.
+  Now grouped by INF plus provider plus class
+- **PSWindowsUpdate version detection returned an array** with two copies installed, and
+  the version threshold it compared against never existed. Capability is now queried
+  from the cmdlet itself
+- **Update search errors were only reported when zero updates were found**, so a failed
+  system search next to a successful driver search looked like a clean run
+- **DISM and Disk Cleanup results were missing from "Space freed"** entirely - the two
+  most productive steps of a run. Free space is now measured around them
+- `Format-FileSize` uses the invariant culture (ru-RU produced a no-break space that
+  broke parsing of our own output), handles terabytes and negative values
+- Category breakdown shows the remainder instead of silently truncating to five rows
+- Process kills now terminate the whole tree, so a killed winget does not leave an
+  installer running against the system
+- Removed dead code: an unused `-RemoveFolder` parameter, a "MEF Cache" section pointing
+  at a folder Visual Studio never creates, a duplicate DNS flush, an empty Firefox entry
+
+### Changed
+
+- Self-update check is now gated by `-SkipUpdates`, and the disk space report by
+  `-SkipCleanup` - both used to run regardless
+- Driver store cleanup runs before DISM, so the component store pass reclaims what it
+  leaves behind in the same run instead of a week later
+- A stale result JSON is deleted at startup, and an aborted run records why - automation
+  could previously read the previous run's file as the current outcome
+
 ### Tests
 
-- 204 Pester tests (was 187): 17 new regression tests, one per silent failure above
+- 207 Pester tests (was 141 in 2.15)
+- **The helper test suite now dot-sources WinClean.ps1 instead of testing pasted copies
+  of its functions.** The copies were a tautology - a bug in the product could not fail
+  them - and they had already drifted apart from it, which the change immediately
+  exposed
+- Regex-based tests are scoped to the function under test. Verified case: the TEMP age
+  filter test was matching an identical string in the kernel dump cleanup, so it passed
+  with the filter deleted. One test could never match at all
+- Skipped tests now fail the build and the release gate: the integration suite silently
+  skipped itself without administrator rights, leaving a green run that verified nothing
+- The stand verifies that the result JSON belongs to the current run, fails on
+  unexpected warnings, and requires a preview run to free exactly zero bytes
+- CI lints and syntax-checks `get.ps1`, `install.ps1`, `tools/` and `tests/` - previously
+  only the main script - and runs the smoke test
 
 ---
 

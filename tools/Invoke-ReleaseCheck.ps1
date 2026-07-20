@@ -82,7 +82,7 @@ if (-not $version) {
     }
 
     $missing = @($versionSites | Where-Object { -not $_.Ok } | ForEach-Object { $_.What })
-    Add-Result -Name "Version $version is consistent in all 9 places" -Passed ($missing.Count -eq 0) `
+    Add-Result -Name "Version $version is consistent in all $($versionSites.Count) places" -Passed ($missing.Count -eq 0) `
         -Detail $(if ($missing) { "не совпадает: $($missing -join ', ')" } else { '' })
 }
 
@@ -95,8 +95,13 @@ if ($version) {
 
 # --- 3. No em/en dashes anywhere (absolute project rule) ---------------------
 # grep -P lies in the C locale, so the check is done in PowerShell directly.
-$dashFiles = @('README.md', 'README_RU.md', 'CHANGELOG.md', 'CONTRIBUTING.md',
-               'SECURITY.md', 'CLAUDE.md', 'WinClean.ps1', 'get.ps1', 'install.ps1')
+$dashFiles = @(
+    'README.md', 'README_RU.md', 'CHANGELOG.md', 'CONTRIBUTING.md',
+    'SECURITY.md', 'CLAUDE.md', 'WinClean.ps1', 'get.ps1', 'install.ps1'
+) + @(Get-ChildItem -Path (Join-Path $repoRoot 'tests'), (Join-Path $repoRoot 'tools') `
+        -Filter '*.ps1' -Recurse -ErrorAction SilentlyContinue |
+      ForEach-Object { $_.FullName.Substring($repoRoot.Length + 1) })
+
 $withDashes = foreach ($f in $dashFiles) {
     $full = Join-Path $repoRoot $f
     if (-not (Test-Path $full)) { continue }
@@ -120,7 +125,14 @@ Add-Result -Name 'PowerShell syntax is valid' -Passed (-not $syntaxErrors) `
 # --- 5. PSScriptAnalyzer: no Error-level findings ----------------------------
 # Warnings are expected and documented in CLAUDE.md (Write-Host, empty catch blocks).
 if (Get-Module -ListAvailable PSScriptAnalyzer) {
-    $analyzerErrors = @(Invoke-ScriptAnalyzer -Path $scriptPath -Severity Error)
+    # get.ps1 and install.ps1 are shipped to users by the one-liners and caused the
+    # worst incident in this project, so they are linted too
+    $analyzerErrors = @(
+        foreach ($f in 'WinClean.ps1', 'get.ps1', 'install.ps1') {
+            $full = Join-Path $repoRoot $f
+            if (Test-Path $full) { Invoke-ScriptAnalyzer -Path $full -Severity Error }
+        }
+    )
     Add-Result -Name 'PSScriptAnalyzer: no errors' -Passed ($analyzerErrors.Count -eq 0) `
         -Detail $(if ($analyzerErrors) { ($analyzerErrors | Select-Object -First 3 | ForEach-Object { "$($_.RuleName):$($_.Line)" }) -join ', ' } else { '' })
 } else {
@@ -133,8 +145,16 @@ $pesterCount = $null
 if (Get-Module -ListAvailable Pester) {
     $pester = Invoke-Pester -Path (Join-Path $repoRoot 'tests') -PassThru -Output None
     $pesterCount = $pester.TotalCount
-    Add-Result -Name "Pester: $($pester.PassedCount)/$($pester.TotalCount) passed" -Passed ($pester.FailedCount -eq 0) `
-        -Detail $(if ($pester.FailedCount) { ($pester.Failed | Select-Object -First 3 | ForEach-Object { $_.ExpandedPath }) -join '; ' } else { '' })
+    # Skipped tests count as a failure of the gate. The integration suite - the only
+    # layer that executes real cleanup code - skips itself without administrator rights,
+    # and a release must never go out on "176 of 204 passed, the rest silently absent".
+    $notRun = $pester.SkippedCount + $pester.NotRunCount
+    Add-Result -Name "Pester: $($pester.PassedCount)/$($pester.TotalCount) passed, none skipped" `
+        -Passed ($pester.FailedCount -eq 0 -and $notRun -eq 0) `
+        -Detail $(
+            if ($pester.FailedCount) { ($pester.Failed | Select-Object -First 3 | ForEach-Object { $_.ExpandedPath }) -join '; ' }
+            elseif ($notRun) { "$notRun тест(ов) не выполнено - нужны права администратора" }
+            else { '' })
 
     $countClaims = @(
         @{ File = 'CLAUDE.md';       Pattern = "$pesterCount Pester" }
@@ -168,8 +188,12 @@ try {
         -Detail $(if ($dirty) { "$($dirty.Count) файл(ов) не закоммичено" } else { '' })
 
     $branchInfo = (& git status -sb | Select-Object -First 1)
+    # "## main" without "...origin/main" means there is no upstream at all - that is not
+    # "in sync", it is "nothing to sync with"
+    $hasUpstream = $branchInfo -match '\.\.\.'
     $notPushed = $branchInfo -match '\[(ahead|behind)'
-    Add-Result -Name 'Branch is in sync with origin' -Passed (-not $notPushed) -Detail $(if ($notPushed) { $branchInfo } else { '' })
+    Add-Result -Name 'Branch is in sync with origin' -Passed ($hasUpstream -and -not $notPushed) `
+        -Detail $(if (-not $hasUpstream) { "нет upstream: $branchInfo" } elseif ($notPushed) { $branchInfo } else { '' })
 } finally {
     Pop-Location
 }

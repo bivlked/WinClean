@@ -30,7 +30,11 @@ param(
     [string]$Source = 'local',
 
     [string]$ConfigPath = (Join-Path $PSScriptRoot 'stand.config.json'),
-    [switch]$KeepRunning
+    [switch]$KeepRunning,
+
+    # v2.17: warnings are the silent-failure alarm; the stand fails above this budget.
+    # One known warning is expected on both VMs (a single busy event log channel).
+    [int]$MaxWarnings = 1
 )
 
 $ErrorActionPreference = 'Stop'
@@ -106,6 +110,13 @@ $timeout = switch ($Mode) {
 }
 
 Write-Host "[3/6] Running WinClean ($Mode, timeout ${timeout}s)..." -ForegroundColor Cyan
+# v2.17: delete artifacts from any previous run inside the guest. A rollback normally
+# removes them, but if WinClean fails to write a fresh result the stand would otherwise
+# read the previous one and report a PASS built on stale data.
+$null = Invoke-GuestCommand -Config $cfg -UsePwsh -Script @"
+Remove-Item -LiteralPath '$guestJson', '$guestLog', 'C:\Windows\Temp\winclean-console.txt' -Force -ErrorAction SilentlyContinue
+"@
+$runStartedUtc = (Get-Date).ToUniversalTime()
 # Run the script as a CHILD pwsh with stdout redirected to a file in the guest:
 # in-process invocation would turn Write-Host into InformationRecords (breaking
 # -NoNewline lines) and pipe non-ASCII output through lossy console codepages.
@@ -146,9 +157,35 @@ if (-not $jsonRaw) {
 } else {
     $result = $jsonRaw | ConvertFrom-Json
     if ($result.ErrorsCount -ne 0) { $failures += "ErrorsCount = $($result.ErrorsCount) (expected 0)" }
-    if ($Mode -eq 'Report' -and -not $result.ReportOnly) { $failures += "ReportOnly not confirmed in result JSON" }
-    if ($Mode -ne 'Report' -and [long]$result.TotalFreedBytes -le 0) {
-        $failures += "Full mode freed nothing (TotalFreedBytes = $($result.TotalFreedBytes))"
+
+    # The JSON must belong to THIS run (v2.17)
+    $stamp = try { [datetime]::Parse($result.Timestamp).ToUniversalTime() } catch { $null }
+    if (-not $stamp) {
+        $failures += "Result JSON has no parseable Timestamp"
+    } elseif ($stamp -lt $runStartedUtc.AddMinutes(-1)) {
+        $failures += "Result JSON is stale (written $stamp, run started $runStartedUtc)"
+    }
+
+    if ($result.Aborted) { $failures += "Run aborted early: $($result.Aborted)" }
+
+    # Warnings are the entire silent-failure alarm added in v2.16/v2.17 - ignoring them
+    # here would switch that alarm off precisely where it matters most
+    if ([int]$result.WarningsCount -gt $MaxWarnings) {
+        $failures += "WarningsCount = $($result.WarningsCount) (allowed: $MaxWarnings)"
+    }
+    if ($result.ControlledFolderAccess -eq 'unknown') {
+        $failures += "Controlled Folder Access state could not be verified - cleanup figures are unreliable"
+    }
+
+    if ($Mode -eq 'Report') {
+        if (-not $result.ReportOnly) { $failures += "ReportOnly not confirmed in result JSON" }
+        # A preview that frees bytes is the 18.07 incident happening again
+        if ([long]$result.TotalFreedBytes -ne 0) {
+            $failures += "Report mode freed $($result.TotalFreedBytes) bytes - it must change nothing"
+        }
+    } elseif ([long]$result.TotalFreedBytes -le 1MB) {
+        # One byte used to be enough to pass; a real run on a rolled-back VM frees far more
+        $failures += "Full mode freed almost nothing (TotalFreedBytes = $($result.TotalFreedBytes))"
     }
 }
 

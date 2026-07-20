@@ -21,18 +21,28 @@ BeforeAll {
     $scriptPath = Join-Path $PSScriptRoot ".." "WinClean.ps1"
     $scriptContent = Get-Content $scriptPath -Raw
 
-    # Extract helper functions for testing
     $ast = [System.Management.Automation.Language.Parser]::ParseFile($scriptPath, [ref]$null, [ref]$null)
-    $functions = $ast.FindAll({
+    $script:AllFunctions = $ast.FindAll({
         param($node)
         $node -is [System.Management.Automation.Language.FunctionDefinitionAst]
     }, $true)
 
-    foreach ($func in $functions) {
-        if ($func.Name -eq 'ConvertFrom-HumanReadableSize') {
-            Invoke-Expression $func.Extent.Text
-        }
+    # v2.17: scopes a regex to one function. A match over the whole file stays green
+    # even when the code under test is deleted, because the same string also lives in a
+    # comment, in .RELEASENOTES or in another function. Verified case: the TEMP age
+    # filter test was matching the kernel dump cleanup instead.
+    function Get-FunctionBody {
+        param([Parameter(Mandatory)][string]$Name)
+        $fn = $script:AllFunctions | Where-Object { $_.Name -eq $Name } | Select-Object -First 1
+        if (-not $fn) { throw "Function '$Name' not found in WinClean.ps1" }
+        return $fn.Extent.Text
     }
+
+    # v2.17: dot-source the product instead of Invoke-Expression on an extracted
+    # function. Same effect for the few tests that call a helper directly, but without
+    # re-implementing PowerShell's own loading and without the analyzer warning.
+    # WinClean.ps1 guards its entry point, so nothing is executed by loading it.
+    . $scriptPath
 }
 
 #region A1: Docker Regex Fix
@@ -91,9 +101,12 @@ Describe "A2: EventLogs WarningsCount Increment" -Tag "Fix", "A2", "EventLogs" {
     Fix: Added $script:Stats.WarningsCount++ in catch block
     #>
 
-    It "Script contains WarningsCount increment" {
-        # Check that WarningsCount++ is present in the script
-        $scriptContent | Should -Match '\$script:Stats\.WarningsCount\s*\+\+'
+    It "Clear-EventLogs increments the warning counter on failure" {
+        # v2.17: scoped to the function. The bare string occurs about 37 times in the
+        # file, so the old whole-file check stayed green even with the increment
+        # removed from this very function.
+        $body = Get-FunctionBody -Name 'Clear-EventLogs'
+        $body | Should -Match '\$script:Stats\.WarningsCount\s*\+\+'
     }
 
     It "WarningsCount is a valid property in Stats hashtable" {
@@ -125,7 +138,10 @@ Describe "A3: WindowsUpdate Null Results Handling" -Tag "Fix", "A3", "WindowsUpd
 
     It "Script contains null check for update results" {
         # Look for null check pattern near WindowsUpdate
-        $scriptContent | Should -Match '-not\s+\$\w*(result|update)'
+        # v2.17: scoped - the loose pattern matched any variable whose name contains
+        # "result" or "update", anywhere in 3700 lines
+        $body = Get-FunctionBody -Name 'Update-WindowsSystem'
+        $body | Should -Match '-not\s+\$results'
     }
 }
 
@@ -364,12 +380,26 @@ Describe "v2.14: Restore point 24h limit bypass" -Tag "Fix", "V214" {
 }
 
 Describe "v2.14: Safer cleanmgr categories" -Tag "Fix", "V214" {
+    BeforeAll {
+        # v2.17: both checks are scoped to the $categories array. The previous patterns
+        # ran against the whole file, where the same names appear in the explanatory
+        # comment above the array - and the ESD one used "$" in single-line mode, so it
+        # anchored to the end of the entire file and could never match at all.
+        $categoriesBlock = [regex]::Match(
+            (Get-FunctionBody -Name 'Invoke-StorageSense'), '(?s)\$categories = @\((.*?)\n\s*\)'
+        ).Groups[1].Value
+    }
+
+    It "The category list was found" {
+        $categoriesBlock | Should -Not -BeNullOrEmpty
+    }
+
     It "Does not auto-delete Previous Installations (Windows.old needs confirmation)" {
-        $scriptContent | Should -Not -Match '"Previous Installations",'
+        $categoriesBlock | Should -Not -Match 'Previous Installations'
     }
 
     It "Does not delete Windows ESD installation files (needed for Reset this PC)" {
-        $scriptContent | Should -Not -Match '"Windows ESD installation files"\s*\)?\s*[,)]?\s*$'
+        $categoriesBlock | Should -Not -Match 'Windows ESD installation files'
     }
 }
 
@@ -458,7 +488,10 @@ Describe "v2.16: Delivery Optimization cache path" -Tag "Fix", "V216" {
 
 Describe "v2.16: TEMP age filter" -Tag "Fix", "V216" {
     It "Remove-FolderContent accepts MinAgeDays" {
-        $scriptContent | Should -Match '\[int\]\$MinAgeDays'
+        # v2.17: scoped to the function - Clear-KernelDumps declares a parameter of the
+        # same name, so a whole-file match passed even with the TEMP filter deleted
+        $body = Get-FunctionBody -Name 'Remove-FolderContent'
+        $body | Should -Match '\[int\]\$MinAgeDays'
     }
 
     It "Clear-TempFiles passes MinAgeDays 1" {
@@ -498,7 +531,7 @@ Describe "v2.16: Controlled Folder Access preflight" -Tag "Fix", "V216" {
     }
 
     It "Exposes the flag in the result JSON" {
-        $scriptContent | Should -Match 'ControlledFolderAccess = \$script:Stats\.ControlledFolderAccess'
+        $scriptContent | Should -Match 'ControlledFolderAccess = \[string\]\$script:Stats\.ControlledFolderAccess'
     }
 
     It "Reports 'unknown' when the check itself fails" {
@@ -613,7 +646,7 @@ Describe "v2.16: Disk Cleanup timeout" -Tag "Fix", "V216" {
 Describe "v2.16: driver store cleanup" -Tag "Feature", "V216" {
     It "Enumerates driver packages as XML" {
         # Plain text output of pnputil switches language with the console code page
-        $scriptContent | Should -Match '/enum-drivers /devices /format xml'
+        $scriptContent | Should -Match "'/enum-drivers', '/devices', '/format', 'xml'"
     }
 
     It "Only removes packages with no bound device AND a newer sibling" {
@@ -685,7 +718,7 @@ Describe "v2.16: silent failures are reported" -Tag "Fix", "V216", "SilentFailur
     }
 
     It "pnputil exit code is checked before parsing" {
-        $scriptContent | Should -Match 'pnputil /enum-drivers returned \$pnpExit'
+        $scriptContent | Should -Match 'pnputil /enum-drivers returned \$\(\$pnp\.ExitCode\)'
     }
 
     It "Unparseable driver packages are counted, not silently dropped" {

@@ -6,6 +6,15 @@ on:
   pull_request:
     branches: [main]
 
+# Least privilege by default: nothing here writes to the repository
+permissions:
+  contents: read
+
+# A newer push supersedes an in-flight run for the same ref
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   lint:
     name: PSScriptAnalyzer
@@ -43,15 +52,23 @@ jobs:
             'PSAvoidOverwritingBuiltInCmdlets'
           )
 
-          $results = Invoke-ScriptAnalyzer -Path ./WinClean.ps1 -Severity Error,Warning -ExcludeRule $excludeRules -ReportSummary
+          # v2.17: get.ps1 and install.ps1 are what users actually execute from the
+          # internet, and the worst incident in this project came from get.ps1 - yet
+          # neither was ever linted here. tools/ and tests/ are covered too.
+          $paths = @('./WinClean.ps1', './get.ps1', './install.ps1') +
+                   (Get-ChildItem ./tools, ./tests -Filter *.ps1 -Recurse | ForEach-Object FullName)
+
+          $results = foreach ($p in $paths) {
+            Invoke-ScriptAnalyzer -Path $p -Severity Error,Warning -ExcludeRule $excludeRules
+          }
 
           if ($results) {
-            $results | Format-Table -AutoSize
+            $results | Format-Table -AutoSize ScriptName, Line, RuleName, Message
             Write-Host ""
             Write-Host "::error::PSScriptAnalyzer found $($results.Count) issue(s)"
             exit 1
           } else {
-            Write-Host "::notice::PSScriptAnalyzer: No issues found!"
+            Write-Host "::notice::PSScriptAnalyzer: No issues found in $($paths.Count) file(s)!"
           }
 
   syntax:
@@ -65,20 +82,22 @@ jobs:
       - name: Check PowerShell syntax
         shell: pwsh
         run: |
-          $errors = $null
-          $ast = [System.Management.Automation.Language.Parser]::ParseFile(
-            "$PWD/WinClean.ps1",
-            [ref]$null,
-            [ref]$errors
-          )
+          $failed = $false
+          $files = @('./WinClean.ps1', './get.ps1', './install.ps1') +
+                   (Get-ChildItem ./tools, ./tests -Filter *.ps1 -Recurse | ForEach-Object FullName)
 
-          if ($errors) {
-            Write-Host "::error::Syntax errors found:"
-            $errors | ForEach-Object { Write-Host "  - $_" }
-            exit 1
-          } else {
-            Write-Host "::notice::Syntax check passed!"
+          foreach ($file in $files) {
+            $errors = $null
+            $null = [System.Management.Automation.Language.Parser]::ParseFile($file, [ref]$null, [ref]$errors)
+            if ($errors) {
+              $failed = $true
+              Write-Host "::error::Syntax errors in ${file}:"
+              $errors | ForEach-Object { Write-Host "  - $_" }
+            }
           }
+
+          if ($failed) { exit 1 }
+          Write-Host "::notice::Syntax check passed for $($files.Count) file(s)!"
 
   test:
     name: Pester Tests
@@ -93,20 +112,36 @@ jobs:
         shell: pwsh
         run: |
           Set-PSRepository PSGallery -InstallationPolicy Trusted
-          Install-Module Pester -Force -Scope CurrentUser -MinimumVersion 5.0
+          # Upper bound: Pester 6 will change semantics, and it must not arrive silently
+          Install-Module Pester -Force -Scope CurrentUser -MinimumVersion 5.0 -MaximumVersion 5.99.99
 
       - name: Run Pester Tests
         shell: pwsh
         run: |
           $config = New-PesterConfiguration
           $config.Run.Path = "./tests"
-          $config.Run.Exit = $true
+          $config.Run.PassThru = $true
           $config.Output.Verbosity = "Detailed"
           $config.TestResult.Enabled = $true
           $config.TestResult.OutputFormat = "NUnitXml"
           $config.TestResult.OutputPath = "./test-results.xml"
 
-          Invoke-Pester -Configuration $config
+          $result = Invoke-Pester -Configuration $config
+
+          # v2.17: skipped tests fail the build. The integration suite silently skips
+          # itself without administrator rights, and a green run that verified nothing
+          # is worse than a red one. GitHub Windows runners are elevated, so any skip
+          # here means something is actually wrong.
+          $notRun = $result.SkippedCount + $result.NotRunCount
+          if ($notRun -gt 0) {
+            Write-Host "::error::$notRun test(s) did not run - integration coverage is missing"
+            exit 1
+          }
+          if ($result.FailedCount -gt 0) {
+            Write-Host "::error::$($result.FailedCount) test(s) failed"
+            exit 1
+          }
+          Write-Host "::notice::All $($result.PassedCount) tests passed"
 
       - name: Upload Test Results
         uses: actions/upload-artifact@v4
@@ -114,3 +149,19 @@ jobs:
         with:
           name: test-results
           path: ./test-results.xml
+
+  smoke:
+    name: Smoke Run
+    runs-on: windows-latest
+    needs: [lint, syntax]
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # v2.17: the smoke runner checks console box geometry and the result JSON of a
+      # real ReportOnly run. It existed since 2.15 but was never wired into CI, so the
+      # class of "misaligned frame" bugs could only be caught by hand.
+      - name: Run smoke test (ReportOnly)
+        shell: pwsh
+        run: pwsh -NoProfile -File ./tools/Invoke-SmokeTest.ps1

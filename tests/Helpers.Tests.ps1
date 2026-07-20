@@ -12,225 +12,24 @@
 #>
 
 BeforeAll {
-    # Define helper functions directly (extracted from WinClean.ps1)
-    # This is more reliable than AST parsing in Pester context
+    # v2.17: the real WinClean.ps1 is dot-sourced instead of pasting copies of its
+    # functions here. The copies were a tautology - they tested themselves, so a bug in
+    # the product could never fail a test, and they had already drifted apart from it.
+    # WinClean.ps1 guards its own entry point (`if ($MyInvocation.InvocationName -ne '.'`),
+    # so dot-sourcing defines the functions without running any maintenance.
+    $script:WinCleanPath = (Resolve-Path (Join-Path $PSScriptRoot '..' 'WinClean.ps1')).Path
 
-    function Format-FileSize {
-        param([long]$Bytes)
-        if ($Bytes -ge 1GB) { return "{0:N2} GB" -f ($Bytes / 1GB) }
-        if ($Bytes -ge 1MB) { return "{0:N2} MB" -f ($Bytes / 1MB) }
-        if ($Bytes -ge 1KB) { return "{0:N2} KB" -f ($Bytes / 1KB) }
-        return "$Bytes B"
-    }
+    $script:IsElevated = ([Security.Principal.WindowsPrincipal]::new(
+        [Security.Principal.WindowsIdentity]::GetCurrent()
+    )).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 
-    function ConvertFrom-HumanReadableSize {
-        param([string]$SizeString)
-        if (-not $SizeString) { return 0 }
-        $normalized = ($SizeString -replace '[\u00A0\u202F\u2007]', ' ').Trim()
-        $normalized = $normalized -replace 'КБ$', 'KB' -replace 'МБ$', 'MB' -replace 'ГБ$', 'GB' -replace 'ТБ$', 'TB' -replace 'Б$', 'B'
-        if ($normalized -match '^([\d.,]+)\s*([KMGT]?B)$') {
-            $value = [double]($Matches[1] -replace ',', '.')
-            $unit = $Matches[2].ToUpper()
-            $multiplier = switch ($unit) {
-                'B'  { 1 }
-                'KB' { 1KB }
-                'MB' { 1MB }
-                'GB' { 1GB }
-                'TB' { 1TB }
-                default { 1 }
-            }
-            return [long]($value * $multiplier)
-        }
-        return 0
-    }
+    # WinClean.ps1 declares #Requires -RunAsAdministrator, so without elevation the
+    # dot-source throws. Fail loudly rather than silently testing nothing.
+    . $script:WinCleanPath
 
-    function Get-FolderSize {
-        param([string]$Path)
-        if (-not (Test-Path -LiteralPath $Path -ErrorAction SilentlyContinue)) {
-            return 0
-        }
-        try {
-            $size = (Get-ChildItem -LiteralPath $Path -Recurse -Force -File -ErrorAction SilentlyContinue |
-                     Measure-Object -Property Length -Sum -ErrorAction SilentlyContinue).Sum
-            return [long]($size ?? 0)
-        } catch {
-            return 0
-        }
-    }
-
-    function Test-PathProtected {
-        param([string]$Path)
-        $normalizedPath = $Path.TrimEnd('\', '/')
-        foreach ($protected in $script:ProtectedPaths) {
-            $normalizedProtected = $protected.TrimEnd('\', '/')
-            if ($normalizedPath -ieq $normalizedProtected) {
-                return $true
-            }
-        }
-        return $false
-    }
-
-    function Test-InteractiveConsole {
-        try {
-            if ($Host.Name -ne 'ConsoleHost') { return $false }
-            $null = [Console]::WindowWidth
-            return $true
-        } catch {
-            return $false
-        }
-    }
-
-    function Test-PendingReboot {
-        $rebootRequired = $false
-        $reasons = @()
-
-        $wuKey = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired"
-        if (Test-Path $wuKey) {
-            $rebootRequired = $true
-            $reasons += "Windows Update"
-        }
-
-        $cbsKey = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending"
-        if (Test-Path $cbsKey) {
-            $rebootRequired = $true
-            $reasons += "Component Servicing"
-        }
-
-        $pfroKey = "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager"
-        try {
-            $pfroValue = Get-ItemProperty -Path $pfroKey -Name PendingFileRenameOperations -ErrorAction SilentlyContinue
-            if ($pfroValue.PendingFileRenameOperations) {
-                $rebootRequired = $true
-                $reasons += "File Rename Operations"
-            }
-        } catch { }
-
-        $compNameKey = "HKLM:\SYSTEM\CurrentControlSet\Control\ComputerName"
-        try {
-            $activeName = (Get-ItemProperty "$compNameKey\ActiveComputerName" -ErrorAction SilentlyContinue).ComputerName
-            $pendingName = (Get-ItemProperty "$compNameKey\ComputerName" -ErrorAction SilentlyContinue).ComputerName
-            if ($activeName -ne $pendingName) {
-                $rebootRequired = $true
-                $reasons += "Computer Rename"
-            }
-        } catch { }
-
-        return @{
-            RebootRequired = $rebootRequired
-            Reasons        = $reasons
-        }
-    }
-
-    function Get-RecycleBinSize {
-        $totalSize = [long]0
-        try {
-            $shell = New-Object -ComObject Shell.Application
-            $recycleBin = $shell.Namespace(0xA)
-            foreach ($item in $recycleBin.Items()) {
-                try {
-                    $itemSize = $item.ExtendedProperty("System.Size")
-                    if ($itemSize) {
-                        $totalSize += [long]$itemSize
-                    } else {
-                        $sizeStr = $recycleBin.GetDetailsOf($item, 2)
-                        if ($sizeStr) {
-                            $totalSize += ConvertFrom-HumanReadableSize $sizeStr
-                        }
-                    }
-                } catch { }
-            }
-        } catch { }
-        return $totalSize
-    }
-
-    function Write-Log {
-        param(
-            [Parameter(Mandatory)]
-            [string]$Message,
-            [ValidateSet('INFO', 'SUCCESS', 'WARNING', 'ERROR', 'TITLE', 'SECTION', 'DETAIL')]
-            [string]$Level = 'INFO',
-            [switch]$NoNewLine,
-            [switch]$NoTimestamp,
-            [switch]$NoLog
-        )
-
-        $indent = "  "
-        $boxWidth = 70
-        $timestamp = (Get-Date).ToString('HH:mm:ss')
-        $logMessage = "[$timestamp] [$Level] $Message"
-
-        if (-not $NoLog) {
-            try {
-                $logMessage | Out-File -FilePath $script:LogPath -Append -Encoding utf8 -ErrorAction SilentlyContinue
-            } catch { }
-        }
-
-        $colors = @{
-            INFO    = @{ Tag = 'Cyan';    Message = 'White' }
-            SUCCESS = @{ Tag = 'Green';   Message = 'White' }
-            WARNING = @{ Tag = 'Yellow';  Message = 'Yellow' }
-            ERROR   = @{ Tag = 'Red';     Message = 'Red' }
-            TITLE   = @{ Tag = 'Magenta'; Message = 'Magenta' }
-            SECTION = @{ Tag = 'Cyan';    Message = 'Cyan' }
-            DETAIL  = @{ Tag = 'DarkGray';Message = 'Gray' }
-        }
-
-        $tagColors = $colors[$Level]
-
-        switch ($Level) {
-            'TITLE' {
-                $titleText = $Message.ToUpper()
-                $padding = [math]::Max(0, $boxWidth - $titleText.Length)
-                $leftPad = [math]::Floor($padding / 2)
-                $rightPad = $padding - $leftPad
-                $centeredTitle = (" " * $leftPad) + $titleText + (" " * $rightPad)
-                Write-Host ""
-                Write-Host "$indent╔$("═" * $boxWidth)╗" -ForegroundColor $tagColors.Tag
-                Write-Host "$indent║$centeredTitle║" -ForegroundColor $tagColors.Tag
-                Write-Host "$indent╚$("═" * $boxWidth)╝" -ForegroundColor $tagColors.Tag
-            }
-            'SECTION' {
-                Write-Host ""
-                Write-Host "$indent┌─ " -NoNewline -ForegroundColor DarkGray
-                Write-Host $Message -ForegroundColor $tagColors.Message
-                Write-Host "$indent└$("─" * 70)" -ForegroundColor DarkGray
-            }
-            'DETAIL' {
-                Write-Host "$indent  │ " -NoNewline -ForegroundColor DarkGray
-                Write-Host $Message -ForegroundColor $tagColors.Message -NoNewline:$NoNewLine
-                if (-not $NoNewLine) { Write-Host "" }
-            }
-            default {
-                Write-Host $indent -NoNewline
-                if (-not $NoTimestamp) {
-                    Write-Host "[$timestamp] " -NoNewline -ForegroundColor DarkGray
-                }
-                $tagText = switch ($Level) {
-                    'INFO'    { '[INFO]  ' }
-                    'SUCCESS' { '[OK]    ' }
-                    'WARNING' { '[WARN]  ' }
-                    'ERROR'   { '[ERROR] ' }
-                }
-                Write-Host $tagText -NoNewline -ForegroundColor $tagColors.Tag
-                Write-Host $Message -ForegroundColor $tagColors.Message -NoNewline:$NoNewLine
-                if (-not $NoNewLine) { Write-Host "" }
-            }
-        }
-    }
-
-    # Set up script-scope variables needed by some functions
-    $script:ProtectedPaths = @(
-        $env:SystemRoot,
-        "$env:SystemRoot\System32",
-        $env:ProgramFiles,
-        ${env:ProgramFiles(x86)},
-        $env:USERPROFILE,
-        "$env:SystemDrive\Users",
-        "$env:SystemDrive\Program Files",
-        "$env:SystemDrive\Program Files (x86)"
-    )
-
-    $script:LogPath = Join-Path $env:TEMP "WinClean_PesterTest_$(Get-Date -Format 'yyyyMMdd_HHmmss').log"
+    # Route the log somewhere disposable - the product picks %TEMP% by default and the
+    # logging tests below write real entries
+    $script:LogPath = Join-Path ([System.IO.Path]::GetTempPath()) "WinCleanTest_$(Get-Random).log"
 }
 
 AfterAll {
@@ -262,8 +61,18 @@ Describe "Format-FileSize" -Tag "Unit", "Helper" {
 
     It "Handles large values (TB range)" {
         $result = Format-FileSize -Bytes (1GB * 1500)
-        # Match format with various locale separators (thousand sep: space/comma/none, decimal: ./,)
-        $result | Should -Match "^[\d\s,.]+\s*GB$"
+        # v2.17: the product formats terabytes as TB (the old in-test copy of this
+        # function stopped at GB) and always uses the invariant culture, so the decimal
+        # separator is a dot regardless of the system locale
+        $result | Should -Be "1.46 TB"
+    }
+
+    It "Formats sizes independently of the system locale" {
+        # A no-break space as the group separator (the ru-RU default for "{0:N2}") would
+        # break our own log parsing in the smoke test and on the stand
+        $result = Format-FileSize -Bytes 1234567890
+        $result | Should -Be "1.15 GB"
+        $result | Should -Not -Match " "
     }
 
     It "Handles negative values gracefully" {

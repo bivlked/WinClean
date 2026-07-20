@@ -356,3 +356,12 @@ Describe "Sandbox: temp age filter is recursive" -Tag "Integration" -Skip:(-not 
         Test-Path (Join-Path $root 'Users\test\AppData\Local\Temp\fullyold') | Should -BeFalse
     }
 }
+
+Describe "Integration suite coverage" -Tag "Integration" {
+    It "The integration suite actually ran" {
+        # v2.17: every other Describe here is -Skip'd without administrator rights, so
+        # the whole behavioural layer used to vanish silently and the run stayed green.
+        # This test is deliberately NOT skippable: a non-elevated run must be visible.
+        $IsElevated | Should -BeTrue -Because 'integration tests need administrator rights; without them nothing real is verified'
+    }
+}

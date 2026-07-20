@@ -284,7 +284,10 @@ $script:Stats = [hashtable]::Synchronized(@{
     StartTime            = Get-Date
     CurrentStep          = 0
     TotalSteps           = 0  # Calculated dynamically in Start-WinClean
-    ControlledFolderAccess = $false  # v2.16: set when Defender CFA may block deletions
+    # v2.16: tri-state string, 'disabled' / 'enabled' / 'unknown'. Never a boolean:
+    # 'unknown' must not be mistaken for a verified state by consumers of the JSON
+    ControlledFolderAccess = 'unknown'
+    Aborted              = $null     # v2.17: set when the run stops before finishing
 })
 
 # Progress activities seen so far, so all of them can be closed at the end (v2.16)
@@ -884,9 +887,15 @@ function Format-FileSize {
     #>
     param([long]$Bytes)
 
-    if ($Bytes -ge 1GB) { return "{0:N2} GB" -f ($Bytes / 1GB) }
-    if ($Bytes -ge 1MB) { return "{0:N2} MB" -f ($Bytes / 1MB) }
-    if ($Bytes -ge 1KB) { return "{0:N2} KB" -f ($Bytes / 1KB) }
+    # Invariant culture (v2.17): with "{0:N2}" on ru-RU the group separator is a
+    # NO-BREAK space, which mixes locales in the log and quietly breaks anything that
+    # parses our own output (smoke test, stand assertions, ConvertFrom-HumanReadableSize)
+    $inv = [cultureinfo]::InvariantCulture
+    if ($Bytes -lt 0) { return "-" + (Format-FileSize (-$Bytes)) }
+    if ($Bytes -ge 1TB) { return [string]::Format($inv, "{0:N2} TB", $Bytes / 1TB) }
+    if ($Bytes -ge 1GB) { return [string]::Format($inv, "{0:N2} GB", $Bytes / 1GB) }
+    if ($Bytes -ge 1MB) { return [string]::Format($inv, "{0:N2} MB", $Bytes / 1MB) }
+    if ($Bytes -ge 1KB) { return [string]::Format($inv, "{0:N2} KB", $Bytes / 1KB) }
     return "$Bytes B"
 }
 
@@ -930,14 +939,34 @@ function ConvertFrom-HumanReadableSize {
 function Test-PathProtected {
     <#
     .SYNOPSIS
-        Checks if path is in protected list
+        Checks whether a path is a protected root itself (v2.17: normalized)
+    .DESCRIPTION
+        Guards the roots listed in $script:ProtectedPaths against being emptied.
+        Paths are resolved with GetFullPath first, otherwise the check is trivially
+        bypassed by an 8.3 name (C:\PROGRA~1), a "\\?\" prefix, a relative path or
+        a "C:\Windows\..\Windows" round trip.
+
+        Only the roots themselves are protected, not everything below them: the script
+        legitimately cleans %SystemRoot%\Temp and other subfolders. Callers that must
+        never touch a subtree pass explicit paths instead.
     #>
     param([string]$Path)
 
-    $normalizedPath = $Path.TrimEnd('\', '/')
+    if ([string]::IsNullOrWhiteSpace($Path)) { return $true }   # nothing sane to clean
+
+    try {
+        $normalizedPath = [System.IO.Path]::GetFullPath($Path).TrimEnd('\', '/')
+    } catch {
+        # Unparseable path: refuse rather than guess
+        return $true
+    }
 
     foreach ($protected in $script:ProtectedPaths) {
-        $normalizedProtected = $protected.TrimEnd('\', '/')
+        if ([string]::IsNullOrWhiteSpace($protected)) { continue }
+        try {
+            $normalizedProtected = [System.IO.Path]::GetFullPath($protected).TrimEnd('\', '/')
+        } catch { continue }
+
         if ($normalizedPath -ieq $normalizedProtected) {
             return $true
         }
@@ -1062,10 +1091,13 @@ function Remove-FolderContent {
             # v2.16: silence here is indistinguishable from "there was nothing to do".
             # Say it out loud - this is exactly how the Controlled Folder Access bug hid:
             # deletions were blocked without an error and the log simply stayed quiet.
-            $reason = if ($script:Stats.ControlledFolderAccess) {
-                ' (Controlled Folder Access is enabled and may be blocking it)'
-            } else {
-                ' (files are probably locked by a running process)'
+            # Compare explicitly against 'enabled': the field is tri-state, and the
+            # string 'unknown' is truthy in PowerShell - a plain truthiness test would
+            # confidently blame Controlled Folder Access for a state never checked
+            $reason = switch ($script:Stats.ControlledFolderAccess) {
+                'enabled' { ' (Controlled Folder Access is enabled and may be blocking it)' }
+                'unknown' { ' (files are probably locked, or Controlled Folder Access is blocking it - the check itself failed)' }
+                default   { ' (files are probably locked by a running process)' }
             }
             Write-Log "$Description - nothing freed, $(Format-FileSize $sizeBefore) still present$reason" -Level WARNING
             $script:Stats.WarningsCount++
@@ -1290,7 +1322,10 @@ function Update-WindowsSystem {
         }
 
         Import-Module PSWindowsUpdate -ErrorAction Stop
-        $moduleVersion = (Get-Module PSWindowsUpdate).Version
+        # v2.17: with two copies installed (CurrentUser + AllUsers) .Version returns an
+        # ARRAY, and every later comparison silently degrades into an array filter
+        $moduleVersion = (Get-Module PSWindowsUpdate | Sort-Object Version -Descending |
+                          Select-Object -First 1).Version
         Write-Log "PSWindowsUpdate v$moduleVersion loaded" -Level INFO
 
         # Register Microsoft Update service
@@ -1311,13 +1346,19 @@ function Update-WindowsSystem {
 
         $totalUpdates = $systemUpdates.Count + $driverUpdates.Count
 
+        # v2.17: report search errors regardless of how many updates were found. The
+        # check used to live inside the "zero updates" branch, so a failed system search
+        # paired with a successful driver search was reported as a clean run.
+        if ($wuSearchErrors) {
+            Write-Log "Update search completed with errors: $($wuSearchErrors[0])" -Level WARNING
+            Write-Log "Some updates may not have been discovered" -Level DETAIL
+            $script:Stats.WarningsCount++
+        }
+
         if ($totalUpdates -eq 0) {
             # Distinguish "no updates" from "search failed" (v2.14) - previously a
             # failed search was reported as "Windows is up to date"
-            if ($wuSearchErrors) {
-                Write-Log "Update search completed with errors: $($wuSearchErrors[0])" -Level WARNING
-                $script:Stats.WarningsCount++
-            } else {
+            if (-not $wuSearchErrors) {
                 Write-Log "Windows is up to date" -Level SUCCESS
             }
             return
@@ -1358,10 +1399,15 @@ function Update-WindowsSystem {
             ErrorAction     = 'SilentlyContinue'
         }
 
-        # Check module version for parameter compatibility
-        if ($moduleVersion -ge [version]"2.3.0") {
+        # Ask the cmdlet what it supports instead of guessing from a version number.
+        # v2.17: the old check compared against 2.3.0, a version PSWindowsUpdate never
+        # shipped, so the branch was dead - and would have misfired on an array anyway.
+        $installCmd = Get-Command Install-WindowsUpdate -ErrorAction SilentlyContinue
+        if ($installCmd -and -not $installCmd.Parameters.ContainsKey('IgnoreReboot')) {
             $installParams.Remove('IgnoreReboot')
-            $installParams['AutoReboot'] = $false
+            if ($installCmd.Parameters.ContainsKey('AutoReboot')) {
+                $installParams['AutoReboot'] = $false
+            }
         }
 
         $results = Install-WindowsUpdate @installParams
@@ -1473,7 +1519,7 @@ function Update-Applications {
         # Wait with timeout (5 minutes for check operation)
         $timeoutMs = 300000
         if (-not $process.WaitForExit($timeoutMs)) {
-            $process.Kill()
+            $process.Kill($true)
             Write-Log "Winget upgrade check timed out after 5 minutes" -Level WARNING
             $script:Stats.WarningsCount++
             Remove-Item $tempFile, $tempErrorFile -Force -ErrorAction SilentlyContinue
@@ -1555,7 +1601,7 @@ function Update-Applications {
         # Wait with timeout (20 minutes for upgrade operation - can take long with many updates)
         $timeoutMs = 1200000
         if (-not $upgradeProcess.WaitForExit($timeoutMs)) {
-            $upgradeProcess.Kill()
+            $upgradeProcess.Kill($true)   # $true: kill spawned installers too (v2.17)
             Write-Log "Winget upgrade timed out after 20 minutes" -Level WARNING
             $script:Stats.WarningsCount++
             return
@@ -1620,14 +1666,22 @@ function Clear-TempFiles {
     #>
     Write-Log "Temporary Files" -Level SECTION
 
-    # Define temp paths and remove duplicates (e.g., $env:TEMP often equals $env:LOCALAPPDATA\Temp)
+    # Define temp paths and remove duplicates (e.g., $env:TEMP often equals $env:LOCALAPPDATA\Temp).
+    # v2.17: entries built from an empty environment variable are dropped. Under SYSTEM or
+    # a stripped scheduled-task environment "$env:LOCALAPPDATA\Temp" collapses to "\Temp",
+    # which GetFullPath roots at the CURRENT DRIVE - so the script would wipe D:\Temp.
+    # An empty $env:TEMP made GetFullPath throw outright and killed the whole function.
     $tempPaths = @(
-        @{ Path = $env:TEMP; Desc = "User Temp" }
-        @{ Path = "$env:SystemRoot\Temp"; Desc = "Windows Temp" }
-        @{ Path = "$env:LOCALAPPDATA\Temp"; Desc = "Local Temp" }
-    ) | ForEach-Object {
-        $_.Path = [System.IO.Path]::GetFullPath($_.Path)
-        $_
+        @{ Path = $env:TEMP; Desc = "User Temp"; Base = $env:TEMP }
+        @{ Path = "$env:SystemRoot\Temp"; Desc = "Windows Temp"; Base = $env:SystemRoot }
+        @{ Path = "$env:LOCALAPPDATA\Temp"; Desc = "Local Temp"; Base = $env:LOCALAPPDATA }
+    ) | Where-Object { -not [string]::IsNullOrWhiteSpace($_.Base) } | ForEach-Object {
+        try {
+            $_.Path = [System.IO.Path]::GetFullPath($_.Path)
+            $_
+        } catch {
+            Write-Log "Skipping temp path '$($_.Desc)': $_" -Level DETAIL
+        }
     } | Group-Object Path | ForEach-Object { $_.Group[0] }
 
     foreach ($item in $tempPaths) {
@@ -1661,7 +1715,6 @@ function Clear-BrowserCaches {
             "$env:LOCALAPPDATA\Google\Chrome\User Data\Default\GPUCache"
             "$env:LOCALAPPDATA\Google\Chrome\User Data\Default\Service Worker\CacheStorage"
         )
-        "Firefox" = @()  # Handled separately due to profile structure
         "Yandex" = @(
             "$env:LOCALAPPDATA\Yandex\YandexBrowser\User Data\Default\Cache"
             "$env:LOCALAPPDATA\Yandex\YandexBrowser\User Data\Default\Code Cache"
@@ -1796,6 +1849,14 @@ function Clear-WindowsUpdateCache {
     #>
     Write-Log "Windows Update Cache" -Level SECTION
 
+    # v2.17: if the update phase left payloads waiting for a reboot, this folder holds
+    # them. Deleting it here means gigabytes get downloaded again after the restart,
+    # while the run proudly reports the freed space.
+    if ($script:Stats.RebootRequired) {
+        Write-Log "Updates are pending a reboot - keeping the cache (it holds their payloads)" -Level DETAIL
+        return
+    }
+
     if ($ReportOnly) {
         $size = Get-FolderSize -Path "$env:SystemRoot\SoftwareDistribution\Download"
         Write-Log "Would clean: Windows Update cache - $(Format-FileSize $size)" -Level DETAIL
@@ -1850,14 +1911,19 @@ function Get-RecycleBinSize {
         $recycleBin = $shell.Namespace(0xA)
         foreach ($item in $recycleBin.Items()) {
             try {
-                # Try ExtendedProperty first (more reliable)
+                # ExtendedProperty is exact and works for folders too (verified on 25H2:
+                # a deleted folder reports the total size of its contents)
                 $itemSize = $item.ExtendedProperty("System.Size")
                 if ($itemSize) {
                     $totalSize += [long]$itemSize
                 } else {
-                    # Fallback: try GetDetailsOf (index 2 = Size column)
-                    $sizeStr = $recycleBin.GetDetailsOf($item, 2)
-                    if ($sizeStr) {
+                    # Fallback for shells that do not expose the property.
+                    # v2.17: column index 3 is Size. Index 2 is "Date deleted" - the old
+                    # code parsed a date as a size, which quietly contributed zero.
+                    $sizeStr = $recycleBin.GetDetailsOf($item, 3)
+                    # Guard against a column-order change: a size always has a digit
+                    # followed by a unit, a date does not
+                    if ($sizeStr -and $sizeStr -match '\d.*[A-Za-zА-Яа-я]') {
                         $totalSize += ConvertFrom-HumanReadableSize $sizeStr
                     }
                 }
@@ -1871,6 +1937,23 @@ function Get-RecycleBinSize {
     return $totalSize
 }
 
+function Get-RecycleBinItemCount {
+    <#
+    .SYNOPSIS
+        Number of items in the Recycle Bin (v2.17)
+    .DESCRIPTION
+        Emptiness must be decided by count, not by size: a size of zero can also mean
+        "the shell would not tell us", and skipping the cleanup in that case leaves the
+        bin full while reporting it as already empty.
+    #>
+    try {
+        $shell = New-Object -ComObject Shell.Application
+        return @($shell.Namespace(0xA).Items()).Count
+    } catch {
+        return -1   # unknown
+    }
+}
+
 function Clear-WinCleanRecycleBin {
     <#
     .SYNOPSIS
@@ -1878,19 +1961,24 @@ function Clear-WinCleanRecycleBin {
     #>
     Write-Log "Recycle Bin" -Level SECTION
 
-    # Measure size before cleanup
+    # Measure size and count before cleanup. v2.17: emptiness is decided by the item
+    # count - a zero size can also mean the shell refused to report one, and skipping
+    # on that basis would leave a full bin described as already empty.
     $sizeBefore = Get-RecycleBinSize
+    $itemCount = Get-RecycleBinItemCount
 
     if ($ReportOnly) {
-        if ($sizeBefore -gt 0) {
+        if ($itemCount -eq 0) {
+            Write-Log "Recycle Bin is empty" -Level DETAIL
+        } elseif ($sizeBefore -gt 0) {
             Write-Log "Would clean: Recycle Bin - $(Format-FileSize $sizeBefore)" -Level DETAIL
         } else {
-            Write-Log "Recycle Bin is empty" -Level DETAIL
+            Write-Log "Would clean: Recycle Bin - $itemCount item(s), size unavailable" -Level DETAIL
         }
         return
     }
 
-    if ($sizeBefore -eq 0) {
+    if ($itemCount -eq 0) {
         Write-Log "Recycle Bin is already empty" -Level INFO
         return
     }
@@ -1906,7 +1994,12 @@ function Clear-WinCleanRecycleBin {
         }
         $script:Stats.FreedByCategory["Recycle Bin"] += $sizeBefore
 
-        Write-Log "Recycle Bin emptied - $(Format-FileSize $sizeBefore)" -Level SUCCESS
+        if ($sizeBefore -gt 0) {
+            Write-Log "Recycle Bin emptied - $(Format-FileSize $sizeBefore)" -Level SUCCESS
+        } else {
+            # Emptied, but the shell never told us how much it held (v2.17)
+            Write-Log "Recycle Bin emptied ($itemCount item(s), size was unavailable)" -Level SUCCESS
+        }
     } catch {
         # Fallback to COM method
         try {
@@ -1930,7 +2023,13 @@ function Clear-WinCleanRecycleBin {
                 $script:Stats.FreedByCategory["Recycle Bin"] += $freed
             }
 
-            Write-Log "Recycle Bin emptied ($count items) - $(Format-FileSize $freed)" -Level SUCCESS
+            if ($freed -gt 0) {
+                Write-Log "Recycle Bin emptied ($count items) - $(Format-FileSize $freed)" -Level SUCCESS
+            } else {
+                # v2.17: was SUCCESS regardless - a bin that refused to empty looked identical
+                Write-Log "Recycle Bin: $count item(s) processed, nothing freed - some items may be locked" -Level WARNING
+                $script:Stats.WarningsCount++
+            }
         } catch {
             Write-Log "Could not empty Recycle Bin: $_" -Level WARNING
             $script:Stats.WarningsCount++
@@ -2114,23 +2213,22 @@ function Clear-DNSCache {
     }
 
     try {
-        # Flush DNS cache using ipconfig
-        $result = ipconfig /flushdns 2>&1
-        $exitCode = $LASTEXITCODE
-
-        if ($exitCode -eq 0 -or $result -match "Successfully flushed|успешно") {
+        # v2.17: prefer the cmdlet - it is locale-independent and raises real errors.
+        # ipconfig was doing the same work a second time, and its success was matched
+        # against English/Russian text that depends on the console code page.
+        if (Get-Command Clear-DnsClientCache -ErrorAction SilentlyContinue) {
+            Clear-DnsClientCache -ErrorAction Stop
             Write-Log "DNS cache flushed successfully" -Level SUCCESS
         } else {
-            # Command completed but may have failed - log as warning
-            Write-Log "DNS cache flush returned unexpected result (exit code: $exitCode)" -Level WARNING
-            $script:Stats.WarningsCount++
+            $null = ipconfig /flushdns 2>&1
+            $exitCode = $LASTEXITCODE
+            if ($exitCode -eq 0) {
+                Write-Log "DNS cache flushed successfully" -Level SUCCESS
+            } else {
+                Write-Log "DNS cache flush failed (ipconfig exit code: $exitCode)" -Level WARNING
+                $script:Stats.WarningsCount++
+            }
         }
-
-        # Also clear DNS client cache via cmdlet if available
-        try {
-            Clear-DnsClientCache -ErrorAction SilentlyContinue
-        } catch { }
-
     } catch {
         Write-Log "Error flushing DNS cache: $_" -Level WARNING
         $script:Stats.WarningsCount++
@@ -2745,17 +2843,11 @@ function Clear-VisualStudio {
         Remove-FilesByPattern -Pattern $item.Pattern -Category "VS" -Description $item.Desc
     }
 
-    # MEF Cache
-    Write-Log "MEF Cache" -Level SECTION
-    $mefPath = "$env:LOCALAPPDATA\Microsoft\VisualStudio"
-    if (Test-Path $mefPath) {
-        Get-ChildItem -Path $mefPath -Directory -ErrorAction SilentlyContinue | ForEach-Object {
-            $mefCache = Join-Path $_.FullName "MEFCacheAssembly"
-            Remove-FolderContent -Path $mefCache -Category "VS" -Description "MEF Cache"
-        }
-    }
+    # MEF cache: no separate section - the real one is ComponentModelCache, already
+    # covered by the VS cache list above. "MEFCacheAssembly" (v2.16 and earlier) is a
+    # folder Visual Studio never creates, so the section only ever printed a heading.
 
-    # VS Code caches
+# VS Code caches
     Write-Log "VS Code Caches" -Level SECTION
     $vscodeCaches = @(
         "$env:APPDATA\Code\Cache"
@@ -2921,20 +3013,37 @@ function Get-RedundantDriverPackage {
     #>
     $repo = Join-Path $env:SystemRoot 'System32\DriverStore\FileRepository'
 
+    # v2.17: stderr is kept OUT of the XML. Merging it with 2>&1 meant a single
+    # warning line from pnputil produced invalid XML, the cast threw, and the driver
+    # store was skipped silently every week.
+    $stdOutFile = [System.IO.Path]::GetTempFileName()
+    $stdErrFile = [System.IO.Path]::GetTempFileName()
     try {
-        $rawXml = & pnputil.exe /enum-drivers /devices /format xml 2>&1
-        $pnpExit = $LASTEXITCODE
-        if ($pnpExit -ne 0) {
+        $pnp = Start-Process -FilePath "$env:SystemRoot\System32\pnputil.exe" `
+            -ArgumentList '/enum-drivers', '/devices', '/format', 'xml' `
+            -NoNewWindow -PassThru -Wait `
+            -RedirectStandardOutput $stdOutFile -RedirectStandardError $stdErrFile
+
+        if ($pnp.ExitCode -ne 0) {
             # Without this the failure looked exactly like "nothing to clean"
-            Write-Log "pnputil /enum-drivers returned $pnpExit - driver store skipped" -Level WARNING
+            $err = (Get-Content $stdErrFile -Raw -ErrorAction SilentlyContinue)
+            Write-Log "pnputil /enum-drivers returned $($pnp.ExitCode) - driver store skipped" -Level WARNING
+            if ($err) { Write-Log "pnputil: $($err.Trim())" -Level DETAIL }
             $script:Stats.WarningsCount++
             return @()
         }
-        [xml]$doc = $rawXml -join "`n"
+
+        $rawXml = Get-Content $stdOutFile -Raw -ErrorAction Stop
+        [xml]$doc = $rawXml
     } catch {
         Write-Log "Could not enumerate driver packages: $_" -Level WARNING
+        # Make diagnosis possible instead of leaving a bare exception
+        $head = if ($rawXml) { $rawXml.Substring(0, [Math]::Min(200, $rawXml.Length)) } else { '(no output)' }
+        Write-Log "pnputil output began with: $head" -Level DETAIL
         $script:Stats.WarningsCount++
         return @()
+    } finally {
+        Remove-Item $stdOutFile, $stdErrFile -Force -ErrorAction SilentlyContinue
     }
     if (-not $doc.PnpUtil.Driver) {
         Write-Log "pnputil returned no driver packages - unexpected, driver store skipped" -Level WARNING
@@ -2986,7 +3095,11 @@ function Get-RedundantDriverPackage {
         }
     }
 
-    $packages | Group-Object Inf | ForEach-Object {
+    # v2.17: grouped by INF *and* vendor/class. Generic names (usbaudio.inf, hidusb.inf)
+    # are shipped by several vendors, and grouping on the name alone could declare one
+    # vendor's package "superseded" by another's - then delete a working driver whose
+    # device merely happens to be unplugged right now.
+    $packages | Group-Object { "$($_.Inf)|$($_.Provider)|$($_.Class)" } | ForEach-Object {
         $newest = $_.Group | Sort-Object Version, Date -Descending | Select-Object -First 1
         foreach ($pkg in $_.Group) {
             if ($pkg.Oem -eq $newest.Oem -or $pkg.InUse) { continue }
@@ -3080,6 +3193,45 @@ function Clear-DriverStore {
     }
 }
 
+function Measure-FreeSpaceGain {
+    <#
+    .SYNOPSIS
+        Runs an operation and attributes the freed disk space to a category (v2.17)
+    .DESCRIPTION
+        DISM component cleanup and Disk Cleanup are usually the two most productive
+        steps of a run, and neither reports how much it freed. Without this their
+        gigabytes were missing from "Space freed" entirely, so the summary understated
+        the result while looking complete.
+
+        The measurement is deliberately coarse: it is the difference in free space on
+        the system drive, so unrelated activity during the operation adds noise, and a
+        negative delta is discarded rather than reported.
+    #>
+    param(
+        [Parameter(Mandatory)][scriptblock]$Operation,
+        [Parameter(Mandatory)][string]$Category
+    )
+
+    $driveLetter = ($env:SystemDrive).TrimEnd(':')
+    $before = try { (Get-PSDrive -Name $driveLetter -ErrorAction Stop).Free } catch { $null }
+
+    & $Operation
+
+    if ($null -eq $before -or $ReportOnly) { return }
+    $after = try { (Get-PSDrive -Name $driveLetter -ErrorAction Stop).Free } catch { $null }
+    if ($null -eq $after) { return }
+
+    $gain = $after - $before
+    if ($gain -le 0) { return }
+
+    $script:Stats.TotalFreedBytes += $gain
+    if (-not $script:Stats.FreedByCategory.ContainsKey($Category)) {
+        $script:Stats.FreedByCategory[$Category] = 0
+    }
+    $script:Stats.FreedByCategory[$Category] += $gain
+    Write-Log "$Category freed approximately $(Format-FileSize $gain)" -Level DETAIL
+}
+
 function Invoke-DISMCleanup {
     <#
     .SYNOPSIS
@@ -3116,7 +3268,7 @@ function Invoke-DISMCleanup {
                 Write-Log "Component store is clean - cleanup not needed" -Level SUCCESS
             }
         } else {
-            $analyzeProcess.Kill()
+            $analyzeProcess.Kill($true)
         }
     } catch {
         # Analyze failed - run the cleanup unconditionally (previous behavior)
@@ -3140,17 +3292,26 @@ function Invoke-DISMCleanup {
         # Wait with timeout (15 minutes for DISM operation)
         $timeoutMs = 900000
         if (-not $dismProcess.WaitForExit($timeoutMs)) {
-            $dismProcess.Kill()
+            $dismProcess.Kill($true)
             Write-Log "DISM cleanup timed out after 15 minutes" -Level WARNING
             $script:Stats.WarningsCount++
             return
         }
 
+        # v2.17: 3010 is the documented "success, reboot required" code that DISM returns
+        # routinely after /StartComponentCleanup - it used to fall through to the warning
+        # branch, painting every successful run yellow while never setting RebootRequired.
+        # Code 87 is ERROR_INVALID_PARAMETER (an unsupported switch combination), not
+        # "cleanup not needed" - reporting it as INFO hid a real failure completely.
         switch ($dismProcess.ExitCode) {
-            0       { Write-Log "DISM cleanup completed successfully" -Level SUCCESS }
-            87      { Write-Log "DISM cleanup not needed" -Level INFO }
+            0    { Write-Log "DISM cleanup completed successfully" -Level SUCCESS }
+            3010 {
+                Write-Log "DISM cleanup completed - a reboot is required to finish" -Level SUCCESS
+                $script:Stats.RebootRequired = $true
+            }
             default {
-                Write-Log "DISM completed with code: $($dismProcess.ExitCode)" -Level WARNING
+                $tail = (Get-Content $dismOutFile -Tail 3 -ErrorAction SilentlyContinue) -join ' '
+                Write-Log "DISM failed with code $($dismProcess.ExitCode)$(if ($tail) { " - $tail" })" -Level WARNING
                 $script:Stats.WarningsCount++
             }
         }
@@ -3475,13 +3636,20 @@ function Show-FinalStatistics {
     # Freed by category (if any)
     if ($script:Stats.FreedByCategory.Count -gt 0) {
         Write-Host "  ╟$("─" * $boxWidth)╢" -ForegroundColor Cyan
-        foreach ($cat in ($script:Stats.FreedByCategory.GetEnumerator() | Sort-Object -Property Value -Descending | Select-Object -First 5)) {
-            if ($cat.Value -gt 0) {
-                # Right-align category name so colon aligns with "Updates installed:"
-                $catLabel = "$($cat.Key):".PadLeft($labelWidth)
-                $catValue = Format-FileSize $cat.Value
-                Write-StatLine -Icon " " -Label $catLabel -Value $catValue -ValueColor "DarkGray"
-            }
+        $sortedCats = @($script:Stats.FreedByCategory.GetEnumerator() |
+                        Where-Object { $_.Value -gt 0 } | Sort-Object -Property Value -Descending)
+        foreach ($cat in ($sortedCats | Select-Object -First 5)) {
+            # Right-align category name so colon aligns with "Updates installed:"
+            $catLabel = "$($cat.Key):".PadLeft($labelWidth)
+            $catValue = Format-FileSize $cat.Value
+            Write-StatLine -Icon " " -Label $catLabel -Value $catValue -ValueColor "DarkGray"
+        }
+        # v2.17: account for the remainder. With 12 possible categories the listed rows
+        # did not add up to "Space freed", which read as an arithmetic error.
+        if ($sortedCats.Count -gt 5) {
+            $rest = ($sortedCats | Select-Object -Skip 5 | Measure-Object -Property Value -Sum).Sum
+            $restLabel = "Other ($($sortedCats.Count - 5)):".PadLeft($labelWidth)
+            Write-StatLine -Icon " " -Label $restLabel -Value (Format-FileSize $rest) -ValueColor "DarkGray"
         }
     }
 
@@ -3578,10 +3746,12 @@ function Write-ResultJson {
             WarningsCount       = $script:Stats.WarningsCount
             ErrorsCount         = $script:Stats.ErrorsCount
             RebootRequired      = [bool]$script:Stats.RebootRequired
-            # v2.16: true means cleanup figures are understated (Defender blocked some
+            # 'enabled' means cleanup figures are understated (Defender blocked some
             # deletions without reporting an error); 'unknown' means the check itself
             # failed, so the figures are unverified rather than confirmed good
-            ControlledFolderAccess = $script:Stats.ControlledFolderAccess
+            ControlledFolderAccess = [string]$script:Stats.ControlledFolderAccess
+            # null for a normal run; a reason string when the run stopped early (v2.17)
+            Aborted             = $script:Stats.Aborted
             LogPath             = $script:LogPath
         }
 
@@ -3601,6 +3771,13 @@ function Write-ResultJson {
 }
 
 function Start-WinClean {
+    # v2.17: remove a previous result file up front. An early exit used to leave the
+    # old JSON in place, and an automated stand would read last week's success as this
+    # run's outcome.
+    if ($ResultJsonPath -and (Test-Path -LiteralPath $ResultJsonPath)) {
+        Remove-Item -LiteralPath $ResultJsonPath -Force -ErrorAction SilentlyContinue
+    }
+
     # Initialize log
     "WinClean v$($script:Version) - Started at $(Get-Date)" | Out-File -FilePath $script:LogPath -Encoding utf8
     "=" * 70 | Out-File -FilePath $script:LogPath -Append -Encoding utf8
@@ -3641,6 +3818,9 @@ function Start-WinClean {
                 Write-Host ""
                 Write-Host "  Operation cancelled. Please reboot and run again." -ForegroundColor Yellow
                 Write-Host ""
+                # Record the abort so automation does not mistake it for a completed run
+                $script:Stats.Aborted = 'PendingRebootDeclined'
+                Write-ResultJson -Path $ResultJsonPath
                 return
             }
         } else {
@@ -3649,28 +3829,33 @@ function Start-WinClean {
         Write-Host ""
     }
 
-    # Check for script updates
-    $updateInfo = Test-ScriptUpdate
-    if ($updateInfo) {
-        Invoke-ScriptUpdate -UpdateInfo $updateInfo
+    # Check for script updates. v2.17: gated by -SkipUpdates - the flag promises no
+    # update activity, and this path costs a PSGallery round trip on every run.
+    if (-not $SkipUpdates) {
+        $updateInfo = Test-ScriptUpdate
+        if ($updateInfo) {
+            Invoke-ScriptUpdate -UpdateInfo $updateInfo
+        }
     }
 
     # Controlled Folder Access silently blocks deletions inside protected folders while
     # every delete call still reports success, so cleanup looks fine in the log but frees
     # nothing. Warn once up front instead of leaving the user with a misleading report (v2.16).
-    $script:Stats.ControlledFolderAccess = $false
+    # Tri-state and always a string, so consumers (result JSON, stand assertions) get
+    # one stable type: 'enabled' / 'disabled' / 'unknown'
+    $script:Stats.ControlledFolderAccess = 'disabled'
     try {
         $mp = Get-MpPreference -ErrorAction Stop
         if ($mp.EnableControlledFolderAccess -eq 1) {
-            $script:Stats.ControlledFolderAccess = $true
+            $script:Stats.ControlledFolderAccess = 'enabled'
             Write-Log "Controlled Folder Access is enabled - some deletions may be blocked silently" -Level WARNING
             Write-Log "Add pwsh.exe to the allowed apps list, or cleanup results will be understated" -Level DETAIL
             $script:Stats.WarningsCount++
         }
     } catch {
         # Defender cmdlets unavailable (third-party AV, stripped image, broken WMI).
-        # Record it as "unknown" rather than "off": reporting false here would tell an
-        # automated stand that the numbers are trustworthy when they were never checked.
+        # Record it as "unknown" rather than "disabled": reporting the latter would tell
+        # an automated stand the numbers are trustworthy when they were never checked.
         $script:Stats.ControlledFolderAccess = 'unknown'
         Write-Log "Could not query Controlled Folder Access state - cleanup figures are unverified" -Level DETAIL
     }
@@ -3714,15 +3899,23 @@ function Start-WinClean {
             Write-Log "DEEP SYSTEM CLEANUP" -Level TITLE
             Update-Progress -Activity "Deep Cleanup" -Status "Running system cleanup..."
 
-            Invoke-DISMCleanup
+            # Driver store first (v2.17): removing packages leaves referenced components
+            # in WinSxS, and running DISM afterwards reclaims them in the same pass
+            # instead of a week later.
             Clear-DriverStore
             Clear-KernelDumps
-            Invoke-StorageSense
+            # Neither of these reports what it freed, so measure the drive around them
+            Measure-FreeSpaceGain -Category 'ComponentStore' -Operation { Invoke-DISMCleanup }
+            Measure-FreeSpaceGain -Category 'DiskCleanup' -Operation { Invoke-StorageSense }
             Clear-WindowsOld
         }
 
-        # Phase 8: what is taking up space that cleanup deliberately leaves alone (v2.16)
-        Show-DiskSpaceReport
+        # Phase 8: what is taking up space that cleanup deliberately leaves alone (v2.16).
+        # Gated by -SkipCleanup (v2.17): it walks Windows\Installer and the search index,
+        # which is expensive and pointless for a user who asked for no cleanup.
+        if (-not $SkipCleanup) {
+            Show-DiskSpaceReport
+        }
 
         # Phase 9: Telemetry Configuration (if requested)
         if ($DisableTelemetry) {
