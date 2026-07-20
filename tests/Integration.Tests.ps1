@@ -658,8 +658,8 @@ Clear-DockerWSL
 
 Describe "Sandbox: Clear-EventLogs ReportOnly" -Tag "Integration" -Skip:(-not $IsElevated) {
     <#
-    Only the ReportOnly branch is exercised. The real path calls wevtutil against the
-    actual Windows Event Log service on whatever machine runs the tests.
+    Only the ReportOnly branch is exercised. The real path calls EventLogSession.ClearLog
+    against the actual Windows Event Log service on whatever machine runs the tests.
     #>
 
     BeforeAll {

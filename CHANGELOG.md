@@ -172,6 +172,22 @@ Main script:
 - Removed the `-RemoveFolder` switch: dead since at least v2.16 (no caller left), and
   it would have kept a second, untested code path alive through this rewrite for
   nothing
+- **`Get-FolderSize` wrapped every file in a full PSObject** (ETS properties,
+  formatting metadata) just to read one `Length` value - noticeable on folders with
+  tens of thousands of small files (npm/pip caches, the driver store). Walks the tree
+  with the raw .NET enumerator instead, and deliberately skips reparse points while
+  doing it - following a junction while summing could double-count the same bytes or
+  loop on a cyclic one, something the old `Get-ChildItem -Recurse` call never guarded
+  against
+- **`Clear-EventLogs` spawned a separate `wevtutil` process per log** (30-80ms each,
+  100-300 eligible logs on a typical run). Replaced with `EventLogSession.ClearLog`,
+  the in-process .NET API `wevtutil` itself calls
+- **The 9 top-level phases of a run shared one `try/catch`**, so an exception in phase
+  3 silently skipped every phase after it - Developer Cleanup, Docker/WSL, Visual
+  Studio, Deep System Cleanup, the disk space report, Telemetry - with only a generic
+  "Critical error" line to show for it. Each phase now has its own boundary and is
+  recorded in the result JSON as `PhasesCompleted`/`PhasesFailed`, so an automated
+  stand can tell "everything ran" from "phase 6 threw and the rest are just missing"
 
 ### Changed
 

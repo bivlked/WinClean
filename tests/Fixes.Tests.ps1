@@ -195,25 +195,24 @@ Describe "B1: Temp Path Deduplication" -Tag "Fix", "B1", "Temp" {
 Describe "B2: Get-FolderSize Performance with -File Flag" -Tag "Fix", "B2", "Performance" {
     <#
     Issue: Get-FolderSize was calculating directory objects, not just files
-    Fix: Added -File flag to Get-ChildItem
+    Fix (original, v2.13): added -File to Get-ChildItem
+    Fix (v2.17, p.2 of the audit): Get-ChildItem itself replaced with
+    [System.IO.Directory]::EnumerateFiles - a raw .NET walk, no per-file PSObject. The
+    directories-are-excluded guarantee is now structural (EnumerateFiles can only ever
+    return files), not a filter flag, so this checks the real behavior directly instead
+    of grepping for a flag that no longer exists in this function.
     #>
 
-    It "Script uses -File flag in Get-FolderSize" {
-        # Look for Get-ChildItem with -File inside Get-FolderSize function
-        $scriptContent | Should -Match 'function\s+Get-FolderSize[\s\S]*?Get-ChildItem.*-File'
-    }
-
-    It "-File flag returns only files, not directories" {
+    It "Counts only file bytes, ignoring directory entries" {
         $testFolder = Join-Path $env:TEMP "PesterTest_FileFlag_$(Get-Random)"
         New-Item -ItemType Directory -Path $testFolder -Force | Out-Null
         New-Item -ItemType Directory -Path "$testFolder\SubDir" -Force | Out-Null
-        "test" | Out-File "$testFolder\file.txt"
+        [System.IO.File]::WriteAllText("$testFolder\file.txt", ('x' * 1000))
 
         try {
-            $withFile = Get-ChildItem -LiteralPath $testFolder -Recurse -Force -File -EA SilentlyContinue
-            $withoutFile = Get-ChildItem -LiteralPath $testFolder -Recurse -Force -EA SilentlyContinue
-
-            $withFile.Count | Should -BeLessThan $withoutFile.Count
+            # If directory entries were counted (e.g. via a Length that resolves to
+            # something non-zero for a container), this would overcount past 1000
+            Get-FolderSize -Path $testFolder | Should -Be 1000
         } finally {
             Remove-Item $testFolder -Recurse -Force -EA SilentlyContinue
         }

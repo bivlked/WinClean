@@ -288,6 +288,13 @@ $script:Stats = [hashtable]::Synchronized(@{
     # 'unknown' must not be mistaken for a verified state by consumers of the JSON
     ControlledFolderAccess = 'unknown'
     Aborted              = $null     # v2.17: set when the run stops before finishing
+    # v2.17 (p.11 of the audit): which top-level phases ran to completion vs threw.
+    # Before this, one exception anywhere in the run silently skipped every phase
+    # after it - Developer Cleanup, Docker/WSL, Visual Studio, Deep System Cleanup,
+    # the disk space report, Telemetry - with only a single generic "Critical error"
+    # in the log to show for it.
+    PhasesCompleted      = @()
+    PhasesFailed         = @()
 })
 
 # Progress activities seen so far, so all of them can be closed at the end (v2.16)
@@ -965,6 +972,16 @@ function Get-FolderSize {
     <#
     .SYNOPSIS
         Calculates folder size in bytes
+    .DESCRIPTION
+        v2.17 (p.2 of the audit): Get-ChildItem wraps every single file in a full
+        PSObject (ETS properties, formatting metadata) just to read one Length value -
+        expensive on folders with tens of thousands of small files (npm/pip caches,
+        the driver store). Walks the tree with the raw .NET enumerator instead.
+        IgnoreInaccessible mirrors the old -ErrorAction SilentlyContinue tolerance.
+        AttributesToSkip=ReparsePoint is a deliberate refinement, not just a port:
+        following junctions/symlinks while summing could double-count the same bytes
+        (WinSxS-style hardlink dedup) or loop on a cyclic junction - the old
+        Get-ChildItem -Recurse call had no equivalent guard.
     #>
     param([string]$Path)
 
@@ -973,9 +990,18 @@ function Get-FolderSize {
     }
 
     try {
-        $size = (Get-ChildItem -LiteralPath $Path -Recurse -Force -File -ErrorAction SilentlyContinue |
-                 Measure-Object -Property Length -Sum -ErrorAction SilentlyContinue).Sum
-        return [long]($size ?? 0)
+        $options = [System.IO.EnumerationOptions]::new()
+        $options.RecurseSubdirectories = $true
+        $options.IgnoreInaccessible = $true
+        $options.AttributesToSkip = [System.IO.FileAttributes]::ReparsePoint
+
+        $total = 0L
+        foreach ($file in [System.IO.Directory]::EnumerateFiles($Path, '*', $options)) {
+            try {
+                $total += [System.IO.FileInfo]::new($file).Length
+            } catch { }   # vanished between enumeration and the Length read - skip it
+        }
+        return $total
     } catch {
         return 0
     }
@@ -2386,6 +2412,11 @@ function Clear-EventLogs {
     <#
     .SYNOPSIS
         Clears Windows Event Logs (excluding critical ones)
+    .DESCRIPTION
+        v2.17 (p.3 of the audit): each log used to be cleared via a separate `wevtutil`
+        process (30-80ms each, and a run can see 100-300 eligible logs). Replaced with
+        EventLogSession.ClearLog, the in-process .NET API wevtutil itself calls - same
+        underlying WinAPI, no process-spawn overhead per log.
     #>
     Write-Log "Event Logs" -Level SECTION
 
@@ -2409,12 +2440,8 @@ function Clear-EventLogs {
         $failedCount = 0
         foreach ($log in $logs) {
             try {
-                wevtutil cl $log.LogName 2>$null
-                if ($LASTEXITCODE -eq 0) {
-                    $clearedCount++
-                } else {
-                    $failedCount++
-                }
+                [System.Diagnostics.Eventing.Reader.EventLogSession]::GlobalSession.ClearLog($log.LogName)
+                $clearedCount++
             } catch {
                 $failedCount++
             }
@@ -4063,6 +4090,10 @@ function Write-ResultJson {
             ControlledFolderAccess = [string]$script:Stats.ControlledFolderAccess
             # null for a normal run; a reason string when the run stopped early (v2.17)
             Aborted             = $script:Stats.Aborted
+            # v2.17 (p.11): which top-level phases ran vs threw - lets a stand tell
+            # "everything ran" from "phase N threw and phases after it are just missing"
+            PhasesCompleted     = @($script:Stats.PhasesCompleted)
+            PhasesFailed        = @($script:Stats.PhasesFailed)
             LogPath             = $script:LogPath
         }
 
@@ -4078,6 +4109,33 @@ function Write-ResultJson {
         # previous run would be reported as a successful fresh run
         Write-Log "Failed to write result JSON: $_" -Level WARNING
         $script:Stats.WarningsCount++
+    }
+}
+
+function Invoke-Phase {
+    <#
+    .SYNOPSIS
+        Runs one top-level phase of Start-WinClean with its own exception boundary
+    .DESCRIPTION
+        v2.17 (p.11 of the audit): the 9 phases used to share a single try/catch, so an
+        exception in phase 3 meant phases 4-9 never ran at all - silently, with only a
+        generic "Critical error" line to show for it. Each phase now gets its own
+        boundary and is recorded in $script:Stats.PhasesCompleted/PhasesFailed, which
+        Write-ResultJson exposes so an automated stand can tell "everything ran" from
+        "phase 6 threw and phases 7-9 are simply missing".
+    #>
+    param(
+        [Parameter(Mandatory)][string]$Name,
+        [Parameter(Mandatory)][scriptblock]$Action
+    )
+
+    try {
+        & $Action
+        $script:Stats.PhasesCompleted += $Name
+    } catch {
+        Write-Log "Phase '$Name' failed: $_" -Level ERROR
+        $script:Stats.ErrorsCount++
+        $script:Stats.PhasesFailed += $Name
     }
 }
 
@@ -4171,70 +4229,81 @@ function Start-WinClean {
         Write-Log "Could not query Controlled Folder Access state - cleanup figures are unverified" -Level DETAIL
     }
 
+    # v2.17 (p.11 of the audit): each phase now has its own exception boundary inside
+    # Invoke-Phase, so a bug in one no longer skips every phase after it. This outer
+    # try/finally is a second, coarser safety net - it guarantees the result JSON, the
+    # final summary and the log handle release happen even if something outside a
+    # phase (or a bug in Invoke-Phase itself) throws.
     try {
-        # Phase 1: Preparation
-        $null = New-SystemRestorePoint -Description "WinClean $(Get-Date -Format 'yyyy-MM-dd HH:mm')"
-
-        # Phase 2: Updates
-        if (-not $SkipUpdates) {
-            Update-WindowsSystem
-            Update-Applications
+        Invoke-Phase -Name 'Preparation' -Action {
+            $null = New-SystemRestorePoint -Description "WinClean $(Get-Date -Format 'yyyy-MM-dd HH:mm')"
         }
 
-        # Phase 3: Cleanup
-        if (-not $SkipCleanup) {
-            Write-Log "SYSTEM CLEANUP" -Level TITLE
-            Update-Progress -Activity "System Cleanup" -Status "Cleaning temporary files..."
-
-            Clear-TempFiles
-            Clear-BrowserCaches
-            Clear-WindowsUpdateCache
-            Clear-WinCleanRecycleBin
-            Clear-SystemCaches
-            Clear-EventLogs
-            Clear-DNSCache
-            Clear-PrivacyTraces
+        Invoke-Phase -Name 'Updates' -Action {
+            if (-not $SkipUpdates) {
+                Update-WindowsSystem
+                Update-Applications
+            }
         }
 
-        # Phase 4: Developer Cleanup
-        Clear-DeveloperCaches
+        Invoke-Phase -Name 'SystemCleanup' -Action {
+            if (-not $SkipCleanup) {
+                Write-Log "SYSTEM CLEANUP" -Level TITLE
+                Update-Progress -Activity "System Cleanup" -Status "Cleaning temporary files..."
 
-        # Phase 5: Docker/WSL Cleanup
-        Clear-DockerWSL
-
-        # Phase 6: Visual Studio Cleanup
-        Clear-VisualStudio
-
-        # Phase 7: System Cleanup
-        if (-not $SkipCleanup) {
-            Write-Log "DEEP SYSTEM CLEANUP" -Level TITLE
-            Update-Progress -Activity "Deep Cleanup" -Status "Running system cleanup..."
-
-            # Driver store first (v2.17): removing packages leaves referenced components
-            # in WinSxS, and running DISM afterwards reclaims them in the same pass
-            # instead of a week later.
-            Clear-DriverStore
-            Clear-KernelDumps
-            # Neither of these reports what it freed, so measure the drive around them
-            Measure-FreeSpaceGain -Category 'ComponentStore' -Operation { Invoke-DISMCleanup }
-            Measure-FreeSpaceGain -Category 'DiskCleanup' -Operation { Invoke-StorageSense }
-            Clear-WindowsOld
+                Clear-TempFiles
+                Clear-BrowserCaches
+                Clear-WindowsUpdateCache
+                Clear-WinCleanRecycleBin
+                Clear-SystemCaches
+                Clear-EventLogs
+                Clear-DNSCache
+                Clear-PrivacyTraces
+            }
         }
 
-        # Phase 8: what is taking up space that cleanup deliberately leaves alone (v2.16).
-        # Gated by -SkipCleanup (v2.17): it walks Windows\Installer and the search index,
-        # which is expensive and pointless for a user who asked for no cleanup.
-        if (-not $SkipCleanup) {
-            Show-DiskSpaceReport
+        Invoke-Phase -Name 'DeveloperCleanup' -Action { Clear-DeveloperCaches }
+
+        Invoke-Phase -Name 'DockerWSLCleanup' -Action { Clear-DockerWSL }
+
+        Invoke-Phase -Name 'VisualStudioCleanup' -Action { Clear-VisualStudio }
+
+        Invoke-Phase -Name 'DeepSystemCleanup' -Action {
+            if (-not $SkipCleanup) {
+                Write-Log "DEEP SYSTEM CLEANUP" -Level TITLE
+                Update-Progress -Activity "Deep Cleanup" -Status "Running system cleanup..."
+
+                # Driver store first (v2.17): removing packages leaves referenced
+                # components in WinSxS, and running DISM afterwards reclaims them in
+                # the same pass instead of a week later.
+                Clear-DriverStore
+                Clear-KernelDumps
+                # Neither of these reports what it freed, so measure the drive around them
+                Measure-FreeSpaceGain -Category 'ComponentStore' -Operation { Invoke-DISMCleanup }
+                Measure-FreeSpaceGain -Category 'DiskCleanup' -Operation { Invoke-StorageSense }
+                Clear-WindowsOld
+            }
         }
 
-        # Phase 9: Telemetry Configuration (if requested)
-        if ($DisableTelemetry) {
-            Set-WindowsTelemetry -Disable
+        Invoke-Phase -Name 'DiskSpaceReport' -Action {
+            # What is taking up space that cleanup deliberately leaves alone (v2.16).
+            # Gated by -SkipCleanup (v2.17): it walks Windows\Installer and the search
+            # index, which is expensive and pointless for a user who asked for no cleanup.
+            if (-not $SkipCleanup) {
+                Show-DiskSpaceReport
+            }
         }
 
+        Invoke-Phase -Name 'Telemetry' -Action {
+            if ($DisableTelemetry) {
+                Set-WindowsTelemetry -Disable
+            }
+        }
     } catch {
-        Write-Log "Critical error: $_" -Level ERROR
+        # Should not normally be reached - Invoke-Phase contains phase-level failures -
+        # but something outside any phase (or a bug in Invoke-Phase itself) still must
+        # not prevent the result JSON and summary below from being written.
+        Write-Log "Critical error outside any phase: $_" -Level ERROR
         $script:Stats.ErrorsCount++
     } finally {
         # JSON goes first: Show-FinalStatistics may block on a keypress in
