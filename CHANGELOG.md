@@ -126,7 +126,7 @@ Main script:
 
 ### Tests
 
-- 207 Pester tests (was 141 in 2.15)
+- 222 Pester tests (was 141 in 2.15)
 - **The helper test suite now dot-sources WinClean.ps1 instead of testing pasted copies
   of its functions.** The copies were a tautology - a bug in the product could not fail
   them - and they had already drifted apart from it, which the change immediately
