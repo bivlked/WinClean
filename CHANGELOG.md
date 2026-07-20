@@ -14,6 +14,53 @@ Windows Update driver listing, run-to-run delta and HTML report. See CLAUDE.md.
 
 ---
 
+## [2.17] - NOT RELEASED YET
+
+Work in progress: fixes are being accumulated before publishing. The code in `main`
+already carries them, but `get.ps1` and `install.ps1` keep serving 2.16 from the latest
+GitHub Release until this version is tagged.
+
+Silent failure hardening. Found by a dedicated review pass over 2.16: an operation that
+quietly does nothing is worse than one that fails loudly, because the log reports success
+and the user never learns that the gigabytes are still there. Every finding below is a
+place where that could happen.
+
+### Fixed
+
+- **Cleanups that free nothing from a non-empty folder are now reported.** Previously the
+  script simply stayed silent, so a blocked deletion was indistinguishable from "there was
+  nothing to clean". If Controlled Folder Access is enabled, it is named as the likely cause
+- **Browser caches were logged as "cleaned" even when nothing was freed** - a running browser
+  locks its cache, so the success message was plainly false
+- **Kernel dump deletion failures were swallowed by an empty catch block**: `-ReportOnly`
+  promised gigabytes, the real run said nothing at all, and the files stayed
+- **Driver package removal failures were not counted**, and a successful cleanup whose
+  per-package sizes could not be attributed reported `0 B` freed. The driver store is now
+  measured before and after as a fallback
+- **`pnputil` exit code was never checked**: any failure looked exactly like
+  "no superseded driver packages found". Unparseable packages are counted, and an
+  unparseable date no longer discards the package (the date is only a sort tie-breaker)
+- **Disk Cleanup did not verify that categories were armed** - a failed registry write meant
+  cleanmgr ran with an empty set, exited 0 and was logged as a success. Its exit code was
+  not checked either
+- **Delivery Optimization reported "cache cleaned" without measuring anything**, and a
+  failure of the supported cmdlet was silently swallowed
+- **The temp age filter failed open**: if a subtree could not be read, the folder was treated
+  as stale and deleted. It now fails closed - what cannot be verified is kept
+- **Controlled Folder Access reported `false` when the check itself failed**, telling
+  automated runs the figures were trustworthy when they had never been verified. Now `unknown`
+- **Downloaded-but-not-applied Windows updates were counted as installed**, producing
+  "All N updates installed successfully" for updates still pending a reboot
+- `-ReportOnly` now measures exactly the set the real run deletes, including excluded files
+- winget source update timeouts and result JSON write failures now count as warnings; the
+  latter matters because an automated stand would otherwise read the previous run's file
+
+### Tests
+
+- 204 Pester tests (was 187): 17 new regression tests, one per silent failure above
+
+---
+
 ## [2.16] - 2026-07-20
 
 ### Added

@@ -6,7 +6,7 @@
 
 ### Комплексный скрипт обслуживания Windows 11
 
-[![Версия](https://img.shields.io/badge/версия-2.16-blue.svg)](https://github.com/bivlked/WinClean/releases)
+[![Версия](https://img.shields.io/badge/версия-2.17-blue.svg)](https://github.com/bivlked/WinClean/releases)
 [![PSGallery](https://img.shields.io/powershellgallery/v/WinClean?label=PSGallery&logo=powershell&logoColor=white)](https://www.powershellgallery.com/packages/WinClean)
 [![CI](https://github.com/bivlked/WinClean/actions/workflows/ci.yml/badge.svg)](https://github.com/bivlked/WinClean/actions/workflows/ci.yml)
 [![PowerShell 7.1+](https://img.shields.io/badge/PowerShell-7.1%2B-5391FE?logo=powershell&logoColor=white)](https://github.com/PowerShell/PowerShell)
@@ -339,7 +339,7 @@ C:\Users\ВашеИмя\
 
 ```
 ┌────────────────────────────────────────────────────────────────┐
-│                     WinClean v2.16                             │
+│                     WinClean v2.17                             │
 ├────────────────────────────────────────────────────────────────┤
 │  ПОДГОТОВКА                                                    │
 │  ├─ ✓ Проверка прав администратора                             │

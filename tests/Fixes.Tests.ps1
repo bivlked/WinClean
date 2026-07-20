@@ -498,7 +498,13 @@ Describe "v2.16: Controlled Folder Access preflight" -Tag "Fix", "V216" {
     }
 
     It "Exposes the flag in the result JSON" {
-        $scriptContent | Should -Match 'ControlledFolderAccess = \[bool\]\$script:Stats\.ControlledFolderAccess'
+        $scriptContent | Should -Match 'ControlledFolderAccess = \$script:Stats\.ControlledFolderAccess'
+    }
+
+    It "Reports 'unknown' when the check itself fails" {
+        # Reporting false would tell an automated stand the figures are trustworthy
+        # when Controlled Folder Access was never actually checked
+        $scriptContent | Should -Match "ControlledFolderAccess = 'unknown'"
     }
 
     It "Missing Defender cmdlets are not treated as an error" {
@@ -663,6 +669,87 @@ Describe "v2.16: disk space report" -Tag "Feature", "V216" {
         # vssadmin prints numbers using the system decimal separator
         $scriptContent | Should -Match 'Get-CimInstance Win32_ShadowStorage'
         $scriptContent | Should -Not -Match 'vssadmin list shadowstorage'
+    }
+}
+
+#endregion
+
+#region v2.16 Silent failure hardening
+
+Describe "v2.16: silent failures are reported" -Tag "Fix", "V216", "SilentFailure" {
+
+    It "Kernel dump deletion failures are counted and logged" {
+        # A blocked deletion used to be indistinguishable from "nothing to clean"
+        $scriptContent | Should -Match 'could not be deleted'
+        $scriptContent | Should -Not -Match '(?s)Remove-Item -LiteralPath \$file\.FullName[^}]*\}\s*catch \{ \}'
+    }
+
+    It "pnputil exit code is checked before parsing" {
+        $scriptContent | Should -Match 'pnputil /enum-drivers returned \$pnpExit'
+    }
+
+    It "Unparseable driver packages are counted, not silently dropped" {
+        $scriptContent | Should -Match '\$skipped\+\+'
+        $scriptContent | Should -Match 'no package could be parsed'
+    }
+
+    It "An unparseable driver date does not discard the package" {
+        # A date format change would otherwise empty the candidate list forever
+        $scriptContent | Should -Match '\[datetime\]::TryParse'
+    }
+
+    It "Driver store falls back to measuring the repository when sizes are unknown" {
+        $scriptContent | Should -Match 'per-package size unavailable'
+    }
+
+    It "Delivery Optimization no longer claims success without measuring" {
+        $scriptContent | Should -Not -Match '"Delivery Optimization cache cleaned"'
+        $scriptContent | Should -Match 'freed size unknown'
+    }
+
+    It "Delete-DeliveryOptimizationCache failures are logged" {
+        $scriptContent | Should -Match 'Delete-DeliveryOptimizationCache failed'
+    }
+
+    It "cleanmgr verifies that categories were actually armed" {
+        $scriptContent | Should -Match 'No Disk Cleanup handlers could be armed'
+        $scriptContent | Should -Match '\$armed\+\+'
+    }
+
+    It "cleanmgr exit code is checked" {
+        $scriptContent | Should -Match 'Disk Cleanup exited with code'
+    }
+
+    It "Browser caches are not reported as cleaned when nothing was freed" {
+        $scriptContent | Should -Not -Match 'Write-Log "Browser caches cleaned \(\$browserNames\)" -Level SUCCESS'
+        $scriptContent | Should -Match 'Browser caches: nothing freed'
+    }
+
+    It "A cleanup that frees nothing from a non-empty folder is reported" {
+        $scriptContent | Should -Match 'nothing freed, \$\(Format-FileSize \$sizeBefore\) still present'
+    }
+
+    It "The age filter fails closed when a subtree cannot be read" {
+        # Failing open would silently defeat the protection the filter exists for
+        $scriptContent | Should -Match 'if \(\$walkErrors\) \{ return \$false \}'
+    }
+
+    It "ReportOnly measures the same set the real run deletes" {
+        $scriptContent | Should -Not -Match '\$size = Get-FolderSize -Path \$Path'
+    }
+
+    It "winget source timeout counts as a warning" {
+        $scriptContent | Should -Match '(?s)Winget source update timed out[^\r\n]*\r?\n\s*\$script:Stats\.WarningsCount\+\+'
+    }
+
+    It "Result JSON write failure counts as a warning" {
+        # An automated stand would otherwise read the previous run's file as fresh
+        $scriptContent | Should -Match '(?s)Failed to write result JSON[^\r\n]*\r?\n\s*\$script:Stats\.WarningsCount\+\+'
+    }
+
+    It "Downloaded updates are not counted as installed" {
+        $scriptContent | Should -Match "\`$_\.Result -eq 'Installed'"
+        $scriptContent | Should -Match 'downloaded but not yet applied'
     }
 }
 

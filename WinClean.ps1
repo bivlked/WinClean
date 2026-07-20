@@ -1,5 +1,5 @@
 <#PSScriptInfo
-.VERSION 2.16
+.VERSION 2.17
 .GUID 8f7c3b2a-1d4e-5f6a-9b8c-0d1e2f3a4b5c
 .AUTHOR bivlked
 .COMPANYNAME
@@ -12,6 +12,7 @@
 .REQUIREDSCRIPTS
 .EXTERNALSCRIPTDEPENDENCIES
 .RELEASENOTES
+    v2.17: Silent failure hardening - operations that quietly do nothing now say so instead of reporting success
     v2.16: Driver store cleanup, disk space report, kernel dump cleanup, 9 audit fixes (Delivery Optimization path, TEMP age filter, winget exit codes)
     v2.15: ResultJsonPath for automated testing, one-command install/run (get.ps1, install.ps1), integration test suite
     v2.14: Log persistence fix, correct npm/Firefox cache paths, localized size parsing, faster DISM/EventLogs, UI fixes
@@ -25,7 +26,7 @@
 
 <#
 .SYNOPSIS
-    WinClean - Ultimate Windows 11 Maintenance Script v2.16
+    WinClean - Ultimate Windows 11 Maintenance Script v2.17
 .DESCRIPTION
     Комплексный скрипт для обновления и очистки Windows 11:
     - Обновление Windows (включая драйверы)
@@ -39,8 +40,20 @@
     - Подробный цветной вывод + лог-файл
 .NOTES
     Author: biv
-    Version: 2.16
+    Version: 2.17
     Requires: PowerShell 7.1+, Windows 11, Administrator rights
+    Changes in 2.17:
+    - Cleanups that free nothing from a non-empty folder now say so instead of
+      staying silent, which was indistinguishable from "there was nothing to do"
+    - Kernel dump and driver package removal failures are counted and reported
+    - pnputil exit code is checked; a parse failure no longer looks like "nothing found"
+    - Driver store falls back to measuring the repository when per-package sizes
+      cannot be attributed, instead of reporting 0 B after a successful cleanup
+    - Disk Cleanup verifies that categories were armed and checks its exit code
+    - Browser caches are no longer reported as cleaned when nothing was freed
+    - The temp age filter now fails closed: an unreadable subtree is kept, not deleted
+    - Controlled Folder Access reports 'unknown' when the check itself fails
+    - Downloaded-but-not-installed updates are no longer counted as installed
     Changes in 2.16:
     - Added driver store cleanup: removes superseded driver packages that no device
       uses and that have a newer version installed (451 MB on the author's machine)
@@ -290,7 +303,7 @@ if (-not $LogPath) {
 }
 
 # Script version (single source of truth for version checking)
-$script:Version = "2.16"
+$script:Version = "2.17"
 
 # Protected paths that should never be deleted
 $script:ProtectedPaths = @(
@@ -984,8 +997,14 @@ function Remove-FolderContent {
             if ($MinAgeDays -le 0) { return $true }
             $cutoff = (Get-Date).AddDays(-$MinAgeDays)
             if ($_.PSIsContainer) {
-                $newer = Get-ChildItem -LiteralPath $_.FullName -Recurse -Force -ErrorAction SilentlyContinue |
+                # Fail closed: if the subtree cannot be fully read (ACL, path length,
+                # locked folder), we cannot prove the directory is stale, so we keep it.
+                # Failing open here would defeat the entire point of the age filter.
+                $walkErrors = $null
+                $newer = Get-ChildItem -LiteralPath $_.FullName -Recurse -Force `
+                            -ErrorAction SilentlyContinue -ErrorVariable walkErrors |
                          Where-Object { $_.LastWriteTime -ge $cutoff } | Select-Object -First 1
+                if ($walkErrors) { return $false }
                 (-not $newer) -and $_.LastWriteTime -lt $cutoff
             } else {
                 $_.LastWriteTime -lt $cutoff
@@ -994,13 +1013,11 @@ function Remove-FolderContent {
     }
 
     if ($ReportOnly) {
-        if ($MinAgeDays -gt 0) {
-            $size = 0
-            foreach ($entry in (& $getEligible)) {
-                $size += if ($entry.PSIsContainer) { Get-FolderSize -Path $entry.FullName } else { $entry.Length }
-            }
-        } else {
-            $size = Get-FolderSize -Path $Path
+        # Always measured through $getEligible so the preview cannot promise more than
+        # the real run deletes - excluded files and fresh entries are left out of both
+        $size = 0
+        foreach ($entry in (& $getEligible)) {
+            $size += if ($entry.PSIsContainer) { Get-FolderSize -Path $entry.FullName } else { $entry.Length }
         }
         if ($size -gt 0 -and $Description) {
             Write-Log "Would clean: $Description - $(Format-FileSize $size)" -Level DETAIL
@@ -1041,6 +1058,17 @@ function Remove-FolderContent {
             if ($Description) {
                 Write-Log "$Description - $(Format-FileSize $freed)" -Level SUCCESS
             }
+        } elseif ($sizeBefore -gt 0 -and $Description) {
+            # v2.16: silence here is indistinguishable from "there was nothing to do".
+            # Say it out loud - this is exactly how the Controlled Folder Access bug hid:
+            # deletions were blocked without an error and the log simply stayed quiet.
+            $reason = if ($script:Stats.ControlledFolderAccess) {
+                ' (Controlled Folder Access is enabled and may be blocking it)'
+            } else {
+                ' (files are probably locked by a running process)'
+            }
+            Write-Log "$Description - nothing freed, $(Format-FileSize $sizeBefore) still present$reason" -Level WARNING
+            $script:Stats.WarningsCount++
         }
     } catch {
         Write-Log "Error cleaning $Path`: $_" -Level WARNING
@@ -1345,8 +1373,11 @@ function Update-WindowsSystem {
             return
         }
 
-        # Count installed updates
-        $installed = @($results | Where-Object { $_.Result -in @('Installed', 'Downloaded') }).Count
+        # Count installed updates.
+        # v2.16: 'Downloaded' means fetched but NOT applied, so counting it as installed
+        # produced "All N updates installed successfully" for updates still pending.
+        $installed = @($results | Where-Object { $_.Result -eq 'Installed' }).Count
+        $downloaded = @($results | Where-Object { $_.Result -eq 'Downloaded' }).Count
         $failed = @($results | Where-Object { $_.Result -eq 'Failed' }).Count
 
         $script:Stats.WindowsUpdatesCount = $installed
@@ -1354,8 +1385,13 @@ function Update-WindowsSystem {
         if ($failed -gt 0) {
             Write-Log "Installed: $installed, Failed: $failed" -Level WARNING
             $script:Stats.WarningsCount += $failed
-        } else {
+        } elseif ($installed -gt 0) {
             Write-Log "All $installed updates installed successfully" -Level SUCCESS
+        }
+
+        if ($downloaded -gt 0) {
+            Write-Log "$downloaded update(s) downloaded but not yet applied - a reboot is needed" -Level DETAIL
+            $script:Stats.RebootRequired = $true
         }
 
         # Check reboot status
@@ -1419,7 +1455,8 @@ function Update-Applications {
             $completed = $job | Wait-Job -Timeout 120  # 2 minutes timeout
             if (-not $completed) {
                 $job | Stop-Job
-                Write-Log "Winget source update timed out" -Level WARNING
+                Write-Log "Winget source update timed out - package list may be stale" -Level WARNING
+                $script:Stats.WarningsCount++
             }
             $job | Remove-Job -Force -ErrorAction SilentlyContinue
         }
@@ -1728,7 +1765,9 @@ function Clear-BrowserCaches {
                 $script:Stats.FreedByCategory["Browser"] += $freedSpace
                 Write-Log "Browser caches cleaned ($browserNames) - $(Format-FileSize $freedSpace)" -Level SUCCESS
             } else {
-                Write-Log "Browser caches cleaned ($browserNames)" -Level SUCCESS
+                # v2.16: was logged as SUCCESS. A running browser locks its cache, so
+                # "cleaned" with zero freed was a plain lie to the user
+                Write-Log "Browser caches: nothing freed ($browserNames) - close the browsers and retry" -Level DETAIL
             }
         }
     }
@@ -1986,10 +2025,18 @@ function Clear-SystemCaches {
                 }
                 $script:Stats.FreedByCategory["System"] += $doFreed
                 Write-Log "Delivery Optimization cache - $(Format-FileSize $doFreed)" -Level SUCCESS
+            } elseif ($doPaths.Count -eq 0) {
+                # Nothing to measure: say so instead of claiming a clean-up happened (v2.16)
+                Write-Log "Delivery Optimization: cmdlet ran, cache location not found - freed size unknown" -Level DETAIL
+            } elseif ($doSizeBefore -gt 0) {
+                Write-Log "Delivery Optimization: nothing freed, $(Format-FileSize $doSizeBefore) still present" -Level WARNING
+                $script:Stats.WarningsCount++
             } else {
-                Write-Log "Delivery Optimization cache cleaned" -Level DETAIL
+                Write-Log "Delivery Optimization cache was already empty" -Level DETAIL
             }
         } catch {
+            Write-Log "Delete-DeliveryOptimizationCache failed: $_" -Level WARNING
+            $script:Stats.WarningsCount++
             foreach ($p in $doPaths) {
                 Remove-FolderContent -Path $p -Category "System" -Description "Delivery Optimization"
             }
@@ -2773,12 +2820,17 @@ function Clear-KernelDumps {
     }
 
     $freed = 0
+    $failed = 0
+    $firstError = $null
     foreach ($file in $stale) {
         try {
             $len = $file.Length
             Remove-Item -LiteralPath $file.FullName -Force -ErrorAction Stop
             $freed += $len
-        } catch { }
+        } catch {
+            $failed++
+            if (-not $firstError) { $firstError = $_.Exception.Message }
+        }
     }
 
     if ($freed -gt 0) {
@@ -2788,6 +2840,13 @@ function Clear-KernelDumps {
         }
         $script:Stats.FreedByCategory["System"] += $freed
         Write-Log "Kernel dumps older than $MinAgeDays days - $(Format-FileSize $freed)" -Level SUCCESS
+    }
+
+    # Report failures explicitly: ReportOnly promised these gigabytes, and staying
+    # silent would make a blocked deletion look like "there was nothing to clean"
+    if ($failed -gt 0) {
+        Write-Log "Kernel dumps: $failed of $($stale.Count) file(s) could not be deleted ($(Format-FileSize ($size - $freed)) left) - $firstError" -Level WARNING
+        $script:Stats.WarningsCount++
     }
 }
 
@@ -2863,27 +2922,56 @@ function Get-RedundantDriverPackage {
     $repo = Join-Path $env:SystemRoot 'System32\DriverStore\FileRepository'
 
     try {
-        [xml]$doc = (& pnputil.exe /enum-drivers /devices /format xml 2>$null) -join "`n"
+        $rawXml = & pnputil.exe /enum-drivers /devices /format xml 2>&1
+        $pnpExit = $LASTEXITCODE
+        if ($pnpExit -ne 0) {
+            # Without this the failure looked exactly like "nothing to clean"
+            Write-Log "pnputil /enum-drivers returned $pnpExit - driver store skipped" -Level WARNING
+            $script:Stats.WarningsCount++
+            return @()
+        }
+        [xml]$doc = $rawXml -join "`n"
     } catch {
         Write-Log "Could not enumerate driver packages: $_" -Level WARNING
+        $script:Stats.WarningsCount++
         return @()
     }
-    if (-not $doc.PnpUtil.Driver) { return @() }
+    if (-not $doc.PnpUtil.Driver) {
+        Write-Log "pnputil returned no driver packages - unexpected, driver store skipped" -Level WARNING
+        $script:Stats.WarningsCount++
+        return @()
+    }
 
+    $skipped = 0
     $packages = foreach ($d in $doc.PnpUtil.Driver) {
         $parts = $d.DriverVersion -split '\s+', 2      # "MM/dd/yyyy x.y.z.w"
-        if ($parts.Count -lt 2) { continue }
+        if ($parts.Count -lt 2) { $skipped++; continue }
         try {
+            # The date is only a tie-breaker for sorting, so an unparseable one must not
+            # discard the whole package - otherwise a date format change would silently
+            # empty the candidate list and report "nothing found" forever
+            $driverDate = [datetime]::MinValue
+            [void][datetime]::TryParse($parts[0], [cultureinfo]::InvariantCulture,
+                                       [System.Globalization.DateTimeStyles]::None, [ref]$driverDate)
             [pscustomobject]@{
                 Oem      = $d.DriverName
                 Inf      = $d.OriginalName
                 Provider = $d.ProviderName
                 Class    = $d.ClassName
                 Version  = [version]$parts[1]
-                Date     = [datetime]::ParseExact($parts[0], 'MM/dd/yyyy', [cultureinfo]::InvariantCulture)
+                Date     = $driverDate
                 InUse    = [bool]$d.Devices
             }
-        } catch { continue }
+        } catch { $skipped++; continue }
+    }
+
+    if ($skipped -gt 0) {
+        Write-Log "Driver store: $skipped package(s) could not be parsed and were ignored" -Level DETAIL
+    }
+    if (-not $packages) {
+        Write-Log "Driver store: no package could be parsed - skipping cleanup" -Level WARNING
+        $script:Stats.WarningsCount++
+        return @()
     }
 
     # Index repository folders by the SHA256 of their INF file. Version strings are not
@@ -2944,8 +3032,14 @@ function Clear-DriverStore {
         return
     }
 
+    # Measured as a fallback: per-package sizes come from matching INF hashes, and if
+    # that matching fails the packages still get deleted while the statistics read 0 B
+    $repoPath = Join-Path $env:SystemRoot 'System32\DriverStore\FileRepository'
+    $repoBefore = Get-FolderSize -Path $repoPath
+
     $freed = 0
     $removed = 0
+    $failed = 0
     foreach ($pkg in $candidates) {
         # No /force here: it deletes packages even when a device is using them, which is
         # exactly how driver cleaners break systems. Exit code is the verdict - the text
@@ -2955,11 +3049,21 @@ function Clear-DriverStore {
             $freed += $pkg.Bytes
             $removed++
         } else {
+            $failed++
             Write-Log "Skipped $($pkg.Oem) ($($pkg.Inf)): pnputil exit $LASTEXITCODE" -Level DETAIL
         }
     }
 
     if ($removed -gt 0) {
+        if ($freed -eq 0) {
+            # Packages went away but no size could be attributed to them - fall back to
+            # the difference in the repository itself rather than reporting a false zero
+            $repoDelta = [math]::Max(0, $repoBefore - (Get-FolderSize -Path $repoPath))
+            Write-Log "Removed $removed package(s); per-package size unavailable, driver store shrank by $(Format-FileSize $repoDelta)" -Level WARNING
+            $script:Stats.WarningsCount++
+            $freed = $repoDelta
+        }
+
         $script:Stats.TotalFreedBytes += $freed
         if (-not $script:Stats.FreedByCategory.ContainsKey("DriverStore")) {
             $script:Stats.FreedByCategory["DriverStore"] = 0
@@ -2968,6 +3072,11 @@ function Clear-DriverStore {
         Write-Log "Removed $removed superseded driver package(s) - $(Format-FileSize $freed)" -Level SUCCESS
     } else {
         Write-Log "No driver packages were removed" -Level DETAIL
+    }
+
+    if ($failed -gt 0) {
+        Write-Log "Driver store: $failed of $($candidates.Count) package(s) refused removal" -Level WARNING
+        $script:Stats.WarningsCount++
     }
 }
 
@@ -3170,12 +3279,30 @@ function Invoke-StorageSense {
         )
 
         try {
-            # Set StateFlags for cleanup categories
+            # Set StateFlags for cleanup categories.
+            # v2.16: count what was actually armed. Previously a failed write was
+            # swallowed, and cleanmgr would run with an empty category set, exit 0 and
+            # get logged as a success while doing nothing at all.
+            $armed = 0
             foreach ($category in $categories) {
                 $categoryPath = Join-Path $regPath $category
-                if (Test-Path $categoryPath) {
-                    Set-ItemProperty -Path $categoryPath -Name "StateFlags$sageset" -Value 2 -Type DWord -Force -ErrorAction SilentlyContinue
+                if (-not (Test-Path $categoryPath)) {
+                    Write-Log "Disk Cleanup handler not present: $category" -Level DETAIL
+                    continue
                 }
+                try {
+                    Set-ItemProperty -Path $categoryPath -Name "StateFlags$sageset" -Value 2 -Type DWord -Force -ErrorAction Stop
+                    $armed++
+                } catch {
+                    Write-Log "Could not arm Disk Cleanup handler '$category': $_" -Level WARNING
+                    $script:Stats.WarningsCount++
+                }
+            }
+
+            if ($armed -eq 0) {
+                Write-Log "No Disk Cleanup handlers could be armed - skipping cleanmgr" -Level WARNING
+                $script:Stats.WarningsCount++
+                return
             }
 
             # Run cleanmgr with progress feedback and reasonable timeout
@@ -3204,8 +3331,13 @@ function Invoke-StorageSense {
                 # either: cleanmgr simply takes longer than we are willing to wait, and
                 # killing it mid-delete was both pointless and misreported as "continuing" (v2.16)
                 Write-Log "Disk Cleanup exceeded $maxWait seconds - leaving it to finish in the background" -Level INFO
+            } elseif ($cleanmgr.ExitCode -ne 0) {
+                # v2.16: the exit code used to be ignored entirely, so a crash one second
+                # in was still logged as a success
+                Write-Log "Disk Cleanup exited with code $($cleanmgr.ExitCode) - results unverified" -Level WARNING
+                $script:Stats.WarningsCount++
             } else {
-                Write-Log "Disk Cleanup completed" -Level SUCCESS
+                Write-Log "Disk Cleanup completed ($armed categories)" -Level SUCCESS
             }
         } finally {
             # Remove StateFlags to avoid leaving traces in the registry.
@@ -3446,9 +3578,10 @@ function Write-ResultJson {
             WarningsCount       = $script:Stats.WarningsCount
             ErrorsCount         = $script:Stats.ErrorsCount
             RebootRequired      = [bool]$script:Stats.RebootRequired
-            # v2.16: when true, cleanup figures are understated - Defender blocked
-            # some deletions without reporting an error
-            ControlledFolderAccess = [bool]$script:Stats.ControlledFolderAccess
+            # v2.16: true means cleanup figures are understated (Defender blocked some
+            # deletions without reporting an error); 'unknown' means the check itself
+            # failed, so the figures are unverified rather than confirmed good
+            ControlledFolderAccess = $script:Stats.ControlledFolderAccess
             LogPath             = $script:LogPath
         }
 
@@ -3460,7 +3593,10 @@ function Write-ResultJson {
         $result | ConvertTo-Json -Depth 4 | Out-File -FilePath $Path -Encoding utf8
         Write-Log "Result JSON written: $Path" -Level INFO
     } catch {
+        # Must be loud: an automated stand reads this file, and a stale copy from the
+        # previous run would be reported as a successful fresh run
         Write-Log "Failed to write result JSON: $_" -Level WARNING
+        $script:Stats.WarningsCount++
     }
 }
 
@@ -3532,7 +3668,11 @@ function Start-WinClean {
             $script:Stats.WarningsCount++
         }
     } catch {
-        # Defender cmdlets unavailable (third-party AV or a stripped image) - not an error
+        # Defender cmdlets unavailable (third-party AV, stripped image, broken WMI).
+        # Record it as "unknown" rather than "off": reporting false here would tell an
+        # automated stand that the numbers are trustworthy when they were never checked.
+        $script:Stats.ControlledFolderAccess = 'unknown'
+        Write-Log "Could not query Controlled Folder Access state - cleanup figures are unverified" -Level DETAIL
     }
 
     try {

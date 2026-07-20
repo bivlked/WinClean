@@ -1,7 +1,7 @@
 # WinClean - Инструкции для Claude
 
 > Последнее обновление: 2026-07-20
-> Текущая версия скрипта: 2.16
+> Текущая версия скрипта: 2.17 (🔴 НЕ ВЫПУЩЕНА - накапливаем исправления; последний релиз v2.16)
 
 ---
 
@@ -11,7 +11,7 @@
 
 | Параметр | Значение |
 |----------|----------|
-| **Версия** | 2.16 |
+| **Версия** | 2.17 |
 | **Язык** | PowerShell 7.1+ |
 | **Платформа** | Windows 11 (23H2/24H2/25H2) |
 | **Лицензия** | MIT |
@@ -43,9 +43,9 @@ CleanScript/
 │   └── logo.svg              # Логотип проекта
 ├── get.ps1                   # Bootstrap: разовый запуск одной командой (irm | iex)
 ├── install.ps1               # Bootstrap: установка/обновление + ярлык (RunAs admin)
-├── tests/                    # Pester тесты (187 всего)
+├── tests/                    # Pester тесты (204 всего)
 │   ├── Helpers.Tests.ps1     # Unit-тесты helper-функций (65 тестов)
-│   ├── Fixes.Tests.ps1       # Валидационные тесты исправлений (94 теста)
+│   ├── Fixes.Tests.ps1       # Валидационные тесты исправлений (111 тестов)
 │   └── Integration.Tests.ps1 # Интеграционные тесты в песочнице ФС (28 тестов)
 ├── tools/                    # Тестовая инфраструктура (не публикуется в PSGallery)
 │   ├── Invoke-ReleaseCheck.ps1 # 🔴 Единая проверка перед релизом (fail-closed)
@@ -95,7 +95,7 @@ WinClean.ps1 - монолитный скрипт (3185 строк) с модул
 ### Ключевые переменные
 
 ```powershell
-$script:Version = "2.16"           # Единый источник версии
+$script:Version = "2.17"           # Единый источник версии
 $script:Stats = [hashtable]::Synchronized(@{...})  # Thread-safe статистика
 $script:LogPath = "..."            # Путь к лог-файлу
 $script:ProtectedPaths = @(...)    # Защищённые пути (никогда не удаляются)
@@ -192,7 +192,7 @@ Publish-PSResource -Path .\WinClean.ps1 -Repository PSGallery -ApiKey $env:PSGAL
 **Проверки (3 job'а):**
 1. **lint** - PSScriptAnalyzer (Warning, Error)
 2. **syntax** - Проверка синтаксиса PowerShell
-3. **test** - Pester тесты (187, запускается после lint и syntax; интеграционные требуют admin - на GitHub runners это выполняется)
+3. **test** - Pester тесты (204, запускается после lint и syntax; интеграционные требуют admin - на GitHub runners это выполняется)
 
 **Исключения PSScriptAnalyzer** (допустимые для CLI):
 - PSAvoidUsingWriteHost - это интерактивная утилита
@@ -201,7 +201,7 @@ Publish-PSResource -Path .\WinClean.ps1 -Repository PSGallery -ApiKey $env:PSGAL
 
 ### Pester тесты (v2.13+)
 
-- `tests/Helpers.Tests.ps1` - 65 unit-тестов, `tests/Fixes.Tests.ps1` - 94 теста, `tests/Integration.Tests.ps1` - 28 интеграционных (песочница ФС, требуют admin)
+- `tests/Helpers.Tests.ps1` - 65 unit-тестов, `tests/Fixes.Tests.ps1` - 111 тестов, `tests/Integration.Tests.ps1` - 28 интеграционных (песочница ФС, требуют admin)
 - Особенности: функции в BeforeAll (не AST), regex для locale-независимости, отдельные It блоки
 
 ---
@@ -211,6 +211,16 @@ Publish-PSResource -Path .\WinClean.ps1 -Repository PSGallery -ApiKey $env:PSGAL
 ### В работе
 - [ ] **Публикация v2.15 / v2.16 в PSGallery** (решение за пользователем; GitHub Release выпускается всегда, one-liner'ы работают от него). Команда - в разделе "Публикация в PSGallery" ниже
 - [ ] Публикация статьи на Хабре (`docs/habr-article.md` - текст готов, ждёт скриншоты). ⚠️ Текст писался под старую версию - сверить с v2.16 (появились get.ps1/install.ps1, стенд, ночные прогоны, очистка Driver Store)
+
+### v2.17 - В РАБОТЕ, релиз НЕ выпускать без команды пользователя
+
+Решение 20.07.2026: исправления накапливаются в `main`, тег не ставится. Это безопасно -
+`get.ps1` и `install.ps1` берут скрипт из **последнего релиза** (v2.16), а не из `main`,
+поэтому незарелиженный код до пользователей не доходит.
+
+Содержимое 2.17: устранение тихих отказов (17 мест, найдено агентом `silent-failure-hunter`).
+Суть класса дефектов: операция молча не срабатывает, а лог рапортует успех. Подробности в
+CHANGELOG, незакрытые находки - в `MyAI-g7rc`.
 
 ### v2.16 - ВЫПУЩЕНА 20.07.2026
 
@@ -282,7 +292,7 @@ pwsh tools/Invoke-ReleaseCheck.ps1                  # версия во всех
 pwsh tools/Invoke-ReleaseCheck.ps1 -IncludeStand    # + боевой прогон на VM (минуты)
 pwsh tools/Invoke-ReleaseCheck.ps1 -VerifyPublished # ПОСЛЕ выпуска: ассеты релиза и SHA256
 
-Invoke-Pester ./tests -Output Detailed              # 187 Pester тест (65+94+28)
+Invoke-Pester ./tests -Output Detailed              # 204 Pester теста (65+111+28)
 pwsh tools/Invoke-SmokeTest.ps1                     # Смоук: ReportOnly + геометрия UI
 pwsh tools/proxmox/Invoke-StandTest.ps1 -Mode Report # Стенд на Proxmox (RU=VM 190, EN: -ConfigPath ...en.json = VM 191)
 # Ночная матрица: cron 03:30 на proxmos (/opt/winclean-stand, /etc/cron.d/winclean-stand), отчёт в Telegram
