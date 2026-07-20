@@ -14,16 +14,15 @@ Windows Update driver listing, run-to-run delta and HTML report. See CLAUDE.md.
 
 ---
 
-## [2.17] - NOT RELEASED YET
+## [2.17] - 2026-07-20
 
-Work in progress: fixes are being accumulated before publishing. The code in `main`
-already carries them, but `get.ps1` and `install.ps1` keep serving 2.16 from the latest
-GitHub Release until this version is tagged.
+A correctness and hardening release: no new features, five review passes over the 2.16
+codebase. The theme running through all of them is the same - an operation that quietly
+does nothing is worse than one that fails loudly, because the log reports success and the
+user never learns the gigabytes are still there, or that a security check never ran.
 
-Silent failure hardening. Found by a dedicated review pass over 2.16: an operation that
-quietly does nothing is worse than one that fails loudly, because the log reports success
-and the user never learns that the gigabytes are still there. Every finding below is a
-place where that could happen.
+**Update if you use the one-line install**: 2.16 and earlier could download and run the
+script elevated without verifying its SHA256 at all (see the bootstrap section below).
 
 ### Fixed
 
@@ -197,6 +196,41 @@ Main script:
   one left by a *different* (necessarily dead) process, restores the recorded value or
   restarts the recorded service - never a blind "fix this on every run"
 
+### Fixed (fifth pass: findings from an independent review of the rewrite above)
+
+The rewrite in the fourth pass was reviewed by a second, independent engine before
+release. It found a real regression that the test suite had not caught, plus several
+ways the new recovery logic could misfire. All are fixed and covered by tests now.
+
+- 🔴 **The rewritten age filter lost the directory's own timestamp check.** The original
+  required BOTH "no descendant newer than the cutoff" AND "the directory itself is older
+  than the cutoff"; the rewrite kept only the first. Consequence: a freshly created but
+  still EMPTY directory has no descendants to prove it is fresh, so `-MinAgeDays 1`
+  deleted it - a running installer's scratch folder looks exactly like that. Same for a
+  directory written to seconds ago whose contents happen to be old. Both halves are back,
+  with a regression test for each case
+- **Freed-bytes accounting could overstate a partial deletion.** `Get-FolderSize` returns
+  0 both for "empty" and for "could not read", so a directory whose remainder could not be
+  measured was credited as fully freed while its files were still on disk. The checked
+  variant is used now, and an unmeasurable remainder claims nothing rather than everything
+- **Recovery could restart a service an administrator had stopped on purpose.** It
+  restarted any stopped `wuauserv`/`bits`; the marker now names the exact services this
+  run stopped, and only those are restarted. If neither was running to begin with, no
+  marker is written and the cache is cleaned without touching services at all
+- **The restore-point timeout path defeated its own safety net**: on timeout the child
+  process is killed (skipping the registry restore in its `finally`) and the marker was
+  then cleared unconditionally - discarding the record of exactly the damage it exists
+  for. The parent now repairs the value inline, and keeps the marker when it cannot
+- **A failed recovery deleted the marker anyway**, so a transient registry or service
+  error left the damage permanently with nothing to retry from. The marker now survives a
+  failed recovery
+
+Known and accepted: the marker identifies its owner by process id, which Windows can
+recycle, and two concurrent elevated runs would each treat the other as stale. Both
+require a second WinClean running as administrator at the same time, which is not a
+supported configuration; every recovery action is also a no-op when there is nothing to
+repair.
+
 ### Changed
 
 - Self-update check is now gated by `-SkipUpdates`, and the disk space report by
@@ -208,7 +242,7 @@ Main script:
 
 ### Tests
 
-- 274 Pester tests (was 222 earlier in 2.17, 141 in 2.15). Most of the growth closes a
+- 279 Pester tests (was 141 in 2.15). Most of the growth closes a
   coverage gap the second audit pass found: 39 functions with no behavioral test at
   all, including 8 that delete files. `Get-SupersededDriverCandidate` (the pure
   candidate-selection logic split out of `Get-RedundantDriverPackage` for exactly this)

@@ -527,6 +527,37 @@ function Clear-RunMarker {
     Remove-Item -LiteralPath (Get-RunMarkerPath) -Force -ErrorAction SilentlyContinue
 }
 
+function Restore-RestorePointFrequency {
+    <#
+    .SYNOPSIS
+        Puts SystemRestorePointCreationFrequency back to $PreviousValue, if it is still 0
+    .DESCRIPTION
+        Shared by the inline timeout path in New-SystemRestorePoint and by
+        Invoke-StaleMarkerRecovery, so both behave identically. Only acts when the value
+        is currently 0 (i.e. still holding this script's override) - if something else
+        has since set a real value, that is left alone.
+    .OUTPUTS
+        [bool] $true when nothing needs doing or the restore succeeded, $false on failure
+    #>
+    param($PreviousValue)
+
+    try {
+        $srKey = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\SystemRestore'
+        $current = (Get-ItemProperty -Path $srKey -Name SystemRestorePointCreationFrequency -ErrorAction SilentlyContinue).SystemRestorePointCreationFrequency
+        if ($current -ne 0) { return $true }   # already a real value - not ours to touch
+
+        if ($null -ne $PreviousValue) {
+            Set-ItemProperty -Path $srKey -Name SystemRestorePointCreationFrequency -Value $PreviousValue -Type DWord -Force -ErrorAction Stop
+        } else {
+            Remove-ItemProperty -Path $srKey -Name SystemRestorePointCreationFrequency -ErrorAction Stop
+        }
+        return $true
+    } catch {
+        Write-Log "Could not restore SystemRestorePointCreationFrequency: $_" -Level WARNING
+        return $false
+    }
+}
+
 function Invoke-StaleMarkerRecovery {
     <#
     .SYNOPSIS
@@ -534,8 +565,17 @@ function Invoke-StaleMarkerRecovery {
     .DESCRIPTION
         v2.17 (p.13 of the audit). Called once at the start of a run. A marker left by
         THIS run's own process id is not evidence of anything (re-entrant call, or a
-        race) - only a marker from a different, necessarily-dead process means the
-        previous run never reached its cleanup.
+        race) - only a marker from a different process means the previous run never
+        reached its cleanup.
+
+        The marker is kept when recovery FAILS, so the next run can retry instead of
+        leaving the damage in place forever with no record of it.
+
+        Known limitation, deliberately not solved here: a PID is not a durable identity
+        (Windows recycles them, and two concurrent runs would each see the other as
+        "foreign"). Both cases need a second WinClean running as administrator at the
+        same time, which the script does not support anyway; the recovery actions are
+        also written to be no-ops when there is nothing to repair.
     #>
     $markerPath = Get-RunMarkerPath
     if (-not (Test-Path -LiteralPath $markerPath -ErrorAction SilentlyContinue)) { return }
@@ -552,25 +592,19 @@ function Invoke-StaleMarkerRecovery {
     Write-Log "Recovery marker found from an interrupted previous run (phase: $($marker.Phase), pid $($marker.Pid)) - checking for leftover state" -Level WARNING
     $script:Stats.WarningsCount++
 
+    $recovered = $true
     switch ($marker.Phase) {
         'RestorePointFrequencyOverride' {
-            try {
-                $srKey = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\SystemRestore'
-                $current = (Get-ItemProperty -Path $srKey -Name SystemRestorePointCreationFrequency -ErrorAction SilentlyContinue).SystemRestorePointCreationFrequency
-                if ($current -eq 0) {
-                    if ($null -ne $marker.PreviousValue) {
-                        Set-ItemProperty -Path $srKey -Name SystemRestorePointCreationFrequency -Value $marker.PreviousValue -Type DWord -Force
-                    } else {
-                        Remove-ItemProperty -Path $srKey -Name SystemRestorePointCreationFrequency -ErrorAction SilentlyContinue
-                    }
-                    Write-Log "Restored SystemRestorePointCreationFrequency, left at 0 by the interrupted run" -Level INFO
-                }
-            } catch {
-                Write-Log "Could not restore SystemRestorePointCreationFrequency: $_" -Level WARNING
+            $recovered = Restore-RestorePointFrequency -PreviousValue $marker.PreviousValue
+            if ($recovered) {
+                Write-Log "Checked SystemRestorePointCreationFrequency after the interrupted run" -Level INFO
             }
         }
         'WUServiceStop' {
-            foreach ($svcName in @('wuauserv', 'bits')) {
+            # Only services this script actually stopped are restarted. Starting every
+            # stopped service would fight an administrator who disabled one on purpose.
+            foreach ($svcName in @($marker.ServicesToRestart)) {
+                if (-not $svcName) { continue }
                 try {
                     $svc = Get-Service -Name $svcName -ErrorAction SilentlyContinue
                     if ($svc -and $svc.Status -eq 'Stopped') {
@@ -579,12 +613,17 @@ function Invoke-StaleMarkerRecovery {
                     }
                 } catch {
                     Write-Log "Could not restart $svcName : $_" -Level WARNING
+                    $recovered = $false
                 }
             }
         }
     }
 
-    Remove-Item -LiteralPath $markerPath -Force -ErrorAction SilentlyContinue
+    if ($recovered) {
+        Remove-Item -LiteralPath $markerPath -Force -ErrorAction SilentlyContinue
+    } else {
+        Write-Log "Recovery incomplete - keeping the marker so the next run retries" -Level WARNING
+    }
 }
 
 function Test-InteractiveConsole {
@@ -1321,11 +1360,19 @@ function Remove-FolderContent {
 
         if ($item.PSIsContainer) {
             if ($cutoff) {
-                # A folder's own LastWriteTime only moves when its direct children
-                # change, so a fresh file nested deeper would otherwise be deleted
-                # along with its old-looking parent - the age check must be recursive.
-                # Fail closed: if the subtree cannot be fully read (ACL, path length,
-                # locked folder), staleness cannot be proven, so the directory is kept.
+                # BOTH halves are required, and each covers a case the other misses:
+                #   - the directory's own timestamp: an EMPTY fresh directory has no
+                #     descendants to prove anything (a running installer's scratch
+                #     folder looks exactly like this), and a directory written to just
+                #     now can still hold nothing but old files;
+                #   - the recursive walk: a folder's own LastWriteTime does not move
+                #     when a GRANDchild changes, so a fresh file nested deeper would be
+                #     deleted along with its old-looking parent.
+                # Fail closed throughout: if the subtree cannot be fully read (ACL,
+                # path length, locked folder), staleness cannot be proven, so the
+                # directory is kept.
+                if ($item.LastWriteTime -ge $cutoff) { continue }
+
                 $walkErrors = $null
                 $children = Get-ChildItem -LiteralPath $item.FullName -Recurse -Force `
                                 -ErrorAction SilentlyContinue -ErrorVariable walkErrors
@@ -1335,7 +1382,10 @@ function Remove-FolderContent {
                 $size = ($children | Where-Object { -not $_.PSIsContainer } |
                          Measure-Object -Property Length -Sum).Sum
             } else {
-                $size = Get-FolderSize -Path $item.FullName
+                # Checked variant: plain Get-FolderSize returns 0 both for "empty" and
+                # for "could not read", and that 0 would later be reported as freed
+                # bytes. $null here means "unmeasured" and is carried as such.
+                $size = Get-FolderSizeChecked -Path $item.FullName
             }
         } else {
             if ($cutoff -and $item.LastWriteTime -ge $cutoff) { continue }
@@ -1375,9 +1425,15 @@ function Remove-FolderContent {
                 $freed += $c.Size
             } elseif ($item.PSIsContainer) {
                 # Partially deleted (some locked file inside) - re-measure only this one
-                # subtree, not the whole of $Path
-                $remaining = Get-FolderSize -Path $item.FullName
-                $freed += [math]::Max(0, $c.Size - $remaining)
+                # subtree, not the whole of $Path. Get-FolderSizeChecked, not
+                # Get-FolderSize: the latter reports 0 both for "empty" and for "could
+                # not read", and reading that 0 as "nothing left" would credit the whole
+                # directory as freed while its files are still sitting on disk.
+                $remaining = Get-FolderSizeChecked -Path $item.FullName
+                if ($null -ne $remaining) {
+                    $freed += [math]::Max(0, $c.Size - $remaining)
+                }
+                # $null: the remainder is unknown, so claim nothing rather than overstate
             }
             # A file that still exists (locked) contributes 0 - correctly nothing freed
         }
@@ -1556,6 +1612,7 @@ function New-SystemRestorePoint {
         $prevFreqOuter = (Get-ItemProperty -Path $srKeyOuter -Name SystemRestorePointCreationFrequency -ErrorAction SilentlyContinue).SystemRestorePointCreationFrequency
         Set-RunMarker -Phase 'RestorePointFrequencyOverride' -Data @{ PreviousValue = $prevFreqOuter }
 
+        $childKilled = $false
         try {
             $proc = Start-Process -FilePath 'powershell.exe' `
                 -ArgumentList @('-NoProfile', '-NoLogo', '-ExecutionPolicy', 'Bypass', '-Command', $scriptBlock) `
@@ -1564,13 +1621,28 @@ function New-SystemRestorePoint {
             $timeoutMs = 120000  # 2 minutes - a restore point should never legitimately take this long
             if (-not $proc.WaitForExit($timeoutMs)) {
                 $proc.Kill($true)
+                $childKilled = $true
                 throw "restore point creation timed out after $($timeoutMs / 1000) seconds"
             }
 
             $result = (Get-Content -LiteralPath $outFile -Raw -ErrorAction SilentlyContinue)
         } finally {
             Remove-Item $outFile, $errFile -Force -ErrorAction SilentlyContinue
-            Clear-RunMarker
+
+            # A killed child never ran its own finally, so the registry override it set
+            # is still in place - repair it here and now. Clearing the marker
+            # unconditionally would throw away the record of exactly the damage this
+            # mechanism exists for, so it survives whenever the repair did not.
+            if ($childKilled) {
+                if (Restore-RestorePointFrequency -PreviousValue $prevFreqOuter) {
+                    Clear-RunMarker
+                } else {
+                    Write-Log "Restore point child was killed and its registry override could not be undone - the next run will retry" -Level WARNING
+                    $script:Stats.WarningsCount++
+                }
+            } else {
+                Clear-RunMarker
+            }
         }
 
         if ($result -like "SUCCESS*") {
@@ -2228,21 +2300,37 @@ function Clear-WindowsUpdateCache {
         return
     }
 
+    # Restart only what WE stopped (v2.17). Starting every stopped service afterwards
+    # would silently re-enable one an administrator had disabled on purpose - and the
+    # recovery path would repeat that mistake on the next run.
+    $toRestart = @(
+        foreach ($svcName in @('wuauserv', 'bits')) {
+            $svc = Get-Service -Name $svcName -ErrorAction SilentlyContinue
+            if ($svc -and $svc.Status -eq 'Running') { $svcName }
+        }
+    )
+
+    if ($toRestart.Count -eq 0) {
+        # Nothing of ours to stop or restore: no marker, no service juggling
+        Write-Log "Windows Update services are not running - cleaning the cache directly" -Level DETAIL -NoLog
+        Remove-FolderContent -Path "$env:SystemRoot\SoftwareDistribution\Download" -Category "WinUpdate" -Description "Windows Update cache"
+        return
+    }
+
     # Stop services with try/finally to ensure they restart. v2.17 (p.13 of the audit):
     # a hard kill of this process skips that finally too, leaving wuauserv/bits
-    # stopped forever - the marker lets the NEXT run detect and recover that.
+    # stopped forever - the marker lets the NEXT run detect and recover that, and it
+    # names the exact services so recovery cannot overreach either.
     Write-Log "Stopping Windows Update services..." -Level DETAIL -NoLog
-    $servicesStopped = $false
-    Set-RunMarker -Phase 'WUServiceStop'
+    Set-RunMarker -Phase 'WUServiceStop' -Data @{ ServicesToRestart = $toRestart }
     try {
-        Stop-Service -Name wuauserv, bits -Force -ErrorAction SilentlyContinue
-        $servicesStopped = $true
+        Stop-Service -Name $toRestart -Force -ErrorAction SilentlyContinue
 
         # v2.16: Stop-Service returns before the service has actually reached Stopped,
         # and its failure was swallowed by -ErrorAction SilentlyContinue. Cleaning while
         # the service still holds the files silently leaves the cache in place.
         $stillRunning = @()
-        foreach ($svcName in @('wuauserv', 'bits')) {
+        foreach ($svcName in $toRestart) {
             $svc = Get-Service -Name $svcName -ErrorAction SilentlyContinue
             if (-not $svc) { continue }
             try {
@@ -2261,11 +2349,19 @@ function Clear-WindowsUpdateCache {
             Remove-FolderContent -Path "$env:SystemRoot\SoftwareDistribution\Download" -Category "WinUpdate" -Description "Windows Update cache"
         }
     } finally {
-        # Always restart services
-        if ($servicesStopped) {
-            Start-Service -Name wuauserv, bits -ErrorAction SilentlyContinue
+        # Restart exactly what was running before, and keep the marker if any of them
+        # refused - the next run then retries instead of leaving them down silently
+        $restartFailed = $false
+        foreach ($svcName in $toRestart) {
+            try {
+                Start-Service -Name $svcName -ErrorAction Stop
+            } catch {
+                Write-Log "Could not restart $svcName : $_" -Level WARNING
+                $script:Stats.WarningsCount++
+                $restartFailed = $true
+            }
         }
-        Clear-RunMarker
+        if (-not $restartFailed) { Clear-RunMarker }
     }
 }
 

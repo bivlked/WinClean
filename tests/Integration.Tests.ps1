@@ -341,6 +341,21 @@ Describe "Sandbox: temp age filter is recursive" -Tag "Integration" -Skip:(-not 
         (Get-Item (Join-Path $stale 'old.txt') -Force).LastWriteTime = $old
         (Get-Item $stale -Force).LastWriteTime = $old
 
+        # Freshly created EMPTY directory. It has no children at all, so a check that
+        # only looks at descendants finds "nothing newer than the cutoff" and concludes
+        # the directory is stale. Its own LastWriteTime is what proves otherwise.
+        # A running installer's scratch folder looks exactly like this.
+        $freshEmpty = Join-Path $tempRoot 'freshempty'
+        New-Item -ItemType Directory -Path $freshEmpty -Force | Out-Null
+
+        # Freshly TOUCHED directory whose contents are all old: same trap from the other
+        # side - descendants are stale, but the directory itself was just written to
+        $freshParent = Join-Path $tempRoot 'freshparent'
+        New-Item -ItemType Directory -Path $freshParent -Force | Out-Null
+        [System.IO.File]::WriteAllText((Join-Path $freshParent 'old-content.txt'), 'x' * 512)
+        (Get-Item (Join-Path $freshParent 'old-content.txt') -Force).LastWriteTime = $old
+        (Get-Item $freshParent -Force).LastWriteTime = (Get-Date)
+
         $result = Invoke-Sandbox -Root $root -Body 'Clear-TempFiles'
     }
 
@@ -354,6 +369,16 @@ Describe "Sandbox: temp age filter is recursive" -Tag "Integration" -Skip:(-not 
 
     It "Still removes a directory that is old all the way down" {
         Test-Path (Join-Path $root 'Users\test\AppData\Local\Temp\fullyold') | Should -BeFalse
+    }
+
+    It "Keeps a freshly created EMPTY directory" {
+        # Regression guard: an empty directory has no descendants to prove it is fresh,
+        # so dropping the directory's own LastWriteTime check deletes it
+        Test-Path (Join-Path $root 'Users\test\AppData\Local\Temp\freshempty') | Should -BeTrue
+    }
+
+    It "Keeps a freshly touched directory even when its contents are old" {
+        Test-Path (Join-Path $root 'Users\test\AppData\Local\Temp\freshparent') | Should -BeTrue
     }
 }
 

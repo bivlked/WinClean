@@ -376,6 +376,53 @@ Describe "Set-RunMarker / Clear-RunMarker / Invoke-StaleMarkerRecovery" -Tag "Un
         { Invoke-StaleMarkerRecovery } | Should -Not -Throw
         Test-Path $markerPath | Should -BeFalse
     }
+
+    It "Restarts only the services the marker names, not every stopped service" {
+        # Found by external review: recovery used to start any stopped wuauserv/bits,
+        # which would fight an administrator who disabled one deliberately. The marker
+        # now carries the exact list, and a name that matches no real service proves
+        # the loop is driven by that list (Get-Service finds nothing, nothing happens).
+        [pscustomobject]@{
+            Phase = 'WUServiceStop'; Pid = 999999; Timestamp = (Get-Date).ToString('o')
+            ServicesToRestart = @('WinCleanNoSuchService_ForTest')
+        } | ConvertTo-Json | Set-Content -LiteralPath $markerPath -Encoding utf8
+
+        { Invoke-StaleMarkerRecovery } | Should -Not -Throw
+        # Nothing to repair -> recovery counts as successful -> marker cleaned up
+        Test-Path $markerPath | Should -BeFalse
+    }
+
+    It "Tolerates a WUServiceStop marker with no service list (older format)" {
+        [pscustomobject]@{ Phase = 'WUServiceStop'; Pid = 999999; Timestamp = (Get-Date).ToString('o') } |
+            ConvertTo-Json | Set-Content -LiteralPath $markerPath -Encoding utf8
+        { Invoke-StaleMarkerRecovery } | Should -Not -Throw
+        Test-Path $markerPath | Should -BeFalse
+    }
+}
+
+Describe "Restore-RestorePointFrequency" -Tag "Unit", "Helper" {
+    <#
+    Only the "nothing to do" path is exercised - it is the one that must never touch
+    the registry. The repair path itself writes to HKLM, which a unit test must not do
+    on the machine it runs on.
+    #>
+
+    It "Reports success and changes nothing when the value is not our 0 override" {
+        $srKey = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\SystemRestore'
+        $before = (Get-ItemProperty -Path $srKey -Name SystemRestorePointCreationFrequency -ErrorAction SilentlyContinue).SystemRestorePointCreationFrequency
+
+        # Skip only in the rare case the live machine really is sitting at 0: the test
+        # would then be asking the function to perform a real repair
+        if ($before -eq 0) {
+            Set-ItResult -Skipped -Because 'this machine currently has the override value 0 set'
+            return
+        }
+
+        Restore-RestorePointFrequency -PreviousValue 1440 | Should -BeTrue
+
+        $after = (Get-ItemProperty -Path $srKey -Name SystemRestorePointCreationFrequency -ErrorAction SilentlyContinue).SystemRestorePointCreationFrequency
+        $after | Should -Be $before
+    }
 }
 
 #endregion
