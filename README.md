@@ -55,7 +55,7 @@
 - **All dev tools** handled in parallel
 - **Docker & WSL** optimized
 - **Deep cleanup** with DISM
-- **Safe by design** — protected paths
+- **Safe by design** - protected paths
 
 </td>
 </tr>
@@ -204,7 +204,7 @@ cd WinClean
 | `-SkipDockerCleanup` | Skip Docker/WSL cleanup | `false` |
 | `-SkipVSCleanup` | Skip Visual Studio cleanup | `false` |
 | `-DisableTelemetry` | Disable Windows telemetry via Group Policy | `false` |
-| `-ReportOnly` | **Dry run** — show what would be done | `false` |
+| `-ReportOnly` | **Dry run** - show what would be done | `false` |
 | `-LogPath` | Custom log file path | Auto |
 | `-ResultJsonPath` | Write a machine-readable run summary (JSON) for automation/CI | Off |
 
@@ -263,10 +263,10 @@ Choose the right profile for your needs:
 
 | Profile | Command | Best For |
 |:--------|:--------|:---------|
-| **Preview** | `.\WinClean.ps1 -ReportOnly` | First run — see what will be cleaned without changes |
-| **Safe** | `.\WinClean.ps1 -SkipUpdates -SkipDockerCleanup` | Minimal risk — only temp files and caches |
-| **Developer** | `.\WinClean.ps1` | Full cleanup — includes npm, pip, nuget, Docker, IDE caches |
-| **Quick** | `.\WinClean.ps1 -SkipUpdates -SkipDevCleanup -SkipVSCleanup` | Fast — system cleanup only, no dev tools |
+| **Preview** | `.\WinClean.ps1 -ReportOnly` | First run - see what will be cleaned without changes |
+| **Safe** | `.\WinClean.ps1 -SkipUpdates -SkipDockerCleanup` | Minimal risk - only temp files and caches |
+| **Developer** | `.\WinClean.ps1` | Full cleanup - includes npm, pip, nuget, Docker, IDE caches |
+| **Quick** | `.\WinClean.ps1 -SkipUpdates -SkipDevCleanup -SkipVSCleanup` | Fast - system cleanup only, no dev tools |
 | **Updates Only** | `.\WinClean.ps1 -SkipCleanup` | Just Windows and app updates |
 
 > 💡 **Tip:** Always run with `-ReportOnly` first to preview what will be cleaned!
@@ -336,7 +336,7 @@ C:\Users\YourName\
 
 ```
 ┌────────────────────────────────────────────────────────────────┐
-│                     WinClean v2.15                              │
+│                     WinClean v2.15                             │
 ├────────────────────────────────────────────────────────────────┤
 │  PREPARATION                                                   │
 │  ├─ ✓ Check Administrator Rights                               │
@@ -444,7 +444,7 @@ Contributions are welcome! Please feel free to submit a Pull Request.
 
 ## 📄 License
 
-This project is licensed under the MIT License — see the [LICENSE](LICENSE) file for details.
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
 
 ---
 

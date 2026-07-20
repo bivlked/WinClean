@@ -58,32 +58,38 @@ CleanScript/
 │       └── StandCommon.ps1       # SSH/guest-agent helpers (+ local-режим на хосте)
 ├── docs/                     # Черновики документации (НЕ в git!)
 │   ├── habr-article.md       # Статья для Хабра
-│   └── habr-article-info.md  # Документация по статье
+│   ├── habr-article-info.md  # Документация по статье
+│   └── Screenshots/          # Скриншоты для статьи
+├── .gitignore
 └── .github/
     ├── workflows/ci.yml      # GitHub Actions CI (lint + syntax + Pester)
     ├── PULL_REQUEST_TEMPLATE.md
-    └── ISSUE_TEMPLATE/       # Шаблоны issues (bug, feature, question)
+    └── ISSUE_TEMPLATE/       # bug_report.md, feature_request.md, success_story.md, config.yml
 ```
 
 ---
 
 ## 3. Архитектура скрипта
 
-WinClean.ps1 - монолитный скрипт (~2700 строк) с модульной структурой.
+WinClean.ps1 - монолитный скрипт (3185 строк) с модульной структурой на `#region`.
 
 ### Основные секции
 
-| Строки | Секция | Описание |
-|--------|--------|----------|
-| 1-167 | PSScriptInfo + Help | Метаданные для PSGallery, документация |
-| 168-220 | Initialization | Константы, $script:Stats, $script:Version |
-| 220-430 | Logging & Helpers | Write-Log, Test-*, Format-*, утилиты |
-| 430-560 | **Update Check** | Test-ScriptUpdate, Invoke-ScriptUpdate (v2.10) |
-| 560-1200 | Clear-* Functions | Очистка (браузеры, система, dev, Docker, VS) |
-| 1200-1600 | Update-* Functions | Windows Update, winget |
-| 1600-2000 | Privacy & Telemetry | DNS, event logs, телеметрия |
-| 2000-2400 | UI Functions | Banner, Progress, FinalStatistics |
-| 2400-2700 | Main Function | Start-WinClean (оркестрация) |
+⚠️ Границы ниже соответствуют реальным `#region` (сверено 20.07.2026). При правках проверять командой, а не доверять таблице: `grep -n "^#region" WinClean.ps1`.
+
+| Строки | Секция (`#region`) | Что внутри |
+|--------|--------------------|------------|
+| 1-236 | PSScriptInfo + Help + param() | Метаданные PSGallery, comment-based help, блок параметров (~232-243) |
+| 238-288 | INITIALIZATION | Константы, `$script:Stats`, `$script:Version` (274), `$script:ProtectedPaths` |
+| 290-404 | LOGGING FUNCTIONS | `Write-Log`, `Update-Progress`, `Test-InteractiveConsole` |
+| 406-1100 | HELPER FUNCTIONS | `Test-*`, `Format-FileSize`, `ConvertFrom-HumanReadableSize`, `Remove-FolderContent` (892), `New-SystemRestorePoint`, self-update |
+| 1102-1469 | UPDATE FUNCTIONS | `Update-WindowsSystem` (1106), `Update-Applications` (1300) |
+| 1471-2204 | CLEANUP FUNCTIONS | temp, браузеры, кэш WU, корзина, системные кэши, журналы, DNS, privacy, телеметрия, Windows.old |
+| 2206-2344 | DEVELOPER CLEANUP | `Clear-DeveloperCaches` (npm/yarn/pnpm/pip/uv/go/gradle/nuget) |
+| 2346-2505 | DOCKER/WSL CLEANUP | `Clear-DockerWSL`, компактирование VHDX |
+| 2507-2594 | VISUAL STUDIO CLEANUP | `Clear-VisualStudio` |
+| 2596-2823 | SYSTEM CLEANUP | `Invoke-DISMCleanup` (2600), `Invoke-StorageSense` (2682, cleanmgr) |
+| 2825-3185 | MAIN EXECUTION | `Show-Banner`, `Show-FinalStatistics`, `Write-ResultJson` (3017), `Start-WinClean` (3065) |
 
 ### Ключевые переменные
 
@@ -125,15 +131,18 @@ $script:ProtectedPaths = @(...)    # Защищённые пути (никогд
 
 ### Версионирование
 
-При выпуске новой версии обновить:
-1. `$script:Version` в WinClean.ps1 (строка ~208)
+При выпуске новой версии обновить (номера строк сверены 20.07.2026 для v2.15; проверять `grep -n 'VERSION\|script:Version' WinClean.ps1`):
+1. `$script:Version` в WinClean.ps1 (строка 274)
 2. `.VERSION` в PSScriptInfo (строка 2)
-3. `.RELEASENOTES` в PSScriptInfo (строки 14-18)
-4. `SYNOPSIS` (строка 24)
-5. `NOTES` секция - добавить "Changes in X.X"
-6. Badges в README.md и README_RU.md
-7. Диаграмму "Execution Flow" в README (версия в заголовке)
+3. `.RELEASENOTES` в PSScriptInfo (строки 14-21)
+4. `SYNOPSIS` (строка 26)
+5. `NOTES` секция (строки 41, 43) - `Version:` и "Changes in X.X"
+6. Badges в README.md и README_RU.md (строка 9 в обоих)
+7. Диаграмму "Execution Flow" в README (версия в заголовке, строка 339 в обоих)
 8. CHANGELOG.md - новая запись в начале
+9. `CONTRIBUTING.md` - счётчик тестов, если он менялся (строки 131 и 239)
+
+⚠️ **Счётчик тестов считать только прогоном Pester**, не грепом `It`: 7 блоков размножаются через `-ForEach`, поэтому наивный подсчёт даёт 112 вместо реальных 141.
 
 🔴 **9. GitHub Release с ассетами - ОБЯЗАТЕЛЕН, иначе one-liner'ы отдают СТАРУЮ версию.**
 `get.ps1` и `install.ps1` берут скрипт из **последнего GitHub Release** (fail-closed, без отката на main) и сверяют SHA256 с ассетом `WinClean.ps1.sha256`. Просто `git push` новую версию НЕ публикует - пользователи продолжат получать предыдущий релиз.

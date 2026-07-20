@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [Unreleased]
+
+### In progress
+
+- v2.16: driver store cleanup, disk space report, quick system health section, run-to-run delta (see CLAUDE.md)
+
+---
+
 ## [2.15] - 2026-07-18
 
 ### Fixed
@@ -19,7 +27,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **One-command install/update** (`install.ps1`): `irm .../install.ps1 | iex` (elevated) - installs or updates WinClean into the admin-protected `%ProgramFiles%\WinClean` (an elevated shortcut must not point at a user-writable file) and creates a desktop shortcut with the "Run as administrator" flag set (elevation on double-click)
 
-- **Integration test suite** (`tests/Integration.Tests.ps1`, 24 tests): real cleanup functions run against a sandboxed fake filesystem in a child process with redirected environment variables - verifies what actually gets deleted and what must survive (active log, protected paths, browser profile data). 139 Pester tests total
+- **Integration test suite** (`tests/Integration.Tests.ps1`, 24 tests): real cleanup functions run against a sandboxed fake filesystem in a child process with redirected environment variables - verifies what actually gets deleted and what must survive (active log, protected paths, browser profile data). 141 Pester tests total
 
 - **Smoke runner** (`tools/Invoke-SmokeTest.ps1`): safe ReportOnly run with automated verification of exit code, result JSON and console box geometry (`tools/BoxGeometry.ps1` catches misaligned frames and foreign output inside boxes automatically)
 
@@ -268,7 +276,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Disk space warning: Red <10%, Yellow <20%
 
 ### Changed
-- **Removed auto-close timeout**: Window now waits indefinitely for keypress instead of 60-second timeout — users won't miss results if distracted
+- **Removed auto-close timeout**: Window now waits indefinitely for keypress instead of 60-second timeout - users won't miss results if distracted
 
 ---
 
@@ -276,8 +284,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 - **Critical: TotalFreedBytes always showed 0**: The "Space freed" counter in final statistics was always displaying 0 bytes regardless of actual cleanup
-  - **Root cause**: `[System.Threading.Interlocked]::Add([ref]$script:Stats.TotalFreedBytes, ...)` doesn't work with hashtable elements in PowerShell — `[ref]` creates a temporary copy instead of referencing the actual hashtable value
-  - **Solution**: Replaced all 6 occurrences with simple `+=` operator — the synchronized hashtable already provides thread-safety for basic operations
+  - **Root cause**: `[System.Threading.Interlocked]::Add([ref]$script:Stats.TotalFreedBytes, ...)` doesn't work with hashtable elements in PowerShell - `[ref]` creates a temporary copy instead of referencing the actual hashtable value
+  - **Solution**: Replaced all 6 occurrences with simple `+=` operator - the synchronized hashtable already provides thread-safety for basic operations
   - **Impact**: All previous versions (2.0-2.2) had this bug; users saw "Space freed: 0 Bytes" even when gigabytes were actually cleaned
 
 ---
@@ -286,7 +294,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 - **TcpClient resource leak**: Now properly closed in `finally` block to prevent socket exhaustion on repeated connection failures
-- **Code region markers**: Fixed 8 misplaced `#region` tags that should have been `#` (plain comment) — now IDE can properly fold code sections
+- **Code region markers**: Fixed 8 misplaced `#region` tags that should have been `#` (plain comment) - now IDE can properly fold code sections
 - **Banner ASCII art**: Changed from "DREAM" to "CLEAN" to match the script name
 
 ---
@@ -295,7 +303,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 - **Clear-EventLogs precision**: Now uses exact match (`-ne 'Security'`) instead of `-notmatch 'Security'` to only preserve the main Security log (was incorrectly skipping all logs with "Security" in the name)
-- **Browser profile cache cleanup**: Additional Chrome/Edge profiles now get full cache set (Cache, Code Cache, GPUCache, Service Worker) — previously only Cache was cleaned
+- **Browser profile cache cleanup**: Additional Chrome/Edge profiles now get full cache set (Cache, Code Cache, GPUCache, Service Worker) - previously only Cache was cleaned
 - **Update-Applications error tracking**: Now increments `ErrorsCount` when no internet connection (was only logging error without counting)
 - **Roslyn Temp cleanup**: File patterns (`*.roslynobjectin`) now handled correctly using new `Remove-FilesByPattern` function (was passing file paths to directory cleanup function)
 - **winget update count**: Now works with any source, not just `winget|msstore` (supports custom/corporate repositories)
