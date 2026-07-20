@@ -585,3 +585,69 @@ Describe "v2.16: Disk Cleanup timeout" -Tag "Fix", "V216" {
 }
 
 #endregion
+
+#region v2.16 Features
+
+Describe "v2.16: driver store cleanup" -Tag "Feature", "V216" {
+    It "Enumerates driver packages as XML" {
+        # Plain text output of pnputil switches language with the console code page
+        $scriptContent | Should -Match '/enum-drivers /devices /format xml'
+    }
+
+    It "Only removes packages with no bound device AND a newer sibling" {
+        $scriptContent | Should -Match '\$pkg\.Oem -eq \$newest\.Oem -or \$pkg\.InUse'
+    }
+
+    It "Never uses /force" {
+        $scriptContent | Should -Not -Match 'pnputil[^
+]*/force'
+    }
+
+    It "Trusts the exit code, not the localized text" {
+        $scriptContent | Should -Match '(?s)pnputil\.exe /delete-driver.*?\$LASTEXITCODE -eq 0'
+    }
+
+    It "Maps packages to folders by INF hash, not by version string" {
+        # Several packages can share an identical DriverVer
+        $scriptContent | Should -Match 'Get-FileHash \$infPath -Algorithm SHA256'
+    }
+
+    It "Reports its own statistics category" {
+        $scriptContent | Should -Match 'FreedByCategory\["DriverStore"\]'
+    }
+}
+
+Describe "v2.16: kernel dump cleanup" -Tag "Feature", "V216" {
+    It "Targets LiveKernelReports" {
+        $scriptContent | Should -Match "LiveKernelReports"
+    }
+
+    It "Only deletes dumps older than the age threshold" {
+        $scriptContent | Should -Match '\$_\.LastWriteTime -lt \$cutoff'
+        $scriptContent | Should -Match '\[int\]\$MinAgeDays = 30'
+    }
+
+    It "Only touches .dmp files" {
+        $scriptContent | Should -Match "-Filter '\*\.dmp'"
+    }
+}
+
+Describe "v2.16: disk space report" -Tag "Feature", "V216" {
+    It "Function exists and is called" {
+        $scriptContent | Should -Match 'function Show-DiskSpaceReport'
+        $scriptContent | Should -Match '(?m)^\s*Show-DiskSpaceReport\s*$'
+    }
+
+    It "Reports the MSI cache as keep-only" {
+        # Deleting it breaks uninstall and repair
+        $scriptContent | Should -Match "MSI cache \(keep\)"
+    }
+
+    It "Reads shadow storage through CIM, not vssadmin" {
+        # vssadmin prints numbers using the system decimal separator
+        $scriptContent | Should -Match 'Get-CimInstance Win32_ShadowStorage'
+        $scriptContent | Should -Not -Match 'vssadmin list shadowstorage'
+    }
+}
+
+#endregion

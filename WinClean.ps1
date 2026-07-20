@@ -1,5 +1,5 @@
 <#PSScriptInfo
-.VERSION 2.15
+.VERSION 2.16
 .GUID 8f7c3b2a-1d4e-5f6a-9b8c-0d1e2f3a4b5c
 .AUTHOR bivlked
 .COMPANYNAME
@@ -12,6 +12,7 @@
 .REQUIREDSCRIPTS
 .EXTERNALSCRIPTDEPENDENCIES
 .RELEASENOTES
+    v2.16: Driver store cleanup, disk space report, kernel dump cleanup, 9 audit fixes (Delivery Optimization path, TEMP age filter, winget exit codes)
     v2.15: ResultJsonPath for automated testing, one-command install/run (get.ps1, install.ps1), integration test suite
     v2.14: Log persistence fix, correct npm/Firefox cache paths, localized size parsing, faster DISM/EventLogs, UI fixes
     v2.13: Statistics accuracy fixes, efficiency improvements, registry cleanup
@@ -24,7 +25,7 @@
 
 <#
 .SYNOPSIS
-    WinClean - Ultimate Windows 11 Maintenance Script v2.15
+    WinClean - Ultimate Windows 11 Maintenance Script v2.16
 .DESCRIPTION
     Комплексный скрипт для обновления и очистки Windows 11:
     - Обновление Windows (включая драйверы)
@@ -38,8 +39,22 @@
     - Подробный цветной вывод + лог-файл
 .NOTES
     Author: biv
-    Version: 2.15
+    Version: 2.16
     Requires: PowerShell 7.1+, Windows 11, Administrator rights
+    Changes in 2.16:
+    - Added driver store cleanup: removes superseded driver packages that no device
+      uses and that have a newer version installed (451 MB on the author's machine)
+    - Added disk space report: shows large areas cleanup deliberately never touches
+      (MSI cache, search index, hiberfil.sys, shadow copies)
+    - Added kernel dump cleanup for stale LiveKernelReports files (multi-gigabyte)
+    - Fixed Delivery Optimization cache path - multi-gigabyte cleanups were reported as 0 B
+    - Temp cleanup no longer deletes files younger than a day (running installers)
+    - Windows Update cache cleanup now waits for the service to really stop
+    - Warns when Controlled Folder Access may silently block deletions
+    - Disk Cleanup category list reconciled with the registry; leftover StateFlags
+      are now swept from every handler
+    - winget exit codes are decoded instead of printed as a bare number
+    - All progress bars are closed before the summary, including foreign ones
     Changes in 2.15:
     - Added -ResultJsonPath: machine-readable run summary (JSON) for automated
       testing, CI and VM test stands
@@ -275,7 +290,7 @@ if (-not $LogPath) {
 }
 
 # Script version (single source of truth for version checking)
-$script:Version = "2.15"
+$script:Version = "2.16"
 
 # Protected paths that should never be deleted
 $script:ProtectedPaths = @(
@@ -2713,6 +2728,232 @@ function Clear-VisualStudio {
 #                          SYSTEM CLEANUP FUNCTIONS
 #═══════════════════════════════════════════════════════════════════════════════
 
+function Clear-KernelDumps {
+    <#
+    .SYNOPSIS
+        Removes stale kernel live-dump reports (v2.16)
+    .DESCRIPTION
+        LiveKernelReports accumulates multi-gigabyte .dmp files that nothing ever
+        cleans up - a single watchdog dump of 9 GB was found sitting for 18 months on
+        the author's machine. Only files older than $MinAgeDays are touched, so a dump
+        from a crash that is being investigated right now survives.
+    #>
+    param([int]$MinAgeDays = 30)
+
+    $dumpPath = Join-Path $env:SystemRoot 'LiveKernelReports'
+    if (-not (Test-Path -LiteralPath $dumpPath)) { return }
+
+    $cutoff = (Get-Date).AddDays(-$MinAgeDays)
+    $stale = @(Get-ChildItem -LiteralPath $dumpPath -Recurse -File -Force -Filter '*.dmp' -ErrorAction SilentlyContinue |
+               Where-Object { $_.LastWriteTime -lt $cutoff })
+    if ($stale.Count -eq 0) { return }
+
+    $size = ($stale | Measure-Object -Property Length -Sum).Sum
+
+    if ($ReportOnly) {
+        Write-Log "Would clean: kernel dumps older than $MinAgeDays days ($($stale.Count) file(s)) - $(Format-FileSize $size)" -Level DETAIL
+        return
+    }
+
+    $freed = 0
+    foreach ($file in $stale) {
+        try {
+            $len = $file.Length
+            Remove-Item -LiteralPath $file.FullName -Force -ErrorAction Stop
+            $freed += $len
+        } catch { }
+    }
+
+    if ($freed -gt 0) {
+        $script:Stats.TotalFreedBytes += $freed
+        if (-not $script:Stats.FreedByCategory.ContainsKey("System")) {
+            $script:Stats.FreedByCategory["System"] = 0
+        }
+        $script:Stats.FreedByCategory["System"] += $freed
+        Write-Log "Kernel dumps older than $MinAgeDays days - $(Format-FileSize $freed)" -Level SUCCESS
+    }
+}
+
+function Show-DiskSpaceReport {
+    <#
+    .SYNOPSIS
+        Reports where disk space went, including areas this script never deletes (v2.16)
+    .DESCRIPTION
+        Several of the largest consumers on a Windows workstation are things a cleanup
+        script must not touch: C:\Windows\Installer holds the data needed to uninstall
+        or repair applications, hiberfil.sys is sized by the OS, and the search index is
+        held open by its service. Reporting them is still valuable - without it the user
+        has no idea where tens of gigabytes went.
+    #>
+    Write-Log "Disk Space Report" -Level SECTION
+
+    $targets = [ordered]@{
+        'Kernel live dumps'     = Join-Path $env:SystemRoot 'LiveKernelReports'
+        'MSI cache (keep)'      = Join-Path $env:SystemRoot 'Installer'
+        'Search index'          = Join-Path $env:ProgramData 'Microsoft\Search\Data\Applications\Windows'
+        'VS package cache'      = Join-Path $env:ProgramData 'Package Cache'
+        'Windows logs'          = Join-Path $env:SystemRoot 'Logs'
+        'Crash dumps (user)'    = Join-Path $env:LOCALAPPDATA 'CrashDumps'
+    }
+
+    $rows = @()
+    foreach ($name in $targets.Keys) {
+        $size = Get-FolderSize -Path $targets[$name]
+        if ($size -gt 100MB) { $rows += [pscustomobject]@{ Item = $name; Bytes = $size } }
+    }
+
+    foreach ($file in @('hiberfil.sys', 'pagefile.sys', 'swapfile.sys', 'MEMORY.DMP')) {
+        $path = if ($file -eq 'MEMORY.DMP') { Join-Path $env:SystemRoot $file } else { Join-Path $env:SystemDrive $file }
+        $item = Get-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
+        if ($item -and $item.Length -gt 100MB) { $rows += [pscustomobject]@{ Item = $file; Bytes = $item.Length } }
+    }
+
+    # Shadow copies: CIM returns bytes, unlike vssadmin which prints them using the
+    # system decimal separator and would need locale-aware parsing
+    $shadow = Get-CimInstance Win32_ShadowStorage -ErrorAction SilentlyContinue
+    if ($shadow) {
+        $used = ($shadow | Measure-Object -Property UsedSpace -Sum).Sum
+        if ($used -gt 100MB) { $rows += [pscustomobject]@{ Item = 'Restore points / shadow copies'; Bytes = $used } }
+    }
+
+    if ($rows.Count -eq 0) {
+        Write-Log "Nothing above 100 MB outside the cleaned areas" -Level DETAIL
+        return
+    }
+
+    foreach ($row in ($rows | Sort-Object Bytes -Descending)) {
+        Write-Log "$($row.Item): $(Format-FileSize $row.Bytes)" -Level DETAIL
+    }
+}
+
+function Get-RedundantDriverPackage {
+    <#
+    .SYNOPSIS
+        Finds superseded third-party driver packages in the driver store (v2.16)
+    .DESCRIPTION
+        A package is a candidate only when BOTH conditions hold:
+          1. pnputil reports no device bound to it, and
+          2. a newer package with the same OriginalName exists.
+        Packages without a newer sibling are left alone even when unused - they serve
+        devices that are merely unplugged right now (docks, printers, external storage).
+        That distinction is what separates this from the aggressive "driver cleaners"
+        that break machines.
+
+        Output is machine-readable XML on purpose: the plain text output of pnputil
+        switches between English and the system language depending on the console code
+        page, so it cannot be parsed reliably.
+    #>
+    $repo = Join-Path $env:SystemRoot 'System32\DriverStore\FileRepository'
+
+    try {
+        [xml]$doc = (& pnputil.exe /enum-drivers /devices /format xml 2>$null) -join "`n"
+    } catch {
+        Write-Log "Could not enumerate driver packages: $_" -Level WARNING
+        return @()
+    }
+    if (-not $doc.PnpUtil.Driver) { return @() }
+
+    $packages = foreach ($d in $doc.PnpUtil.Driver) {
+        $parts = $d.DriverVersion -split '\s+', 2      # "MM/dd/yyyy x.y.z.w"
+        if ($parts.Count -lt 2) { continue }
+        try {
+            [pscustomobject]@{
+                Oem      = $d.DriverName
+                Inf      = $d.OriginalName
+                Provider = $d.ProviderName
+                Class    = $d.ClassName
+                Version  = [version]$parts[1]
+                Date     = [datetime]::ParseExact($parts[0], 'MM/dd/yyyy', [cultureinfo]::InvariantCulture)
+                InUse    = [bool]$d.Devices
+            }
+        } catch { continue }
+    }
+
+    # Index repository folders by the SHA256 of their INF file. Version strings are not
+    # unique - ibtusb.inf ships several packages carrying an identical DriverVer - so
+    # hashing the actual INF is the only exact oem*.inf -> folder mapping.
+    $byHash = @{}
+    foreach ($dir in (Get-ChildItem -LiteralPath $repo -Directory -ErrorAction SilentlyContinue)) {
+        $infName = ($dir.Name -split '\.inf_')[0] + '.inf'
+        $infPath = Join-Path $dir.FullName $infName
+        if (Test-Path -LiteralPath $infPath) {
+            try { $byHash[(Get-FileHash $infPath -Algorithm SHA256).Hash] = $dir.FullName } catch { }
+        }
+    }
+
+    $packages | Group-Object Inf | ForEach-Object {
+        $newest = $_.Group | Sort-Object Version, Date -Descending | Select-Object -First 1
+        foreach ($pkg in $_.Group) {
+            if ($pkg.Oem -eq $newest.Oem -or $pkg.InUse) { continue }
+
+            $size = 0
+            $infFile = Join-Path $env:SystemRoot "INF\$($pkg.Oem)"
+            if (Test-Path -LiteralPath $infFile) {
+                try {
+                    $hash = (Get-FileHash $infFile -Algorithm SHA256).Hash
+                    if ($byHash.ContainsKey($hash)) {
+                        $size = (Get-ChildItem -LiteralPath $byHash[$hash] -Recurse -File -Force -ErrorAction SilentlyContinue |
+                                 Measure-Object -Property Length -Sum).Sum
+                    }
+                } catch { }
+            }
+
+            $pkg | Add-Member -NotePropertyName Bytes -NotePropertyValue ([long]$size) -PassThru |
+                   Add-Member -NotePropertyName KeptVersion -NotePropertyValue $newest.Version -PassThru
+        }
+    }
+}
+
+function Clear-DriverStore {
+    <#
+    .SYNOPSIS
+        Removes superseded driver packages from the driver store (v2.16)
+    #>
+    Write-Log "Driver Store" -Level SECTION
+
+    $candidates = @(Get-RedundantDriverPackage)
+    if ($candidates.Count -eq 0) {
+        Write-Log "No superseded driver packages found" -Level DETAIL
+        return
+    }
+
+    $totalBytes = ($candidates | Measure-Object -Property Bytes -Sum).Sum
+
+    if ($ReportOnly) {
+        Write-Log "Would clean: $($candidates.Count) superseded driver package(s) - $(Format-FileSize $totalBytes)" -Level DETAIL
+        foreach ($group in ($candidates | Group-Object Inf | Sort-Object Count -Descending | Select-Object -First 5)) {
+            Write-Log "  $($group.Name): $($group.Count) old version(s)" -Level DETAIL
+        }
+        return
+    }
+
+    $freed = 0
+    $removed = 0
+    foreach ($pkg in $candidates) {
+        # No /force here: it deletes packages even when a device is using them, which is
+        # exactly how driver cleaners break systems. Exit code is the verdict - the text
+        # output is localized.
+        $null = & pnputil.exe /delete-driver $pkg.Oem 2>&1
+        if ($LASTEXITCODE -eq 0) {
+            $freed += $pkg.Bytes
+            $removed++
+        } else {
+            Write-Log "Skipped $($pkg.Oem) ($($pkg.Inf)): pnputil exit $LASTEXITCODE" -Level DETAIL
+        }
+    }
+
+    if ($removed -gt 0) {
+        $script:Stats.TotalFreedBytes += $freed
+        if (-not $script:Stats.FreedByCategory.ContainsKey("DriverStore")) {
+            $script:Stats.FreedByCategory["DriverStore"] = 0
+        }
+        $script:Stats.FreedByCategory["DriverStore"] += $freed
+        Write-Log "Removed $removed superseded driver package(s) - $(Format-FileSize $freed)" -Level SUCCESS
+    } else {
+        Write-Log "No driver packages were removed" -Level DETAIL
+    }
+}
+
 function Invoke-DISMCleanup {
     <#
     .SYNOPSIS
@@ -3313,11 +3554,16 @@ function Start-WinClean {
             Update-Progress -Activity "Deep Cleanup" -Status "Running system cleanup..."
 
             Invoke-DISMCleanup
+            Clear-DriverStore
+            Clear-KernelDumps
             Invoke-StorageSense
             Clear-WindowsOld
         }
 
-        # Phase 8: Telemetry Configuration (if requested)
+        # Phase 8: what is taking up space that cleanup deliberately leaves alone (v2.16)
+        Show-DiskSpaceReport
+
+        # Phase 9: Telemetry Configuration (if requested)
         if ($DisableTelemetry) {
             Set-WindowsTelemetry -Disable
         }

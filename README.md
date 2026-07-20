@@ -6,7 +6,7 @@
 
 ### Ultimate Windows 11 Maintenance Script
 
-[![Version](https://img.shields.io/badge/version-2.15-blue.svg)](https://github.com/bivlked/WinClean/releases)
+[![Version](https://img.shields.io/badge/version-2.16-blue.svg)](https://github.com/bivlked/WinClean/releases)
 [![PSGallery](https://img.shields.io/powershellgallery/v/WinClean?label=PSGallery&logo=powershell&logoColor=white)](https://www.powershellgallery.com/packages/WinClean)
 [![CI](https://github.com/bivlked/WinClean/actions/workflows/ci.yml/badge.svg)](https://github.com/bivlked/WinClean/actions/workflows/ci.yml)
 [![PowerShell 7.1+](https://img.shields.io/badge/PowerShell-7.1%2B-5391FE?logo=powershell&logoColor=white)](https://github.com/PowerShell/PowerShell)
@@ -81,11 +81,14 @@
 <td width="33%" valign="top">
 
 ### 🗑️ Cleanup
-- Temp files (3 locations)
+- Temp files (age-aware)
 - Browser caches (6 browsers)
 - Windows caches (8 types)
+- Driver store (old versions)
+- Stale kernel dumps
 - Recycle Bin emptying
 - Windows.old removal
+- Disk space report
 
 </td>
 <td width="33%" valign="top">
@@ -336,7 +339,7 @@ C:\Users\YourName\
 
 ```
 ┌────────────────────────────────────────────────────────────────┐
-│                     WinClean v2.15                             │
+│                     WinClean v2.16                             │
 ├────────────────────────────────────────────────────────────────┤
 │  PREPARATION                                                   │
 │  ├─ ✓ Check Administrator Rights                               │
@@ -355,14 +358,16 @@ C:\Users\YourName\
 ├────────────────────────────────────────────────────────────────┤
 │  DEEP CLEANUP                                                  │
 │  ├─ 🔧 DISM Component Cleanup                                  │
-│  ├─ 💾 Disk Cleanup (20+ categories)                           │
+│  ├─ 💾 Disk Cleanup (24 categories)                            │
+│  ├─ 🚗 Driver Store (superseded packages)                      │
+│  ├─ 🧹 Stale Kernel Dumps (older than 30 days)                 │
 │  └─ 📁 Windows.old Removal (with confirmation)                 │
 ├────────────────────────────────────────────────────────────────┤
 │  PRIVACY (optional)                                            │
 │  ├─ 🔒 Clear DNS Cache & History                               │
 │  └─ ⚙️ Disable Telemetry (if -DisableTelemetry)                │
 ├────────────────────────────────────────────────────────────────┤
-│  📊 SUMMARY REPORT                                             │
+│  📊 DISK SPACE REPORT + SUMMARY                                │
 └────────────────────────────────────────────────────────────────┘
 ```
 
