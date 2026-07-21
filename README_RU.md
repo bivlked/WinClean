@@ -201,7 +201,7 @@ cd WinClean
 | Параметр | Описание | По умолчанию |
 |:---------|:---------|:------------:|
 | `-SkipUpdates` | Пропустить обновления Windows и winget | `false` |
-| `-SkipCleanup` | Пропустить все операции очистки | `false` |
+| `-SkipCleanup` | Пропустить всю очистку (система, глубокая, разработчик, Docker/WSL, Visual Studio) | `false` |
 | `-SkipRestore` | Пропустить создание точки восстановления | `false` |
 | `-SkipDevCleanup` | Пропустить кэши разработчика (npm, pip и т.д.) | `false` |
 | `-SkipDockerCleanup` | Пропустить очистку Docker/WSL | `false` |

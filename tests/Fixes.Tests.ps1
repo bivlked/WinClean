@@ -947,3 +947,39 @@ Describe "v2.17: volume roots are protected" -Tag "Fix", "V217" {
 }
 
 #endregion
+
+#region v2.19: -SkipCleanup contract + phase dispatch wiring
+
+Describe "v2.19: -SkipCleanup suppresses the whole cleanup group" -Tag "Fix", "V219", "SkipCleanup" {
+
+    BeforeAll {
+        $body = Get-FunctionBody -Name 'Start-WinClean'
+    }
+
+    It "System, deep and disk-report phases are gated on -SkipCleanup" {
+        $body | Should -Match "Invoke-Phase -Name 'SystemCleanup' -Skip:\`$SkipCleanup"
+        $body | Should -Match "Invoke-Phase -Name 'DeepSystemCleanup' -Skip:\`$SkipCleanup"
+        $body | Should -Match "Invoke-Phase -Name 'DiskSpaceReport' -Skip:\`$SkipCleanup"
+    }
+
+    It "Developer/Docker/VS phases are ALSO gated on -SkipCleanup, not only their own flag" {
+        # This is the bug the external review found: before v2.19 these three ran even
+        # with -SkipCleanup, contradicting the documented 'skip all cleanup' contract.
+        $body | Should -Match "Invoke-Phase -Name 'DeveloperCleanup' -Skip:\(\`$SkipCleanup -or \`$SkipDevCleanup\)"
+        $body | Should -Match "Invoke-Phase -Name 'DockerWSLCleanup' -Skip:\(\`$SkipCleanup -or \`$SkipDockerCleanup\)"
+        $body | Should -Match "Invoke-Phase -Name 'VisualStudioCleanup' -Skip:\(\`$SkipCleanup -or \`$SkipVSCleanup\)"
+    }
+
+    It "Preparation and Updates carry their own skip flags" {
+        $body | Should -Match "Invoke-Phase -Name 'Preparation' -Skip:\`$SkipRestore"
+        $body | Should -Match "Invoke-Phase -Name 'Updates' -Skip:\`$SkipUpdates"
+    }
+
+    It "TotalSteps nests dev/docker/vs increments under -not SkipCleanup" {
+        # The progress denominator must follow the same suppression, or a -SkipCleanup
+        # run counts progress against phases that will never run.
+        $body | Should -Match '(?s)if \(-not \$SkipCleanup\) \{\s*\$script:Stats\.TotalSteps \+= 2.*?SkipDevCleanup.*?SkipDockerCleanup.*?SkipVSCleanup.*?\}'
+    }
+}
+
+#endregion

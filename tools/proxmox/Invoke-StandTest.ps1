@@ -194,6 +194,39 @@ if (-not $jsonRaw) {
         # One byte used to be enough to pass; a real run on a rolled-back VM frees far more
         $failures += "Full mode freed almost nothing (TotalFreedBytes = $($result.TotalFreedBytes))"
     }
+
+    # v2.19: the three phase buckets are a dispatch status. Validate the invariant on
+    # real hardware - they must be disjoint, and for a run that was not aborted their
+    # union must be exactly the known phase set (a name missing from all three means the
+    # run crashed before dispatching it). A phase the user skipped must land in
+    # PhasesSkipped, never PhasesCompleted - this exercises the F2/F3 honesty fix e2e.
+    if (-not $result.Aborted) {
+        $knownPhases = @('Preparation','Updates','SystemCleanup','DeveloperCleanup',
+                         'DockerWSLCleanup','VisualStudioCleanup','DeepSystemCleanup',
+                         'DiskSpaceReport','Telemetry')
+        $completed = @($result.PhasesCompleted)
+        $skipped   = @($result.PhasesSkipped)
+        $failed    = @($result.PhasesFailed)
+        $union     = @($completed + $skipped + $failed)
+
+        if (@($union | Sort-Object -Unique).Count -ne $union.Count) {
+            $failures += "Phase buckets overlap - a phase is in more than one of Completed/Skipped/Failed"
+        }
+        $missing = @($knownPhases | Where-Object { $_ -notin $union })
+        $extra   = @($union | Where-Object { $_ -notin $knownPhases })
+        if ($missing) { $failures += "Phases missing from result JSON (crashed before dispatch?): $($missing -join ', ')" }
+        if ($extra)   { $failures += "Unexpected phase names in result JSON: $($extra -join ', ')" }
+
+        if ($result.Parameters.SkipUpdates) {
+            if ('Updates' -notin $skipped) { $failures += "SkipUpdates set but 'Updates' not in PhasesSkipped" }
+            if ('Updates' -in $completed)  { $failures += "SkipUpdates set but 'Updates' counted as Completed" }
+        }
+        if ($result.Parameters.SkipCleanup) {
+            foreach ($ph in 'SystemCleanup','DeepSystemCleanup','DeveloperCleanup','DockerWSLCleanup','VisualStudioCleanup','DiskSpaceReport') {
+                if ($ph -notin $skipped) { $failures += "SkipCleanup set but '$ph' not in PhasesSkipped" }
+            }
+        }
+    }
 }
 
 if (-not $logRaw) {

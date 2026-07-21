@@ -201,7 +201,7 @@ cd WinClean
 | Parameter | Description | Default |
 |:----------|:------------|:-------:|
 | `-SkipUpdates` | Skip Windows and winget updates | `false` |
-| `-SkipCleanup` | Skip all cleanup operations | `false` |
+| `-SkipCleanup` | Skip all cleanup (system, deep, developer, Docker/WSL, Visual Studio) | `false` |
 | `-SkipRestore` | Skip system restore point creation | `false` |
 | `-SkipDevCleanup` | Skip developer caches (npm, pip, etc.) | `false` |
 | `-SkipDockerCleanup` | Skip Docker/WSL cleanup | `false` |

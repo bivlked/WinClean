@@ -741,3 +741,103 @@ Describe "Get-RecycleBinSize" -Tag "Unit", "Helper" {
 }
 
 #endregion
+
+#region Invoke-Phase Tests (v2.19)
+
+Describe "Invoke-Phase dispatch status" -Tag "Unit", "Helper" {
+
+    BeforeEach {
+        # Invoke-Phase records into the shared run stats and the run log; start clean
+        $script:Stats.PhasesCompleted = @()
+        $script:Stats.PhasesFailed    = @()
+        $script:Stats.PhasesSkipped   = @()
+        $script:Stats.ErrorsCount     = 0
+    }
+
+    It "Records a normal phase as Completed and runs its action" {
+        $marker = [pscustomobject]@{ Ran = $false }
+        Invoke-Phase -Name 'Normal' -Action { $marker.Ran = $true }
+
+        $marker.Ran                   | Should -BeTrue
+        $script:Stats.PhasesCompleted | Should -Contain 'Normal'
+        $script:Stats.PhasesSkipped   | Should -Not -Contain 'Normal'
+        $script:Stats.PhasesFailed    | Should -Not -Contain 'Normal'
+    }
+
+    It "Records a throwing phase as Failed and counts the error" {
+        $before = [int]$script:Stats.ErrorsCount
+        Invoke-Phase -Name 'Boom' -Action { throw "kaboom" }
+
+        $script:Stats.PhasesFailed     | Should -Contain 'Boom'
+        $script:Stats.PhasesCompleted  | Should -Not -Contain 'Boom'
+        $script:Stats.PhasesSkipped    | Should -Not -Contain 'Boom'
+        [int]$script:Stats.ErrorsCount | Should -BeGreaterThan $before
+    }
+
+    It "Records a -Skip phase as Skipped and never runs its action" {
+        $marker = [pscustomobject]@{ Ran = $false }
+        Invoke-Phase -Name 'Off' -Skip:$true -Action { $marker.Ran = $true }
+
+        $marker.Ran                   | Should -BeFalse
+        $script:Stats.PhasesSkipped   | Should -Contain 'Off'
+        $script:Stats.PhasesCompleted | Should -Not -Contain 'Off'
+        $script:Stats.PhasesFailed    | Should -Not -Contain 'Off'
+    }
+
+    It "Runs the phase normally when -Skip is false" {
+        $marker = [pscustomobject]@{ Ran = $false }
+        Invoke-Phase -Name 'On' -Skip:$false -Action { $marker.Ran = $true }
+
+        $marker.Ran                   | Should -BeTrue
+        $script:Stats.PhasesCompleted | Should -Contain 'On'
+    }
+
+    It "Logs the skip reason so the operational evidence survives (R1)" {
+        # Hermetic log: other tests in this file reassign $script:LogPath, so pin our own
+        # and let Write-Log reopen its writer on the new path (it reopens when the path
+        # differs from the writer's). AutoFlush + FileShare.ReadWrite make it readable now.
+        $prevPath = $script:LogPath
+        $logFile  = Join-Path ([System.IO.Path]::GetTempPath()) "WinCleanPhaseLog_$(Get-Random).log"
+        $script:LogPath = $logFile
+        try {
+            Invoke-Phase -Name 'LoggedSkip' -Skip:$true -Action { }
+            (Get-Content -LiteralPath $logFile -Raw) | Should -Match "Phase 'LoggedSkip' skipped \(parameter\)"
+        } finally {
+            if ($script:LogWriter) { $script:LogWriter.Dispose(); $script:LogWriter = $null; $script:LogWriterPath = $null }
+            Remove-Item -LiteralPath $logFile -Force -ErrorAction SilentlyContinue
+            $script:LogPath = $prevPath
+        }
+    }
+
+    It "Routes every phase into exactly one bucket - buckets disjoint, union complete" {
+        # Mechanism-level check of the tri-state invariant the result JSON relies on:
+        # for a non-aborted run the three arrays are disjoint and their union is the
+        # full dispatched set. Drive a representative mix through the same wrapper.
+        $plan = @(
+            @{ Name = 'A'; Skip = $false; Throws = $false }  # -> Completed
+            @{ Name = 'B'; Skip = $true;  Throws = $false }  # -> Skipped
+            @{ Name = 'C'; Skip = $false; Throws = $true  }  # -> Failed
+            @{ Name = 'D'; Skip = $true;  Throws = $false }  # -> Skipped
+            @{ Name = 'E'; Skip = $false; Throws = $false }  # -> Completed
+        )
+        foreach ($p in $plan) {
+            Invoke-Phase -Name $p.Name -Skip:$p.Skip -Action { if ($p.Throws) { throw 'x' } }
+        }
+
+        $completed = @($script:Stats.PhasesCompleted)
+        $skipped   = @($script:Stats.PhasesSkipped)
+        $failed    = @($script:Stats.PhasesFailed)
+        $union     = @($completed + $skipped + $failed)
+
+        # disjoint: no name in two buckets (distinct count == total count)
+        ($union | Sort-Object -Unique).Count | Should -Be $union.Count
+        # complete: union is exactly the dispatched set
+        (($union | Sort-Object -Unique) -join ',') | Should -Be 'A,B,C,D,E'
+        # and each landed where intended
+        ($completed -join ',') | Should -Be 'A,E'
+        ($skipped   -join ',') | Should -Be 'B,D'
+        ($failed    -join ',') | Should -Be 'C'
+    }
+}
+
+#endregion

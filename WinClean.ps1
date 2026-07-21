@@ -236,7 +236,8 @@
 .PARAMETER SkipUpdates
     Пропустить все обновления (Windows + winget)
 .PARAMETER SkipCleanup
-    Пропустить очистку системы
+    Пропустить все операции очистки (система, глубокая очистка, кэши разработчика,
+    Docker/WSL, Visual Studio). Отдельные -Skip*Cleanup - более точечные флаги внутри
 .PARAMETER SkipRestore
     Пропустить создание точки восстановления
 .PARAMETER SkipDevCleanup
@@ -306,8 +307,15 @@ $script:Stats = [hashtable]::Synchronized(@{
     # after it - Developer Cleanup, Docker/WSL, Visual Studio, Deep System Cleanup,
     # the disk space report, Telemetry - with only a single generic "Critical error"
     # in the log to show for it.
+    # v2.19: these are a DISPATCH status, not an outcome. Completed = the phase action
+    # was invoked and returned without an uncaught exception (NOT "succeeded" - e.g.
+    # Preparation stays Completed even when the restore point genuinely failed, because
+    # New-SystemRestorePoint catches that and returns $false). Skipped = a skip flag
+    # suppressed the phase before it ran. Failed = the action threw. For a non-aborted
+    # run the three are disjoint and their union is exactly the known phase set.
     PhasesCompleted      = @()
     PhasesFailed         = @()
+    PhasesSkipped        = @()
 })
 
 # Progress activities seen so far, so all of them can be closed at the end (v2.16)
@@ -4433,10 +4441,14 @@ function Write-ResultJson {
             ControlledFolderAccess = [string]$script:Stats.ControlledFolderAccess
             # null for a normal run; a reason string when the run stopped early (v2.17)
             Aborted             = $script:Stats.Aborted
-            # v2.17 (p.11): which top-level phases ran vs threw - lets a stand tell
-            # "everything ran" from "phase N threw and phases after it are just missing"
+            # Dispatch status of each top-level phase (v2.17 p.11; tri-state in v2.19).
+            # Completed = invoked and returned without an uncaught exception (NOT proof
+            # the work succeeded); Skipped = a skip flag suppressed it; Failed = it threw.
+            # For a non-aborted run the three are disjoint and their union is the full
+            # phase set, so a name missing from all three means the run stopped before it.
             PhasesCompleted     = @($script:Stats.PhasesCompleted)
             PhasesFailed        = @($script:Stats.PhasesFailed)
+            PhasesSkipped       = @($script:Stats.PhasesSkipped)
             LogPath             = $script:LogPath
         }
 
@@ -4466,11 +4478,25 @@ function Invoke-Phase {
         boundary and is recorded in $script:Stats.PhasesCompleted/PhasesFailed, which
         Write-ResultJson exposes so an automated stand can tell "everything ran" from
         "phase 6 threw and phases 7-9 are simply missing".
+
+        v2.19: -Skip records a phase the user turned off with a skip flag in a third
+        bucket, PhasesSkipped, instead of running an empty body and marking it Completed
+        (which conflated "ran and did nothing" with "was skipped"). This also carries the
+        "... skipped (parameter)" log line that used to come from each phase's own inner
+        guard, now that the skip decision lives at the call site. These three buckets are
+        a DISPATCH status, not an outcome - see the $script:Stats comment.
     #>
     param(
         [Parameter(Mandatory)][string]$Name,
-        [Parameter(Mandatory)][scriptblock]$Action
+        [Parameter(Mandatory)][scriptblock]$Action,
+        [bool]$Skip = $false
     )
+
+    if ($Skip) {
+        Write-Log "Phase '$Name' skipped (parameter)" -Level INFO
+        $script:Stats.PhasesSkipped += $Name
+        return
+    }
 
     try {
         & $Action
@@ -4507,10 +4533,16 @@ function Start-WinClean {
     # Calculate TotalSteps dynamically based on skip flags
     $script:Stats.TotalSteps = 0
     if (-not $SkipUpdates) { $script:Stats.TotalSteps += 2 }      # Windows Update + App Updates
-    if (-not $SkipCleanup) { $script:Stats.TotalSteps += 2 }      # System Cleanup + Deep Cleanup
-    if (-not $SkipDevCleanup) { $script:Stats.TotalSteps += 1 }   # Developer Caches
-    if (-not $SkipDockerCleanup) { $script:Stats.TotalSteps += 1 } # Docker/WSL
-    if (-not $SkipVSCleanup) { $script:Stats.TotalSteps += 1 }    # Visual Studio
+    # v2.19: -SkipCleanup now suppresses the whole cleanup group (system + deep + the
+    # developer/Docker/VS categories), matching the documented "skip all cleanup" /
+    # "Updates Only" contract. The per-category flags only subtract further inside it,
+    # so the progress denominator must nest them under -not $SkipCleanup too.
+    if (-not $SkipCleanup) {
+        $script:Stats.TotalSteps += 2                                  # System Cleanup + Deep Cleanup
+        if (-not $SkipDevCleanup)    { $script:Stats.TotalSteps += 1 } # Developer Caches
+        if (-not $SkipDockerCleanup) { $script:Stats.TotalSteps += 1 } # Docker/WSL
+        if (-not $SkipVSCleanup)     { $script:Stats.TotalSteps += 1 } # Visual Studio
+    }
     # Ensure at least 1 step to avoid division by zero
     if ($script:Stats.TotalSteps -eq 0) { $script:Stats.TotalSteps = 1 }
 
@@ -4584,63 +4616,61 @@ function Start-WinClean {
     # final summary and the log handle release happen even if something outside a
     # phase (or a bug in Invoke-Phase itself) throws.
     try {
-        Invoke-Phase -Name 'Preparation' -Action {
+        # v2.19: the skip decision for each phase now lives here, at the call site, via
+        # -Skip. A skipped phase is recorded in PhasesSkipped (not run and marked
+        # Completed), and -SkipCleanup suppresses the ENTIRE cleanup group - system, deep,
+        # and the developer/Docker/VS categories - to match the documented "skip all
+        # cleanup" / "Updates Only" contract. The per-category flags stay as finer control
+        # inside that group. The inner functions keep their own guards for direct callers.
+        Invoke-Phase -Name 'Preparation' -Skip:$SkipRestore -Action {
             $null = New-SystemRestorePoint -Description "WinClean $(Get-Date -Format 'yyyy-MM-dd HH:mm')"
         }
 
-        Invoke-Phase -Name 'Updates' -Action {
-            if (-not $SkipUpdates) {
-                Update-WindowsSystem
-                Update-Applications
-            }
+        Invoke-Phase -Name 'Updates' -Skip:$SkipUpdates -Action {
+            Update-WindowsSystem
+            Update-Applications
         }
 
-        Invoke-Phase -Name 'SystemCleanup' -Action {
-            if (-not $SkipCleanup) {
-                Write-Log "SYSTEM CLEANUP" -Level TITLE
-                Update-Progress -Activity "System Cleanup" -Status "Cleaning temporary files..."
+        Invoke-Phase -Name 'SystemCleanup' -Skip:$SkipCleanup -Action {
+            Write-Log "SYSTEM CLEANUP" -Level TITLE
+            Update-Progress -Activity "System Cleanup" -Status "Cleaning temporary files..."
 
-                Clear-TempFiles
-                Clear-BrowserCaches
-                Clear-WindowsUpdateCache
-                Clear-WinCleanRecycleBin
-                Clear-SystemCaches
-                Clear-EventLogs
-                Clear-DNSCache
-                Clear-PrivacyTraces
-            }
+            Clear-TempFiles
+            Clear-BrowserCaches
+            Clear-WindowsUpdateCache
+            Clear-WinCleanRecycleBin
+            Clear-SystemCaches
+            Clear-EventLogs
+            Clear-DNSCache
+            Clear-PrivacyTraces
         }
 
-        Invoke-Phase -Name 'DeveloperCleanup' -Action { Clear-DeveloperCaches }
+        Invoke-Phase -Name 'DeveloperCleanup' -Skip:($SkipCleanup -or $SkipDevCleanup) -Action { Clear-DeveloperCaches }
 
-        Invoke-Phase -Name 'DockerWSLCleanup' -Action { Clear-DockerWSL }
+        Invoke-Phase -Name 'DockerWSLCleanup' -Skip:($SkipCleanup -or $SkipDockerCleanup) -Action { Clear-DockerWSL }
 
-        Invoke-Phase -Name 'VisualStudioCleanup' -Action { Clear-VisualStudio }
+        Invoke-Phase -Name 'VisualStudioCleanup' -Skip:($SkipCleanup -or $SkipVSCleanup) -Action { Clear-VisualStudio }
 
-        Invoke-Phase -Name 'DeepSystemCleanup' -Action {
-            if (-not $SkipCleanup) {
-                Write-Log "DEEP SYSTEM CLEANUP" -Level TITLE
-                Update-Progress -Activity "Deep Cleanup" -Status "Running system cleanup..."
+        Invoke-Phase -Name 'DeepSystemCleanup' -Skip:$SkipCleanup -Action {
+            Write-Log "DEEP SYSTEM CLEANUP" -Level TITLE
+            Update-Progress -Activity "Deep Cleanup" -Status "Running system cleanup..."
 
-                # Driver store first (v2.17): removing packages leaves referenced
-                # components in WinSxS, and running DISM afterwards reclaims them in
-                # the same pass instead of a week later.
-                Clear-DriverStore
-                Clear-KernelDumps
-                # Neither of these reports what it freed, so measure the drive around them
-                Measure-FreeSpaceGain -Category 'ComponentStore' -Operation { Invoke-DISMCleanup }
-                Measure-FreeSpaceGain -Category 'DiskCleanup' -Operation { Invoke-StorageSense }
-                Clear-WindowsOld
-            }
+            # Driver store first (v2.17): removing packages leaves referenced
+            # components in WinSxS, and running DISM afterwards reclaims them in
+            # the same pass instead of a week later.
+            Clear-DriverStore
+            Clear-KernelDumps
+            # Neither of these reports what it freed, so measure the drive around them
+            Measure-FreeSpaceGain -Category 'ComponentStore' -Operation { Invoke-DISMCleanup }
+            Measure-FreeSpaceGain -Category 'DiskCleanup' -Operation { Invoke-StorageSense }
+            Clear-WindowsOld
         }
 
-        Invoke-Phase -Name 'DiskSpaceReport' -Action {
-            # What is taking up space that cleanup deliberately leaves alone (v2.16).
-            # Gated by -SkipCleanup (v2.17): it walks Windows\Installer and the search
-            # index, which is expensive and pointless for a user who asked for no cleanup.
-            if (-not $SkipCleanup) {
-                Show-DiskSpaceReport
-            }
+        # What is taking up space that cleanup deliberately leaves alone (v2.16).
+        # Skipped with -SkipCleanup (v2.17): it walks Windows\Installer and the search
+        # index, which is expensive and pointless for a user who asked for no cleanup.
+        Invoke-Phase -Name 'DiskSpaceReport' -Skip:$SkipCleanup -Action {
+            Show-DiskSpaceReport
         }
 
         Invoke-Phase -Name 'Telemetry' -Action {
