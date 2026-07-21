@@ -983,3 +983,32 @@ Describe "v2.19: -SkipCleanup suppresses the whole cleanup group" -Tag "Fix", "V
 }
 
 #endregion
+
+#region v2.19: app updates reported as offered, not installed (296v.1)
+
+Describe "v2.19: app updates are reported as offered, not installed" -Tag "Fix", "V219", "AppUpdates" {
+
+    It "Update-Applications records the offered count from the parsed table" {
+        $body = Get-FunctionBody -Name 'Update-Applications'
+        $body | Should -Match '\$script:Stats\.AppUpdatesOffered = \$updateCount'
+        # The old name must be gone from the live code - it claimed 'installed' falsely
+        $body | Should -Not -Match '\$script:Stats\.AppUpdatesCount'
+    }
+
+    It "Result JSON exposes AppUpdatesOffered, not AppUpdatesCount" {
+        $body = Get-FunctionBody -Name 'Write-ResultJson'
+        $body | Should -Match 'AppUpdatesOffered\s+=\s+\$script:Stats\.AppUpdatesOffered'
+        $body | Should -Not -Match 'AppUpdatesCount\s+=\s+\$script:Stats\.AppUpdatesCount'
+    }
+
+    It "Final statistics label the app number as offered and drop the 'installed' claim" {
+        # The rendering lives in Show-FinalStatisticsBody; Show-FinalStatistics only wraps it
+        $body = Get-FunctionBody -Name 'Show-FinalStatisticsBody'
+        $body | Should -Match '\$script:Stats\.AppUpdatesOffered'
+        $body | Should -Match 'Apps: \$appsOffered offered'
+        # Apps were never confirmed installed; the updates line must not be labelled so
+        $body | Should -Not -Match '-Label "Updates installed:"'
+    }
+}
+
+#endregion

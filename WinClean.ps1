@@ -291,7 +291,10 @@ $script:Stats = [hashtable]::Synchronized(@{
     TotalFreedBytes      = [long]0
     FreedByCategory      = @{}
     WindowsUpdatesCount  = 0
-    AppUpdatesCount      = 0
+    # v2.19: renamed from AppUpdatesCount. winget upgrade --all cannot report how many
+    # apps actually installed (it silently skips pinned/manifest-less/UAC-cancelled ones),
+    # so we only ever know how many it OFFERED. Naming it "installed" was a false claim.
+    AppUpdatesOffered    = 0
     WarningsCount        = 0
     ErrorsCount          = 0
     RebootRequired       = $false
@@ -2073,6 +2076,11 @@ function Update-Applications {
             }
         }
 
+        # v2.19: record what winget offered as soon as we know it - in every path,
+        # including ReportOnly and a later failed upgrade. This is the honest figure;
+        # the actual installed count is not knowable from `winget upgrade --all`.
+        $script:Stats.AppUpdatesOffered = $updateCount
+
         if ($updateCount -eq 0) {
             Write-Log "All applications are up to date" -Level SUCCESS
             return
@@ -2111,7 +2119,8 @@ function Update-Applications {
         }
 
         if ($upgradeProcess.ExitCode -eq 0) {
-            $script:Stats.AppUpdatesCount = $updateCount
+            # AppUpdatesOffered was already recorded above; a zero exit means the command
+            # succeeded, not that every offered package installed, so nothing to add here.
             Write-Log "Application updates completed successfully" -Level SUCCESS
         } else {
             # v2.16: decode the exit code. A bare number ("code: -1978335188") tells the
@@ -2135,14 +2144,13 @@ function Update-Applications {
             }
 
             if ($code -eq -1978335189) {
-                # Nothing to upgrade is a normal outcome, not a warning. AppUpdatesCount
-                # stays at zero: nothing was installed, and counting it would show up as
-                # "Updates installed" in the summary.
+                # Nothing to upgrade is a normal outcome, not a warning. AppUpdatesOffered
+                # reflects the parsed table above; the summary reports it as "offered", not
+                # "installed", so there is nothing to correct here.
                 Write-Log "Application updates: $meaning" -Level DETAIL
             } else {
                 if ($code -eq -1978334967) {
                     # Installation finished but needs a reboot to take effect
-                    $script:Stats.AppUpdatesCount = $updateCount
                     $script:Stats.RebootRequired = $true
                 }
                 Write-Log "Application updates finished with $meaning" -Level WARNING
@@ -4259,7 +4267,7 @@ function Show-FinalStatisticsBody {
 
     # Box dimensions
     $boxWidth = 70    # Inner width (matches banner)
-    $labelWidth = 18  # Width for label column (e.g., "Updates installed:")
+    $labelWidth = 18  # Width for label column (e.g., "Space freed:")
 
     # Determine overall status
     $hasErrors = $script:Stats.ErrorsCount -gt 0
@@ -4308,13 +4316,17 @@ function Show-FinalStatisticsBody {
     # Duration
     Write-StatLine -Icon ">" -Label "Duration:" -Value $elapsedStr -IconColor "DarkGray" -ValueColor "White"
 
-    # Updates
-    $totalUpdates = $script:Stats.WindowsUpdatesCount + $script:Stats.AppUpdatesCount
-    if ($totalUpdates -gt 0) {
-        $updatesStr = "Windows: $($script:Stats.WindowsUpdatesCount), Apps: $($script:Stats.AppUpdatesCount)"
+    # Updates. v2.19: Windows updates are genuinely installed (PSWindowsUpdate reports
+    # per-update results), but the app number is what winget OFFERED - it silently skips
+    # pinned/manifest-less/UAC-cancelled packages, so claiming it as "installed" overstated
+    # the result. Label each honestly. Value stays <= 47 chars so the box border aligns.
+    $winInstalled = $script:Stats.WindowsUpdatesCount
+    $appsOffered  = $script:Stats.AppUpdatesOffered
+    if (($winInstalled + $appsOffered) -gt 0) {
+        $updatesStr = "Windows: $winInstalled installed, Apps: $appsOffered offered"
         # ASCII "^" instead of "↑" (v2.17, p.20 of the audit): same ambiguous-width
         # box-alignment issue as "⚠" below, just not caught the first time around
-        Write-StatLine -Icon "^" -Label "Updates installed:" -Value $updatesStr -IconColor "Green" -ValueColor "Green"
+        Write-StatLine -Icon "^" -Label "Updates:" -Value $updatesStr -IconColor "Green" -ValueColor "Green"
     }
 
     # Space freed (highlight if significant)
@@ -4328,7 +4340,7 @@ function Show-FinalStatisticsBody {
         $sortedCats = @($script:Stats.FreedByCategory.GetEnumerator() |
                         Where-Object { $_.Value -gt 0 } | Sort-Object -Property Value -Descending)
         foreach ($cat in ($sortedCats | Select-Object -First 5)) {
-            # Right-align category name so colon aligns with "Updates installed:"
+            # Right-align category name so its colon lines up with the labels above
             $catLabel = "$($cat.Key):".PadLeft($labelWidth)
             $catValue = Format-FileSize $cat.Value
             Write-StatLine -Icon " " -Label $catLabel -Value $catValue -ValueColor "DarkGray"
@@ -4431,7 +4443,10 @@ function Write-ResultJson {
             TotalFreedBytes     = [long]$script:Stats.TotalFreedBytes
             FreedByCategory     = @{} + $script:Stats.FreedByCategory
             WindowsUpdatesCount = $script:Stats.WindowsUpdatesCount
-            AppUpdatesCount     = $script:Stats.AppUpdatesCount
+            # v2.19: renamed from AppUpdatesCount. This is the number of app updates winget
+            # OFFERED, not a confirmed install count (winget upgrade --all cannot report the
+            # latter). No shipped consumer reads this field; the nightly stand does not.
+            AppUpdatesOffered   = $script:Stats.AppUpdatesOffered
             WarningsCount       = $script:Stats.WarningsCount
             ErrorsCount         = $script:Stats.ErrorsCount
             RebootRequired      = [bool]$script:Stats.RebootRequired
