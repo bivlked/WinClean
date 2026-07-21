@@ -256,7 +256,12 @@ $heartbeat = [ordered]@{
     Stands    = $summaryLines
 }
 try {
-    $heartbeat | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $heartbeatPath -Encoding utf8
+    # Write-then-rename so the separately locked -HeartbeatCheckOnly reader can never see
+    # a half-written file (Move-Item is an atomic rename on the same filesystem). A write
+    # failure only leaves a staler heartbeat, which errs toward over-alerting, not silence.
+    $heartbeatTmp = "$heartbeatPath.tmp"
+    $heartbeat | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $heartbeatTmp -Encoding utf8
+    Move-Item -LiteralPath $heartbeatTmp -Destination $heartbeatPath -Force
 } catch {
     Write-NightlyLog "Could not write heartbeat $($heartbeatPath): $_"
 }

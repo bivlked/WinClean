@@ -50,6 +50,19 @@ Describe "Test-HeartbeatStale (nightly dead-man switch)" -Tag "Unit", "Stand", "
         Test-HeartbeatStale -Heartbeat (New-Heartbeat -HoursAgo 26) -Now $script:Now -MaxAgeHours 26 | Should -BeFalse
     }
 
+    It "treats an implausible future timestamp as stale (clock ran backwards)" {
+        # A future heartbeat is not proof a recent run happened; without this guard a
+        # negative age would read as 'fresh' indefinitely and suppress the alert.
+        Test-HeartbeatStale -Heartbeat (New-Heartbeat -HoursAgo -5) -Now $script:Now -MaxAgeHours 26 | Should -BeTrue
+    }
+
+    It "works on a heartbeat actually round-tripped through ConvertFrom-Json" {
+        # Mirrors the real path: the checker reads last-run.json, not an in-memory object
+        $obj = [ordered]@{ Timestamp = $script:Now.AddHours(-2).ToString('o'); Verdict = 'OK' }
+        $hb = $obj | ConvertTo-Json | ConvertFrom-Json
+        Test-HeartbeatStale -Heartbeat $hb -Now $script:Now -MaxAgeHours 26 | Should -BeFalse
+    }
+
     It "parses an ISO timestamp regardless of the current culture" {
         # ru-RU formats dates as dd.MM.yyyy; the round-trip parse must ignore that
         $prev = [System.Threading.Thread]::CurrentThread.CurrentCulture

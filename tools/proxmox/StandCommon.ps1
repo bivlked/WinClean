@@ -208,5 +208,10 @@ function Test-HeartbeatStale {
         [System.Globalization.DateTimeStyles]::RoundtripKind, [ref]$ts)
     if (-not $parsed) { return $true }
 
-    return ($Now.ToUniversalTime() - $ts.ToUniversalTime()).TotalHours -gt $MaxAgeHours
+    # Stale when older than the window, OR implausibly in the future. The checker always
+    # runs hours after the heartbeat, so a genuine one is comfortably in the past; a
+    # future timestamp means the clock ran backwards or the file is corrupt, and must not
+    # be read as proof a recent run happened (that would silently suppress the alert).
+    $age = ($Now.ToUniversalTime() - $ts.ToUniversalTime()).TotalHours
+    return ($age -gt $MaxAgeHours) -or ($age -lt -1)
 }
