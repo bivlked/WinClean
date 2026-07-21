@@ -32,7 +32,7 @@ Volume roots (for example `C:\`) are protected explicitly as well. Path protecti
 
 ## Preview mode (`-ReportOnly`)
 
-`-ReportOnly` performs a dry run: it walks the same logic a real run would and reports what would be cleaned and how much space it would free. It makes no maintenance changes - it installs nothing, deletes none of the caches or files it would clean, and creates no restore point. It does still write its own log file (and the result JSON if you passed `-ResultJsonPath`, replacing any pre-existing one), set the process TLS version, and perform the read-only update and connectivity checks unless you also pass `-SkipUpdates`.
+`-ReportOnly` performs a dry run: it walks the same logic a real run would and reports what would be cleaned and how much space it would free. It makes no maintenance changes - it installs nothing, deletes none of the caches or files it would clean, and creates no restore point. It does still write its own log file (and the result JSON if you passed `-ResultJsonPath`, removing any pre-existing one first on a best-effort basis), set the process TLS version, and perform the read-only update and connectivity checks unless you also pass `-SkipUpdates`.
 
 `-ReportOnly` is a preview of behavior. It is **not** an integrity or authenticity check of the script itself. For that, see "Fail-closed bootstrap" below.
 

@@ -90,5 +90,5 @@ Every release is validated on real Windows 11 VMs before and after publishing, r
 5. Merge to `main` and push.
 6. Compute the SHA256, write `WinClean.ps1.sha256`, and `gh release create vX.Y` with both assets.
 7. `Publish-PSResource` to PSGallery.
-8. Run `pwsh tools/Invoke-ReleaseCheck.ps1 -VerifyPublished` (confirms the assets and SHA256), then a manual one-liner run (`irm https://raw.githubusercontent.com/bivlked/WinClean/main/get.ps1 | iex`, or `Invoke-StandTest.ps1 -Source release` on the stand) to confirm the new version is served.
+8. Run `pwsh tools/Invoke-ReleaseCheck.ps1 -VerifyPublished` (confirms the assets and SHA256), then a manual one-liner run (`irm https://raw.githubusercontent.com/bivlked/WinClean/main/get.ps1 | iex`) to confirm the release asset and the `get.ps1` path serve the new version. (`Invoke-StandTest.ps1 -Source release` on the stand is a separate check - it runs the tag's raw `WinClean.ps1`, not the release asset or the one-liner.)
 9. Confirm README badges, the GitHub Release, PSGallery and the CHANGELOG all show the same version.

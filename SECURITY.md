@@ -72,7 +72,7 @@ When using WinClean:
 
 1. **Always download from official sources** (GitHub Releases or PowerShell Gallery).
 2. **For integrity, use `get.ps1` / `install.ps1`.** They fail-closed: the script is downloaded from the latest GitHub Release and its SHA256 is compared exactly against the published `WinClean.ps1.sha256` asset. A mismatch or a missing hash asset aborts the run, and the scripts never fall back to a mutable branch. If you download `WinClean.ps1` manually, verify its hash yourself against the release asset.
-3. **For a safe preview, use `-ReportOnly`.** It shows the actions WinClean would take and changes nothing. Note this is a *preview of behavior*, not an *integrity check* - the two are separate concerns.
+3. **For a safe preview, use `-ReportOnly`.** It shows the actions WinClean would take and applies no cleanup or updates (it still writes its own log/result file and runs read-only update checks). Note this is a *preview of behavior*, not an *integrity check* - the two are separate concerns.
 4. **Run with minimum necessary privileges** (though administrator is required).
 5. **Keep PowerShell updated** to the latest version.
 6. **Review the changelog** before updating to new versions.

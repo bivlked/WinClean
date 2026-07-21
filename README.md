@@ -40,7 +40,7 @@
 
 > **Requirements:** PowerShell 7.1+ (`winget install Microsoft.PowerShell`) and an **elevated** terminal (Win+X -> Terminal (Admin)).
 
-**See what it would do first (a preview that changes nothing):**
+**See what it would do first (a read-only preview):**
 
 ```powershell
 & ([scriptblock]::Create((irm https://raw.githubusercontent.com/bivlked/WinClean/main/get.ps1))) -ReportOnly
@@ -67,7 +67,7 @@ irm https://raw.githubusercontent.com/bivlked/WinClean/main/install.ps1 | iex
 - The bootstrap scripts download `WinClean.ps1` from the **latest GitHub Release** and **verify its SHA256** against the published `WinClean.ps1.sha256` asset. Verification is **fail-closed**: a mismatch or a missing asset aborts, with no fallback to a mutable branch. (The small bootstrap script itself comes from `main` and is short enough to read first.)
 - `install.ps1` installs into `%ProgramFiles%\WinClean` (admin-only), so a non-admin process cannot alter the installed script the shortcut launches.
 - `-ReportOnly` shows what would happen and makes no changes to anything it would clean or update.
-- MIT licensed, no telemetry, no personal data sent. It contacts only the standard maintenance services (Windows Update, winget, the PowerShell Gallery). See **[SECURITY.md](SECURITY.md)** and **[docs/safety.md](docs/safety.md)**.
+- MIT licensed, no telemetry, no personal data sent. It contacts only the standard maintenance services (Windows Update, winget, the PowerShell Gallery) and a connectivity check. See **[SECURITY.md](SECURITY.md)** and **[docs/safety.md](docs/safety.md)**.
 
 </td>
 </tr>
@@ -177,8 +177,9 @@ cd WinClean
 <td width="33%" valign="top">
 
 ### 🐳 Docker & WSL
-- Unused images
 - Stopped containers
+- Unused networks
+- Dangling images
 - Build cache
 - WSL2 VHDX compaction
 
@@ -364,7 +365,7 @@ Deep-dive documentation lives in **[`docs/`](docs/)**:
 <details>
 <summary><b>Is it safe to run WinClean?</b></summary>
 
-Yes. WinClean creates a restore point before making changes and never touches protected system paths. Use `-ReportOnly` to preview changes first. More: [docs/safety.md](docs/safety.md).
+Yes. WinClean attempts a system restore point before the maintenance phases (and continues with a warning if it cannot create one), and it never bulk-deletes protected system roots like `C:\Windows` or `C:\Program Files`. Use `-ReportOnly` to preview first. More: [docs/safety.md](docs/safety.md).
 
 </details>
 

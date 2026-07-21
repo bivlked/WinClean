@@ -17,7 +17,7 @@ This page documents every field, gives a full sample, and explains how to consum
 | `Version` | string | Script version that produced this file, e.g. `"2.19"`. |
 | `Timestamp` | string | Run time in ISO-8601 round-trip format (`"o"`, e.g. `2026-07-21T03:15:42.1234567+00:00`). Use it to confirm the file belongs to the run you started, not a leftover. |
 | `DurationSeconds` | number | Wall-clock duration of the run, rounded to one decimal. |
-| `ReportOnly` | bool | `true` when the run was a preview (`-ReportOnly`): nothing was changed. |
+| `ReportOnly` | bool | `true` when the run was a preview (`-ReportOnly`): no cleanup or updates were applied (the log and this result file are still written). |
 | `Parameters` | object | The switches the run was invoked with (see below). |
 | `TotalFreedBytes` | long | Total bytes freed across all categories. `0` in `-ReportOnly`. |
 | `FreedByCategory` | object | Map of category name to bytes freed, e.g. `{ "Temp": 187912345, "DriverStore": 451801088 }`. Categories are added as work happens, so a category can appear with `0` (for example DriverStore is recorded after a successful package removal even if the measured freed size was zero). |
