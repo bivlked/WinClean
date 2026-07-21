@@ -21,7 +21,18 @@
 .PARAMETER Mode
     Test mode passed to Invoke-StandTest (default: Full - real cleanup, no updates)
 .PARAMETER Source
-    Script source passed to Invoke-StandTest (default: main - tests published code)
+    Script source passed to Invoke-StandTest (default: main - tests published code).
+    Unless it is already 'release', the matrix ALSO runs a quick Report pass against
+    the published release asset, so a broken release with a healthy main branch does
+    not pass the night unnoticed (p.30 of the audit).
+.PARAMETER HeartbeatCheckOnly
+    Dead-man switch (p.29 of the audit). Skips the matrix; instead reads the heartbeat
+    that a normal run leaves in results/last-run.json and, if it is missing or older
+    than HeartbeatMaxAgeHours, sends a Telegram alert. Run this from a SEPARATE cron,
+    later than the nightly, so a nightly cron that never fired is still caught.
+.PARAMETER HeartbeatMaxAgeHours
+    How old the last successful matrix run may be before the dead-man switch alerts
+    (default 26 - a nightly cadence plus a couple of hours of slack).
 #>
 [CmdletBinding()]
 param(
@@ -32,7 +43,10 @@ param(
     [string]$Source = 'main',
 
     [string]$TelegramEnvPath = '/root/.winclean-stand.env',
-    [int]$RetentionDays = 14
+    [int]$RetentionDays = 14,
+
+    [switch]$HeartbeatCheckOnly,
+    [int]$HeartbeatMaxAgeHours = 26
 )
 
 $ErrorActionPreference = 'Stop'
@@ -102,6 +116,69 @@ function Send-Telegram {
     }
 }
 
+# --- Dead-man switch (p.29): verify the last run's heartbeat, alert if it is stale ---
+# Run from an independent cron LATER than the nightly, so a nightly cron that never
+# fired (and therefore left no fresh heartbeat) is still caught and reported.
+$heartbeatPath = Join-Path $resultsRoot 'last-run.json'
+if ($HeartbeatCheckOnly) {
+    $hb = $null
+    if (Test-Path $heartbeatPath) {
+        try { $hb = Get-Content $heartbeatPath -Raw | ConvertFrom-Json } catch { $hb = $null }
+    }
+    if (Test-HeartbeatStale -Heartbeat $hb -Now (Get-Date) -MaxAgeHours $HeartbeatMaxAgeHours) {
+        $last = if ($hb -and $hb.Timestamp) { $hb.Timestamp } else { 'never' }
+        $msg = "Nightly matrix has not completed in over $HeartbeatMaxAgeHours h (last: $last) - the nightly cron may be dead."
+        Write-NightlyLog "DEAD-MAN: $msg"
+        $null = Send-Telegram -Text "WinClean stand [FAIL] $(Get-Date -Format 'dd.MM HH:mm')`n$msg"
+        exit 1
+    }
+    Write-NightlyLog "Heartbeat OK (last run $($hb.Timestamp), within $HeartbeatMaxAgeHours h)"
+    exit 0
+}
+
+function Invoke-OneStandRun {
+    <# Runs one stand test for a given source/mode and returns { Passed; Line }. Reads
+       the outer $resultsRoot/$logFile/$PSScriptRoot. Kept as a function so the matrix
+       can run each stand against more than one source (p.30) without duplicating the
+       artifact-discovery and stats-extraction below. #>
+    param(
+        [Parameter(Mandatory)][string]$ConfigPath,
+        [Parameter(Mandatory)]$Cfg,
+        [Parameter(Mandatory)][string]$Label,
+        [Parameter(Mandatory)][string]$RunSource,
+        [Parameter(Mandatory)][string]$RunMode
+    )
+    Write-NightlyLog "[$Label] running $RunMode/$RunSource on VM $($Cfg.StandVmId)..."
+    # Identify the run's artifacts as the newest dir that did not exist before the run
+    # (timestamp names; birth time is unreliable on Linux filesystems)
+    $dirsBefore = @(Get-ChildItem -Path $resultsRoot -Directory -ErrorAction SilentlyContinue |
+        ForEach-Object { $_.Name })
+
+    & pwsh -NoProfile -File (Join-Path $PSScriptRoot 'Invoke-StandTest.ps1') `
+        -Mode $RunMode -Source $RunSource -ConfigPath $ConfigPath *>> $logFile
+    $testExit = $LASTEXITCODE
+
+    $runDir = Get-ChildItem -Path $resultsRoot -Directory -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -match '^\d{8}_\d{6}$' -and $dirsBefore -notcontains $_.Name } |
+        Sort-Object Name -Descending | Select-Object -First 1
+
+    $stats = ''
+    if ($runDir) {
+        $jsonPath = Join-Path $runDir.FullName 'result.json'
+        if (Test-Path $jsonPath) {
+            $j = Get-Content $jsonPath -Raw | ConvertFrom-Json
+            $stats = " - v$($j.Version), $([math]::Round($j.DurationSeconds))s, freed $([math]::Round($j.TotalFreedBytes/1MB)) MB, warn $($j.WarningsCount)"
+        }
+    }
+
+    if ($testExit -eq 0) {
+        Write-NightlyLog "[$Label] $RunMode/$RunSource PASS$stats"
+        return [pscustomobject]@{ Passed = $true; Line = "$Label (VM $($Cfg.StandVmId)) [$RunMode/$RunSource]: PASS$stats" }
+    }
+    Write-NightlyLog "[$Label] $RunMode/$RunSource FAIL (exit $testExit)$stats"
+    return [pscustomobject]@{ Passed = $false; Line = "$Label (VM $($Cfg.StandVmId)) [$RunMode/$RunSource]: FAIL$stats - artifacts: $(if ($runDir) { $runDir.Name } else { '?' })" }
+}
+
 # --- Discover the stand matrix ---
 $configs = Get-ChildItem -Path $PSScriptRoot -Filter 'stand.config*.json' |
     Where-Object { $_.Name -ne 'stand.config.example.json' } | Sort-Object Name
@@ -136,36 +213,18 @@ foreach ($configFile in $configs) {
             continue
         }
 
-        Write-NightlyLog "[$label] running stand test on VM $($cfg.StandVmId)..."
-        # Identify the run's artifacts as the newest dir that did not exist before
-        # the run (timestamp names; birth time is unreliable on Linux filesystems)
-        $dirsBefore = @(Get-ChildItem -Path $resultsRoot -Directory -ErrorAction SilentlyContinue |
-            ForEach-Object { $_.Name })
-
-        & pwsh -NoProfile -File (Join-Path $PSScriptRoot 'Invoke-StandTest.ps1') `
-            -Mode $Mode -Source $Source -ConfigPath $configFile.FullName *>> $logFile
-        $testExit = $LASTEXITCODE
-
-        $runDir = Get-ChildItem -Path $resultsRoot -Directory -ErrorAction SilentlyContinue |
-            Where-Object { $_.Name -match '^\d{8}_\d{6}$' -and $dirsBefore -notcontains $_.Name } |
-            Sort-Object Name -Descending | Select-Object -First 1
-
-        $stats = ''
-        if ($runDir) {
-            $jsonPath = Join-Path $runDir.FullName 'result.json'
-            if (Test-Path $jsonPath) {
-                $j = Get-Content $jsonPath -Raw | ConvertFrom-Json
-                $stats = " - v$($j.Version), $([math]::Round($j.DurationSeconds))s, freed $([math]::Round($j.TotalFreedBytes/1MB)) MB, warn $($j.WarningsCount)"
-            }
+        # Run the configured source, and - unless it already IS release - a quick Report
+        # pass against the PUBLISHED release asset too (p.30). Users get the release, not
+        # main, so a broken release with a healthy main branch must not pass the night.
+        $runs = @([pscustomobject]@{ Source = $Source; Mode = $Mode })
+        if ($Source -ne 'release') {
+            $runs += [pscustomobject]@{ Source = 'release'; Mode = 'Report' }
         }
-
-        if ($testExit -eq 0) {
-            Write-NightlyLog "[$label] PASS$stats"
-            $summaryLines += "$label (VM $($cfg.StandVmId)): PASS$stats"
-        } else {
-            $anyFailed = $true
-            Write-NightlyLog "[$label] FAIL (exit $testExit)$stats"
-            $summaryLines += "$label (VM $($cfg.StandVmId)): FAIL$stats - artifacts: $(if ($runDir) { $runDir.Name } else { '?' })"
+        foreach ($run in $runs) {
+            $res = Invoke-OneStandRun -ConfigPath $configFile.FullName -Cfg $cfg -Label $label `
+                -RunSource $run.Source -RunMode $run.Mode
+            $summaryLines += $res.Line
+            if (-not $res.Passed) { $anyFailed = $true }
         }
     } catch {
         $anyFailed = $true
@@ -185,6 +244,22 @@ $icon = if ($anyFailed) { 'FAIL' } else { 'OK' }
 $report = "WinClean stand [$icon] $(Get-Date -Format 'dd.MM HH:mm') (Mode=$Mode, Source=$Source)`n" + ($summaryLines -join "`n")
 $sent = Send-Telegram -Text $report
 Write-NightlyLog "Nightly matrix done: $icon (telegram: $(if ($sent) { 'delivered' } else { 'FAILED' }))"
+
+# Dead-man heartbeat (p.29): record that this run completed, for an independent
+# -HeartbeatCheckOnly cron to read. A night that never ran leaves this file stale.
+$heartbeat = [ordered]@{
+    Timestamp = (Get-Date).ToString('o')
+    Verdict   = $icon
+    Mode      = $Mode
+    Source    = $Source
+    Delivered = $sent
+    Stands    = $summaryLines
+}
+try {
+    $heartbeat | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $heartbeatPath -Encoding utf8
+} catch {
+    Write-NightlyLog "Could not write heartbeat $($heartbeatPath): $_"
+}
 
 # Exit codes: 0 = all green and delivered; 1 = stand failure; 2 = report undelivered
 if ($anyFailed) { exit 1 } elseif (-not $sent) { exit 2 } else { exit 0 }

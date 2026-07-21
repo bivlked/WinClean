@@ -181,3 +181,32 @@ if (Test-Path -LiteralPath $qGuest) {
         return $null
     }
 }
+
+function Test-HeartbeatStale {
+    <#
+    .SYNOPSIS
+        Pure decision for the nightly dead-man switch: is the last run too old?
+    .DESCRIPTION
+        A night the matrix never ran leaves no per-run report and is otherwise
+        indistinguishable from a healthy silent night. An independent cron reads the
+        heartbeat written by Invoke-NightlyStand and calls this to decide whether to
+        alert. Missing, empty or unparseable timestamps count as stale - the whole point
+        is to fail loud when there is no proof a run happened.
+    #>
+    param(
+        # Parsed heartbeat object (from last-run.json) or $null when the file is absent
+        $Heartbeat,
+        [Parameter(Mandatory)][datetime]$Now,
+        [int]$MaxAgeHours = 26
+    )
+
+    if (-not $Heartbeat -or -not $Heartbeat.Timestamp) { return $true }
+
+    $ts = [datetime]::MinValue
+    $parsed = [datetime]::TryParse(
+        [string]$Heartbeat.Timestamp, [cultureinfo]::InvariantCulture,
+        [System.Globalization.DateTimeStyles]::RoundtripKind, [ref]$ts)
+    if (-not $parsed) { return $true }
+
+    return ($Now.ToUniversalTime() - $ts.ToUniversalTime()).TotalHours -gt $MaxAgeHours
+}
