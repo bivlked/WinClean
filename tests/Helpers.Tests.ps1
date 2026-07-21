@@ -841,3 +841,84 @@ Describe "Invoke-Phase dispatch status" -Tag "Unit", "Helper" {
 }
 
 #endregion
+
+#region Update-Progress / Measure-FreeSpaceGain / Show-Banner Tests (v2.19, dtx8 p.22)
+
+Describe "Update-Progress" -Tag "Unit", "Helper", "V219" {
+
+    BeforeEach {
+        $script:Stats.CurrentStep  = 0
+        $script:Stats.TotalSteps   = 10
+        $script:ProgressActivities = @()
+    }
+
+    It "increments the step counter on each call" {
+        Mock Write-Progress {}
+        Update-Progress -Activity 'A'
+        $script:Stats.CurrentStep | Should -Be 1
+        Update-Progress -Activity 'A'
+        $script:Stats.CurrentStep | Should -Be 2
+    }
+
+    It "records each distinct activity once" {
+        Mock Write-Progress {}
+        Update-Progress -Activity 'A'
+        Update-Progress -Activity 'A'
+        Update-Progress -Activity 'B'
+        (@($script:ProgressActivities) -join ',') | Should -Be 'A,B'
+    }
+
+    It "caps the reported percent at 100 when steps exceed the total" {
+        # Without the min(100, ...) guard this would report 500% and misdraw the bar
+        $script:Stats.TotalSteps  = 2
+        $script:Stats.CurrentStep = 9
+        Mock Write-Progress {}
+        Update-Progress -Activity 'A'
+        Should -Invoke Write-Progress -Times 1 -Exactly -ParameterFilter { $PercentComplete -eq 100 }
+    }
+}
+
+Describe "Measure-FreeSpaceGain" -Tag "Unit", "Helper", "V219" {
+
+    BeforeEach {
+        $script:Stats.TotalFreedBytes = [long]0
+        $script:Stats.FreedByCategory = @{}
+    }
+
+    It "always runs the operation" {
+        Mock Get-PSDrive { [pscustomobject]@{ Free = [long]1000 } }
+        $marker = [pscustomobject]@{ Ran = $false }
+        Measure-FreeSpaceGain -Category 'X' -Operation { $marker.Ran = $true }
+        $marker.Ran | Should -BeTrue
+    }
+
+    It "attributes a positive free-space gain to the category" {
+        $script:mfsgCalls = 0
+        Mock Get-PSDrive {
+            $script:mfsgCalls++
+            [pscustomobject]@{ Free = if ($script:mfsgCalls -eq 1) { [long]1000 } else { [long]1500 } }
+        }
+        Measure-FreeSpaceGain -Category 'DISM' -Operation { }
+        $script:Stats.FreedByCategory['DISM'] | Should -Be 500
+        [long]$script:Stats.TotalFreedBytes   | Should -Be 500
+    }
+
+    It "discards a negative delta when the drive shrank during the operation" {
+        $script:mfsgCalls = 0
+        Mock Get-PSDrive {
+            $script:mfsgCalls++
+            [pscustomobject]@{ Free = if ($script:mfsgCalls -eq 1) { [long]1500 } else { [long]1000 } }
+        }
+        Measure-FreeSpaceGain -Category 'DISM' -Operation { }
+        $script:Stats.FreedByCategory.ContainsKey('DISM') | Should -BeFalse
+        [long]$script:Stats.TotalFreedBytes | Should -Be 0
+    }
+}
+
+Describe "Show-Banner" -Tag "Unit", "Helper", "V219" {
+    It "renders without throwing" {
+        { Show-Banner *> $null } | Should -Not -Throw
+    }
+}
+
+#endregion
