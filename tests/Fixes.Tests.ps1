@@ -1012,3 +1012,58 @@ Describe "v2.19: app updates are reported as offered, not installed" -Tag "Fix",
 }
 
 #endregion
+
+#region v2.19: get.ps1 parameter allowlist matches WinClean (F4)
+
+Describe "v2.19: get.ps1 forwards exactly WinClean's parameter set" -Tag "Fix", "V219", "Bootstrap" {
+    # The reviewer confirmed the lists match today; this is the guard that keeps them in
+    # sync. A new WinClean parameter that get.ps1 does not know would be silently dropped
+    # from the one-line install, so drift must fail the build, not surprise a user.
+
+    BeforeAll {
+        function Get-NamedArrayLiteral {
+            param($Ast, [string]$VarName)
+            $assign = $Ast.FindAll({
+                param($n)
+                $n -is [System.Management.Automation.Language.AssignmentStatementAst] -and
+                $n.Left -is [System.Management.Automation.Language.VariableExpressionAst] -and
+                $n.Left.VariablePath.UserPath -eq $VarName
+            }, $true) | Select-Object -First 1
+            if (-not $assign) { throw "Assignment '`$$VarName' not found" }
+            $strings = $assign.Right.FindAll({
+                param($n) $n -is [System.Management.Automation.Language.StringConstantExpressionAst]
+            }, $true)
+            return @($strings | ForEach-Object { $_.Value } | Sort-Object)
+        }
+
+        # WinClean's real parameters, split by static type
+        $wcAst = [System.Management.Automation.Language.Parser]::ParseFile($scriptPath, [ref]$null, [ref]$null)
+        $wcParams = $wcAst.ParamBlock.Parameters
+        $script:wcSwitch = @($wcParams | Where-Object { $_.StaticType -eq [switch] } |
+                             ForEach-Object { $_.Name.VariablePath.UserPath } | Sort-Object)
+        $script:wcValue  = @($wcParams | Where-Object { $_.StaticType -eq [string] } |
+                             ForEach-Object { $_.Name.VariablePath.UserPath } | Sort-Object)
+
+        # get.ps1's declared allowlist, read via AST (dot-sourcing it would try to run it)
+        $getPath = (Resolve-Path (Join-Path $PSScriptRoot '..' 'get.ps1')).Path
+        $getAst = [System.Management.Automation.Language.Parser]::ParseFile($getPath, [ref]$null, [ref]$null)
+        $script:getSwitch = Get-NamedArrayLiteral -Ast $getAst -VarName 'switchParams'
+        $script:getValue  = Get-NamedArrayLiteral -Ast $getAst -VarName 'valueParams'
+    }
+
+    It "switch parameters match exactly" {
+        ($script:getSwitch -join ',') | Should -Be ($script:wcSwitch -join ',')
+    }
+
+    It "value parameters match exactly" {
+        ($script:getValue -join ',') | Should -Be ($script:wcValue -join ',')
+    }
+
+    It "every WinClean parameter is reachable through get.ps1" {
+        $allWc  = @($script:wcSwitch + $script:wcValue | Sort-Object)
+        $allGet = @($script:getSwitch + $script:getValue | Sort-Object)
+        ($allGet -join ',') | Should -Be ($allWc -join ',')
+    }
+}
+
+#endregion
