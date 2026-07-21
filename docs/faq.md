@@ -6,7 +6,7 @@ Deeper answers than the README summary. See also [safety.md](safety.md), [what-i
 
 ### Is it safe to run WinClean?
 
-Yes, by design. WinClean creates a System Restore Point before making changes, never touches a fixed set of protected system paths, and can be run in `-ReportOnly` mode to preview every action without changing anything. The one-command installers verify the download's SHA256 against the published release hash and abort on any mismatch. The full model is documented in [safety.md](safety.md).
+Yes, by design. WinClean attempts a System Restore Point before the maintenance phases (and warns, without stopping, if it cannot be created), refuses a fixed set of protected system roots as cleanup targets, and can be run in `-ReportOnly` mode to preview the actions without making maintenance changes. The one-command installers verify the download's SHA256 against the published release hash and abort on any mismatch. The full model is documented in [safety.md](safety.md).
 
 ### Will it delete my installed programs?
 
@@ -14,7 +14,7 @@ No. WinClean removes caches and temporary files, not applications or user data. 
 
 ### Will it touch my browser passwords or bookmarks?
 
-No. Only cache directories are cleaned (Cache, Code Cache, GPUCache, Service Worker cache). Bookmarks, saved passwords, history and profiles are not touched.
+No. Only cache directories are cleaned. For Edge and Chrome that is Cache, Code Cache, GPUCache and the Service Worker CacheStorage; for Brave, Yandex, Opera and Opera GX it is Cache, Code Cache and GPUCache; Firefox uses its own `cache2`. Bookmarks, saved passwords, history and profiles are not touched.
 
 ### How often should I run it?
 
@@ -30,11 +30,11 @@ WinClean is designed and tested for Windows 11 (23H2 / 24H2 / 25H2). Most featur
 
 ### Does it send any data anywhere?
 
-No. WinClean performs no telemetry and transmits no data externally. It stores and transmits no credentials. The only network activity is downloading updates you asked for (Windows Update, winget, the PSWindowsUpdate module) and, for the one-command installers, fetching the release asset from GitHub.
+No telemetry and no personal or file data is ever sent, and it stores or transmits no credentials. It is not fully offline, though: to do its job WinClean contacts the standard maintenance services - Windows Update and the PSWindowsUpdate module, winget, the PowerShell Gallery (a startup version check), and a connectivity probe - and the one-command installers fetch the release asset from GitHub. None of that uploads anything about you or your files.
 
 ### What does `-ReportOnly` do?
 
-It is a dry run. WinClean walks the same phases and reports what it **would** clean and roughly how much space it would free, but changes nothing. It is the recommended first run. Note that `-ReportOnly` is a preview of actions, not a verification of the script's integrity; integrity is handled by the fail-closed SHA256 check in `get.ps1` / `install.ps1`.
+It is a dry run. WinClean walks the same phases and reports what it **would** clean and roughly how much space it would free, but makes no maintenance changes (no installs, no deletions of the caches it would clean, no restore point). It still writes its own log and result file and does the read-only update/connectivity checks unless you also pass `-SkipUpdates`. It is the recommended first run. Note that `-ReportOnly` is a preview of actions, not a verification of the script's integrity; integrity is handled by the fail-closed SHA256 check in `get.ps1` / `install.ps1`.
 
 ### How do I skip parts of the run?
 
@@ -54,4 +54,4 @@ Windows updates run through the `PSWindowsUpdate` module (including drivers). Ap
 
 ### What if something breaks?
 
-Roll back to the restore point WinClean created at the start of the run (`rstrui.exe`, choose `WinClean <date>`), then read `%TEMP%\WinClean_<date>.log` to see what changed. More in [troubleshooting.md](troubleshooting.md).
+If a restore point was created at the start of the run (check the log; it is attempted but can fail), roll back to it (`rstrui.exe`, choose `WinClean <date>`). Then read `%TEMP%\WinClean_<date>.log` to see what changed. More in [troubleshooting.md](troubleshooting.md).

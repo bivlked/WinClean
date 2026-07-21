@@ -81,7 +81,7 @@ if (-not $version) {
         # hardcoded version to drift. Guard that it stayed dynamic rather than being
         # re-hardcoded; the flow diagram still names the version explicitly, so that is the
         # place the release must bump.
-        $versionSites += @{ What = "$readme dynamic release badge"; Ok = $text -match "img\.shields\.io/github/v/release/" }
+        $versionSites += @{ What = "$readme dynamic release badge"; Ok = $text -match "img\.shields\.io/github/v/release/bivlked/WinClean" }
         $versionSites += @{ What = "$readme flow diagram"; Ok = $text -match "WinClean v$([regex]::Escape($version))" }
     }
 

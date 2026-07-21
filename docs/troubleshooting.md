@@ -85,7 +85,7 @@ For automation or CI, pass `-ResultJsonPath` to get a JSON summary of the run (f
 
 ## Something went wrong, how do I roll back?
 
-WinClean creates a **System Restore Point** at the start of every run (unless `-SkipRestore` is set or you are in `-ReportOnly`). If a change caused a problem, roll back to that restore point:
+WinClean **attempts** a **System Restore Point** near the start of a run (unless `-SkipRestore` is set or you are in `-ReportOnly`). Creation can fail (System Protection disabled, low disk), in which case the run warns and continues, so check the log to confirm a point exists. If one was created and a change caused a problem, roll back to it:
 
 - `Win+R` -> `rstrui.exe` -> choose the restore point named `WinClean <date time>`.
 

@@ -20,7 +20,10 @@
     FullWithUpdates: everything enabled - the complete production scenario (slow).
 .PARAMETER Source
     local (default): upload the working-tree WinClean.ps1 (tests unpushed changes).
-    main / release: the guest downloads from GitHub (also validates get.ps1 path).
+    main / release: the guest downloads WinClean.ps1 by raw URL from that branch/tag
+    (raw.githubusercontent.com/.../<ref>/WinClean.ps1). This exercises the script at that
+    ref, not the release asset download or the get.ps1 one-liner (use -VerifyPublished
+    and a manual one-liner run for those).
 .PARAMETER KeepRunning
     Leave the VM running after the test (for interactive debugging via console)
 #>

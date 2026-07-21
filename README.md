@@ -64,10 +64,10 @@ irm https://raw.githubusercontent.com/bivlked/WinClean/main/install.ps1 | iex
 
 ### 🔒 Why the one-liner is safe to trust
 
-- The bootstrap scripts download WinClean from the **latest GitHub Release** and **verify its SHA256** against the published `WinClean.ps1.sha256` asset. Verification is **fail-closed**: a mismatch or a missing asset aborts, with no fallback to a mutable branch.
-- `install.ps1` installs into `%ProgramFiles%\WinClean` (admin-only), so the elevated shortcut cannot be hijacked.
-- `-ReportOnly` shows exactly what would happen and changes nothing.
-- MIT licensed, no telemetry, no data leaves your machine. See **[SECURITY.md](SECURITY.md)** and **[docs/safety.md](docs/safety.md)**.
+- The bootstrap scripts download `WinClean.ps1` from the **latest GitHub Release** and **verify its SHA256** against the published `WinClean.ps1.sha256` asset. Verification is **fail-closed**: a mismatch or a missing asset aborts, with no fallback to a mutable branch. (The small bootstrap script itself comes from `main` and is short enough to read first.)
+- `install.ps1` installs into `%ProgramFiles%\WinClean` (admin-only), so a non-admin process cannot alter the installed script the shortcut launches.
+- `-ReportOnly` shows what would happen and makes no changes to anything it would clean or update.
+- MIT licensed, no telemetry, no personal data sent. It contacts only the standard maintenance services (Windows Update, winget, the PowerShell Gallery). See **[SECURITY.md](SECURITY.md)** and **[docs/safety.md](docs/safety.md)**.
 
 </td>
 </tr>
@@ -271,7 +271,7 @@ WinClean is built to be safe to run on a working machine. The short version:
 
 | Safety Feature | Description |
 |:---------------|:------------|
-| 🔄 **Restore Point** | Created before any changes (skip with `-SkipRestore`) |
+| 🔄 **Restore Point** | Attempted before the maintenance phases; a failure is warned and does not stop the run (skip with `-SkipRestore`) |
 | 🛡️ **Protected Paths** | `C:\Windows`, `C:\Program Files`, `C:\Users` and volume roots are never deleted |
 | 📦 **Preserves Packages** | `node_modules`, `.nuget\packages`, virtualenvs, `vendor` are kept |
 | 👁️ **Preview Mode** | `-ReportOnly` shows changes first |
@@ -320,10 +320,10 @@ WinClean is built to be safe to run on a working machine. The short version:
 ├────────────────────────────────────────────────────────────────┤
 │  DEEP CLEANUP                                                  │
 │  ├─ 🔧 DISM Component Cleanup                                  │
-│  ├─ 💾 Disk Cleanup (23 registry handlers)                    │
+│  ├─ 💾 Storage Sense, or Disk Cleanup (up to 23 handlers)     │
 │  ├─ 🚗 Driver Store (superseded packages)                     │
 │  ├─ 🧹 Stale Kernel Dumps (older than 30 days)                │
-│  └─ 📁 Windows.old Removal (with confirmation)                 │
+│  └─ 📁 Windows.old Removal (prompted; 15s default = yes)       │
 ├────────────────────────────────────────────────────────────────┤
 │  PRIVACY (optional)                                            │
 │  ├─ 🔒 Clear DNS Cache & History                               │
@@ -333,7 +333,7 @@ WinClean is built to be safe to run on a working machine. The short version:
 └────────────────────────────────────────────────────────────────┘
 ```
 
-> Each phase's outcome is recorded in the result JSON as **completed**, **skipped**, or **failed**, so an automated run can tell "everything ran" from "a phase threw". See **[docs/result-json.md](docs/result-json.md)**.
+> Each phase's dispatch status is recorded in the result JSON as **completed**, **skipped**, or **failed** (invoked / suppressed by a flag / threw), so an automated run can tell "everything ran" from "a phase threw". See **[docs/result-json.md](docs/result-json.md)**.
 
 ---
 

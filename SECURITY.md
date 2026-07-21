@@ -11,16 +11,18 @@
 
 WinClean is designed with security in mind:
 
-- **System Restore Point**: Created before any changes
-- **Protected Paths**: Critical system folders are never touched
-- **No Network Data**: Script doesn't send any data externally
+- **System Restore Point**: Attempted before the maintenance phases. If it cannot be created, the run logs a warning and continues (it is a safety net, not a hard gate)
+- **Protected Paths**: The listed root directories (`C:\Windows`, `C:\Program Files`, `C:\Users`, and volume roots) are never accepted as bulk-cleanup targets. Selected subdirectories under them (caches, temp) are cleaned intentionally
+- **No personal data sent**: WinClean sends no telemetry and no personal or file data anywhere. It does contact Windows Update, winget, the PowerShell Gallery and a connectivity endpoint to do its job - these are the standard update/maintenance services, not data exfiltration
 - **No Credentials**: Script never stores or transmits credentials
-- **Dry Run Mode**: `-ReportOnly` flag to preview all changes
+- **Dry Run Mode**: `-ReportOnly` previews the maintenance actions and makes no changes to the things it would clean or update (it still writes its log/result file and performs read-only update checks unless skipped)
 - **SHA256 verification** (since 2.15): `get.ps1` and `install.ps1` download the script from the latest GitHub Release and verify it against the published `WinClean.ps1.sha256` asset. Verification is fail-closed - a hash mismatch or a missing asset aborts the run, and the scripts never silently fall back to a mutable branch
-- **Protected install location** (since 2.15): `install.ps1` installs to `%ProgramFiles%\WinClean`, which requires administrator rights to modify, so the elevated desktop shortcut cannot be hijacked by a non-admin process
+- **Protected install location** (since 2.15): `install.ps1` installs to `%ProgramFiles%\WinClean`, which requires administrator rights to modify, so a non-admin process cannot alter the installed script that the shortcut launches (the `.lnk` itself lives on the user-writable desktop)
 - **Explicit parameter binding** (since 2.15): the script declares `PositionalBinding = $false`, so a stray argument fails loudly instead of silently binding to the wrong parameter
 
-### Protected Paths (Never Modified)
+### Protected Paths (never bulk-deleted)
+
+These root directories are refused as cleanup targets, so WinClean never deletes them or walks them wholesale. Specific cache/temp subdirectories under them are still cleaned on purpose.
 
 ```
 C:\Windows\
@@ -37,8 +39,7 @@ If you discover a security vulnerability in WinClean, please report it responsib
 ### How to Report
 
 1. **DO NOT** create a public GitHub issue for security vulnerabilities
-2. **Email** the maintainer directly (create a private security advisory)
-3. Or use GitHub's [private vulnerability reporting](https://github.com/bivlked/WinClean/security/advisories/new)
+2. Use GitHub's [private vulnerability reporting](https://github.com/bivlked/WinClean/security/advisories/new) to open a confidential security advisory. This is the preferred, tracked channel and needs no email address
 
 ### What to Include
 
@@ -78,7 +79,7 @@ When using WinClean:
 
 ## Supply Chain
 
-- **Bootstrap:** `get.ps1` and `install.ps1` pull from GitHub Release assets (immutable), not from `main`, and verify SHA256 fail-closed (see above). See [docs/safety.md](docs/safety.md) for the full trust model.
+- **Bootstrap:** `get.ps1` and `install.ps1` download `WinClean.ps1` from the latest GitHub Release (not from `main`) and verify its SHA256 fail-closed against the release's `.sha256` asset (see above). Release assets are version-associated but can be replaced by the maintainer, so this detects corruption and inconsistent packaging rather than authenticating against a compromised account. The small bootstrap scripts themselves are fetched from `main` and are short enough to read before running. See [docs/safety.md](docs/safety.md) for the full trust model.
 - **CI GitHub Actions** are pinned to full commit SHAs (not moving tags like `@v4`), and [Dependabot](.github/dependabot.yml) opens update PRs so the pins stay current. This limits the blast radius of a compromised action tag for a utility that runs elevated.
 - **Releases** are verified end-to-end on real Windows 11 VMs (ru-RU and en-US) before publishing; the release gate is documented in [docs/release-process.md](docs/release-process.md).
 

@@ -6,7 +6,7 @@ WinClean can write a machine-readable summary of a run to a file, for automation
 .\WinClean.ps1 -ReportOnly -ResultJsonPath .\run-result.json
 ```
 
-If `-ResultJsonPath` is not given, no JSON is written. When it is given, the file is overwritten at the start of the run, so a stale copy from a previous run can never be read as this run's outcome. The JSON is UTF-8, produced by `Write-ResultJson` in `WinClean.ps1`.
+If `-ResultJsonPath` is not given, no JSON is written. When it is given, the previous file is removed at startup (best-effort; the deletion error is suppressed), so a stale copy from an earlier run is not mistaken for this one. Pair it with the `Timestamp` check below to be certain. The JSON is UTF-8, produced by `Write-ResultJson` in `WinClean.ps1`.
 
 This page documents every field, gives a full sample, and explains how to consume it safely.
 
@@ -20,18 +20,18 @@ This page documents every field, gives a full sample, and explains how to consum
 | `ReportOnly` | bool | `true` when the run was a preview (`-ReportOnly`): nothing was changed. |
 | `Parameters` | object | The switches the run was invoked with (see below). |
 | `TotalFreedBytes` | long | Total bytes freed across all categories. `0` in `-ReportOnly`. |
-| `FreedByCategory` | object | Map of category name to bytes freed, e.g. `{ "Temp": 187912345, "DriverStore": 451801088 }`. Only non-zero categories appear. |
+| `FreedByCategory` | object | Map of category name to bytes freed, e.g. `{ "Temp": 187912345, "DriverStore": 451801088 }`. Categories are added as work happens, so a category can appear with `0` (for example DriverStore is recorded after a successful package removal even if the measured freed size was zero). |
 | `WindowsUpdatesCount` | number | Number of Windows updates installed (from PSWindowsUpdate, which reports per-update results, so this is a real installed count). |
 | `AppUpdatesOffered` | number | Number of application updates winget **offered**. See the note below - this is not a confirmed install count. |
 | `WarningsCount` | number | Count of warnings raised during the run. Warnings are the silent-failure alarm; treat a non-zero value as something to inspect. |
 | `ErrorsCount` | number | Count of errors raised during the run. A healthy run reports `0`. |
 | `RebootRequired` | bool | `true` when a change (a Windows update, an app update finishing on reboot) needs a restart to take effect. |
 | `ControlledFolderAccess` | string | Tri-state, see below. Reflects whether Defender's Controlled Folder Access may have silently blocked deletions. |
-| `Aborted` | string or null | `null` for a normal run. A reason string (e.g. `"PendingRebootDeclined"`) when the run stopped early. When set, the phase arrays below are incomplete by design. |
+| `Aborted` | string or null | `null` unless the run stopped early for a known reason (currently only a declined pending reboot, `"PendingRebootDeclined"`, sets it). When set, the phase arrays below are incomplete by design. Note `null` does not by itself prove every phase ran - see the invariant note below. |
 | `PhasesCompleted` | array of string | Phases whose action ran to completion without an uncaught exception. |
 | `PhasesFailed` | array of string | Phases whose action threw. |
 | `PhasesSkipped` | array of string | Phases a skip flag suppressed before they ran. |
-| `LogPath` | string | Absolute path of the run's log file. |
+| `LogPath` | string | Path to the run's log file (as given; it may be relative if `-LogPath` was passed a relative path). |
 
 ### `Parameters`
 
@@ -84,7 +84,7 @@ Preparation, Updates, SystemCleanup, DeveloperCleanup, DockerWSLCleanup,
 VisualStudioCleanup, DeepSystemCleanup, DiskSpaceReport, Telemetry
 ```
 
-**Invariant.** For a run that was not aborted (`Aborted` is `null`), the three arrays are pairwise disjoint and their union is exactly those nine names. A name missing from all three means the run stopped before it was dispatched (a crash outside any phase boundary). This invariant is what makes the tri-state trustworthy: you can tell "everything ran" from "phase N never happened".
+**Invariant.** The three arrays are pairwise disjoint by dispatcher design - a phase lands in exactly one bucket. A healthy run's union is exactly those nine names. Note that `Aborted == null` alone does not guarantee a complete union: an exception thrown *outside* any phase boundary is caught without setting `Aborted`, so a name can be missing while `Aborted` is still `null` (that path also increments `ErrorsCount`). So verify the union independently, and read a missing name together with a non-zero `ErrorsCount` as a crash outside a phase. This is what makes the tri-state trustworthy: you can tell "everything ran" from "phase N never happened".
 
 ## Sample
 
@@ -148,7 +148,9 @@ $r = Get-Content .\run-result.json -Raw | ConvertFrom-Json
 if ($r.ErrorsCount -ne 0) { throw "WinClean reported $($r.ErrorsCount) error(s)" }
 if ($r.ControlledFolderAccess -eq 'unknown') { throw "Cleanup figures are unverified" }
 
-# Phase invariant (only meaningful when the run was not aborted)
+# Phase invariant. The ErrorsCount check above already catches a crash outside a phase
+# boundary (that path bumps ErrorsCount without setting Aborted), so reaching here with
+# no error means the union below should be complete.
 if (-not $r.Aborted) {
     $known = 'Preparation','Updates','SystemCleanup','DeveloperCleanup',
              'DockerWSLCleanup','VisualStudioCleanup','DeepSystemCleanup',

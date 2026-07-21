@@ -1,6 +1,6 @@
 # What Exactly Is Cleaned
 
-This page is the exhaustive inventory of what WinClean touches, phase by phase, and what it deliberately leaves alone. The guiding rule throughout: caches and regenerable temporary data are cleaned; your files, packages, and project dependencies are preserved.
+This page is a per-phase inventory of what WinClean cleans and what it deliberately leaves alone (some sub-items are summarized rather than listed exhaustively). The guiding rule throughout: caches and regenerable temporary data are cleaned; your files, packages, and project dependencies are preserved.
 
 For the machine-readable outcome of a run (freed bytes per category, warnings, phase status), see [result-json.md](result-json.md).
 
@@ -16,14 +16,10 @@ The temp sweep is age-aware. Files younger than roughly one day are kept, becaus
 
 Seven browsers are handled.
 
-Chromium family (one shared cache set: `Cache`, `Code Cache`, `GPUCache`, `Service Worker\CacheStorage`):
+Chromium family:
 
-- Microsoft Edge
-- Google Chrome
-- Yandex Browser
-- Opera
-- Opera GX
-- Brave
+- Microsoft Edge and Google Chrome clean `Cache`, `Code Cache`, `GPUCache`, and `Service Worker\CacheStorage`.
+- Yandex Browser, Opera, Opera GX, and Brave clean `Cache`, `Code Cache`, and `GPUCache` (no service-worker cache storage entry).
 
 Firefox is handled separately (`Mozilla\Firefox\Profiles`, the `cache2` store), because its layout differs from Chromium browsers.
 
@@ -63,11 +59,12 @@ Skipped with `-SkipDevCleanup` (or the whole cleanup group with `-SkipCleanup`).
 
 ## Docker & WSL
 
-Cleaned:
+Cleaned (via `docker system prune -f`):
 
-- Unused Docker images
 - Stopped containers
-- Docker build cache
+- Unused networks
+- Dangling images (untagged layers, not every unused image)
+- Build cache
 - WSL2 virtual disk (VHDX) compaction
 
 VHDX compaction uses `diskpart`. In v2.19 a failed `compact vdisk` is reported as a warning instead of a neutral "no space saved", and a failed `wsl --shutdown` skips compaction rather than touching a possibly-live disk.
@@ -89,7 +86,7 @@ Skipped with `-SkipVSCleanup` (or `-SkipCleanup`).
 Cleaned:
 
 - DNS resolver cache flush
-- Windows event logs (only enabled, non-empty logs)
+- Windows event logs: only enabled, non-empty Administrative and Operational logs are cleared; the `Security` log is excluded
 - Run history (Win+R)
 - Explorer history and recent documents
 
@@ -106,12 +103,15 @@ As of v2.19 the rule requires a strictly newer version; a package of the same ve
 
 ## Disk Cleanup
 
-Cleaned via the built-in `cleanmgr` using StateFlags for 23 registry handler categories (system caches, error dumps, update leftovers, thumbnail cache, and similar). Only categories that actually exist on the machine are armed; a run that could arm nothing is skipped and is not reported as a success. `DownloadsFolder` is deliberately excluded, because it holds user files.
+The normal path is **Storage Sense** (the built-in scheduled task), when it is present and enabled. Only if Storage Sense is missing or disabled does WinClean **fall back to `cleanmgr`**, arming StateFlags for up to 23 registry handler categories (system caches, error dumps, update leftovers, thumbnail cache, and similar). In the fallback, only categories that actually exist on the machine are armed; a run that could arm nothing is skipped and is not reported as a success. `DownloadsFolder` is deliberately excluded, because it holds user files.
 
 ## Windows.old
 
-Removed only after explicit confirmation. This is the previous Windows installation left behind by a feature update; it can be large, but it is also what an in-place rollback uses, so WinClean never removes it silently.
+This is the previous Windows installation left behind by a feature update; it can be large, but it is also what an in-place rollback uses. Removal is prompted, but note the default:
+
+- **Interactive console:** the prompt is `Delete Windows.old? (Y/n, default Y in 15 sec)`. If you do not answer within 15 seconds it defaults to **Yes** and Windows.old is deleted. Type `n` to cancel.
+- **Non-interactive run** (scheduled task, no console): it is skipped and left in place (safe default, no delete).
 
 ---
 
-The exact, machine-readable result of any run (bytes freed per category, warnings, and each phase's status) is written to the result JSON. See [result-json.md](result-json.md).
+When you pass `-ResultJsonPath`, the exact machine-readable result of the run (bytes freed per category, warnings, and each phase's status) is written to that JSON file. See [result-json.md](result-json.md).

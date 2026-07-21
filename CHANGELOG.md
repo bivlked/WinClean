@@ -44,9 +44,10 @@ deep dives under `docs/`).
   are pairwise disjoint, and their union is exactly the nine known phases for a non-aborted run
 - **`docs/` documentation site**: safety model, what-is-cleaned inventory, result-JSON schema,
   release process, troubleshooting, FAQ and comparison pages, linked from the README
-- **Nightly stand honesty**: the matrix now also runs a quick pass against the published release
-  asset (not just `main`), and a dead-man heartbeat check alerts if the nightly never ran. A new
-  `ReportNoCleanup` stand mode verifies the `-SkipCleanup` contract end-to-end
+- **Nightly stand honesty**: the matrix now also runs a quick pass against the latest release
+  tag's script (not just `main`), so a broken release with a healthy `main` is caught, and a
+  dead-man heartbeat check alerts if the nightly never ran. A new `ReportNoCleanup` stand mode
+  verifies the `-SkipCleanup` contract end-to-end
 - **Supply chain**: CI GitHub Actions are pinned to commit SHAs with Dependabot updates
 
 ### Docs
