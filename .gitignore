@@ -37,8 +37,9 @@ Desktop.ini
 # Claude local instructions (personal notes)
 CLAUDE.local.md
 
-# Documentation drafts (not for public repo)
-docs/
+# Documentation drafts (not for public repo). Public docs/*.md ARE committed;
+# only the Habr article drafts and their screenshots stay local.
+docs/_habr/
 
 # Test outputs
 TestResults/

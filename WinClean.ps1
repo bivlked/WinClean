@@ -1,5 +1,5 @@
 <#PSScriptInfo
-.VERSION 2.18
+.VERSION 2.19
 .GUID 8f7c3b2a-1d4e-5f6a-9b8c-0d1e2f3a4b5c
 .AUTHOR bivlked
 .COMPANYNAME
@@ -12,6 +12,7 @@
 .REQUIREDSCRIPTS
 .EXTERNALSCRIPTDEPENDENCIES
 .RELEASENOTES
+    v2.19: Contract and documentation round - -SkipCleanup now skips ALL cleanup categories, result JSON gains a tri-state PhasesSkipped, AppUpdatesCount renamed to AppUpdatesOffered (offered, not installed), full docs overhaul
     v2.18: Correctness and hardening follow-up from external code review - diskpart failure detection, driver-store accounting, strict superseded-version rule, exact bootstrap host allowlist
     v2.17: Silent failure hardening - operations that quietly do nothing now say so instead of reporting success
     v2.16: Driver store cleanup, disk space report, kernel dump cleanup, 9 audit fixes (Delivery Optimization path, TEMP age filter, winget exit codes)
@@ -27,7 +28,7 @@
 
 <#
 .SYNOPSIS
-    WinClean - Ultimate Windows 11 Maintenance Script v2.18
+    WinClean - Ultimate Windows 11 Maintenance Script v2.19
 .DESCRIPTION
     Комплексный скрипт для обновления и очистки Windows 11:
     - Обновление Windows (включая драйверы)
@@ -41,8 +42,18 @@
     - Подробный цветной вывод + лог-файл
 .NOTES
     Author: biv
-    Version: 2.18
+    Version: 2.19
     Requires: PowerShell 7.1+, Windows 11, Administrator rights
+    Changes in 2.19:
+    - -SkipCleanup now skips the ENTIRE cleanup group (system, deep, developer,
+      Docker/WSL, Visual Studio), matching the documented "skip all cleanup" contract.
+      Previously it left developer/Docker/VS cleanup running (behavior change)
+    - Result JSON gains a tri-state PhasesSkipped (dispatch status): a phase turned off
+      by a skip flag is now recorded as skipped instead of completed
+    - AppUpdatesCount renamed to AppUpdatesOffered - winget cannot confirm how many apps
+      installed, so the summary reports the offered count honestly ("Apps: N offered")
+    - Documentation overhaul: accurate feature list, docs/ deep-dive pages, SECURITY and
+      CONTRIBUTING release-gate, SHA-pinned CI actions
     Changes in 2.18:
     - WSL/Docker VHDX compaction now detects a diskpart failure instead of reporting
       "no space saved", and a failed WSL shutdown skips compaction rather than
@@ -341,7 +352,7 @@ if (-not $LogPath) {
 }
 
 # Script version (single source of truth for version checking)
-$script:Version = "2.18"
+$script:Version = "2.19"
 
 # Protected paths that should never be deleted
 $script:ProtectedPaths = @(
@@ -2208,7 +2219,8 @@ function Clear-TempFiles {
 function Clear-BrowserCaches {
     <#
     .SYNOPSIS
-        Cleans browser caches (Edge, Chrome, Firefox, Yandex)
+        Cleans browser caches (Edge, Chrome, Brave, Yandex, Opera, Opera GX, Firefox).
+        All profiles are cleaned for Chrome, Edge and Firefox; the default profile for the rest
     #>
     Write-Log "Browser Caches" -Level SECTION
 

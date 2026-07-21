@@ -1,7 +1,7 @@
 # WinClean - Инструкции для Claude
 
 > Последнее обновление: 2026-07-21
-> Текущая версия скрипта: 2.18 (ВЫПУЩЕНА 21.07.2026, GitHub Release с ассетами)
+> Текущая версия скрипта: 2.19 (в работе, ветка feature/v2.19; последний ВЫПУЩЕННЫЙ релиз - 2.18, GitHub Release с ассетами)
 
 ---
 
@@ -11,7 +11,7 @@
 
 | Параметр | Значение |
 |----------|----------|
-| **Версия** | 2.18 |
+| **Версия** | 2.19 (в работе) |
 | **Язык** | PowerShell 7.1+ |
 | **Платформа** | Windows 11 (23H2/24H2/25H2) |
 | **Лицензия** | MIT |
@@ -43,10 +43,12 @@ CleanScript/
 │   └── logo.svg              # Логотип проекта
 ├── get.ps1                   # Bootstrap: разовый запуск одной командой (irm | iex)
 ├── install.ps1               # Bootstrap: установка/обновление + ярлык (RunAs admin)
-├── tests/                    # Pester тесты (309 всего)
-│   ├── Helpers.Tests.ps1     # Unit-тесты helper-функций (105 тестов, дот-сорсят продукт - нужны права админа)
-│   ├── Fixes.Tests.ps1       # Валидационные тесты исправлений (138 тестов)
-│   └── Integration.Tests.ps1 # Интеграционные тесты в песочнице ФС (66 тестов)
+├── tests/                    # Pester тесты (368 всего; счётчик - прогоном, не грепом)
+│   ├── Helpers.Tests.ps1     # Unit-тесты helper-функций (118, дот-сорсят продукт - нужны права админа)
+│   ├── Fixes.Tests.ps1       # Валидационные тесты исправлений (148)
+│   ├── Integration.Tests.ps1 # Интеграционные тесты в песочнице ФС (67, требуют admin)
+│   ├── StandHelpers.Tests.ps1 # Чистые хелперы стенда: dead-man Test-HeartbeatStale (9, без admin)
+│   └── Docs.Tests.ps1        # Гварды документации: нет тире + нет битых внутренних ссылок (26, без admin)
 ├── tools/                    # Тестовая инфраструктура (не публикуется в PSGallery)
 │   ├── Invoke-ReleaseCheck.ps1 # 🔴 Единая проверка перед релизом (fail-closed)
 │   ├── Invoke-SmokeTest.ps1  # Смоук: ReportOnly + JSON + геометрия рамок
@@ -57,10 +59,10 @@ CleanScript/
 │       ├── Invoke-NightlyStand.ps1 # Ночная матрица (cron на proxmos) + Telegram-отчёт
 │       ├── Deploy-StandRunner.ps1  # Деплой runner на Proxmox-хост (pwsh, cron, creds)
 │       └── StandCommon.ps1       # SSH/guest-agent helpers (+ local-режим на хосте)
-├── docs/                     # Черновики документации (НЕ в git!)
-│   ├── habr-article.md       # Статья для Хабра
-│   ├── habr-article-info.md  # Документация по статье
-│   └── Screenshots/          # Скриншоты для статьи
+├── docs/                     # Публичные deep-dive страницы (В git с v2.19): safety,
+│   │                         #   what-is-cleaned, result-json, release-process,
+│   │                         #   troubleshooting, faq, comparison, README (индекс)
+│   └── _habr/                # Черновики статьи для Хабра + скриншоты (НЕ в git, gitignored)
 ├── .gitignore
 └── .github/
     ├── workflows/ci.yml      # GitHub Actions CI (lint + syntax + Pester)
@@ -95,7 +97,7 @@ WinClean.ps1 - монолитный скрипт (4448 строк на 20.07.202
 ### Ключевые переменные
 
 ```powershell
-$script:Version = "2.17"           # Единый источник версии
+$script:Version = "X.Y"            # Единый источник версии (реальное значение смотреть грепом, не по этому примеру)
 $script:Stats = [hashtable]::Synchronized(@{...})  # Thread-safe статистика
 $script:LogPath = "..."            # Путь к лог-файлу
 $script:ProtectedPaths = @(...)    # Защищённые пути (никогда не удаляются)
@@ -192,7 +194,7 @@ Publish-PSResource -Path .\WinClean.ps1 -Repository PSGallery -ApiKey $env:PSGAL
 **Проверки (3 job'а):**
 1. **lint** - PSScriptAnalyzer (Warning, Error)
 2. **syntax** - Проверка синтаксиса PowerShell
-3. **test** - Pester тесты (309, запускается после lint и syntax; интеграционные требуют admin - на GitHub runners это выполняется)
+3. **test** - Pester тесты (368, запускается после lint и syntax; интеграционные требуют admin - на GitHub runners это выполняется)
 
 **Исключения PSScriptAnalyzer** (допустимые для CLI):
 - PSAvoidUsingWriteHost - это интерактивная утилита
@@ -201,7 +203,7 @@ Publish-PSResource -Path .\WinClean.ps1 -Repository PSGallery -ApiKey $env:PSGAL
 
 ### Pester тесты (v2.13+)
 
-- `tests/Helpers.Tests.ps1` - 105 unit-тестов (дот-сорсят WinClean.ps1), `tests/Fixes.Tests.ps1` - 138 тестов, `tests/Integration.Tests.ps1` - 66 интеграционных (песочница ФС, требуют admin)
+- `tests/Helpers.Tests.ps1` - 118 unit-тестов (дот-сорсят WinClean.ps1), `tests/Fixes.Tests.ps1` - 148, `tests/Integration.Tests.ps1` - 67 (песочница ФС, требуют admin), `tests/StandHelpers.Tests.ps1` - 9 (без admin), `tests/Docs.Tests.ps1` - 26 (гварды доков, без admin)
 - Особенности: функции в BeforeAll (не AST), regex для locale-независимости, отдельные It блоки
 
 ---
@@ -210,7 +212,7 @@ Publish-PSResource -Path .\WinClean.ps1 -Repository PSGallery -ApiKey $env:PSGAL
 
 ### В работе
 - [ ] **Публикация в PSGallery отстала на 4 версии**: там до сих пор v2.13 (18.01.2026), не публиковались 2.14/2.15/2.16/2.17. Решение за пользователем. ⚠️ Значение выросло: PSGallery - единственный путь, по которому работает встроенная авто-проверка обновлений (`Test-ScriptUpdate`), то есть установленные через PSGallery копии не узнают о критическом фиксе bootstrap из 2.17. One-liner'ы от GitHub Release при этом работают. Команда - в разделе "Публикация в PSGallery" ниже
-- [ ] Публикация статьи на Хабре (`docs/habr-article.md` - текст готов, ждёт скриншоты). ⚠️ Текст писался под старую версию - сверить с v2.17 (появились get.ps1/install.ps1, стенд, ночные прогоны, очистка Driver Store, пофазное выполнение)
+- [ ] Публикация статьи на Хабре (`docs/_habr/habr-article.md` - текст готов, ждёт скриншоты). ⚠️ Текст писался под старую версию - сверить с v2.19 (появились get.ps1/install.ps1, стенд, ночные прогоны, очистка Driver Store, пофазное выполнение, публичный docs/)
 
 ### v2.17 - ВЫПУЩЕНА 20.07.2026
 
@@ -336,7 +338,7 @@ pwsh tools/Invoke-ReleaseCheck.ps1                  # версия во всех
 pwsh tools/Invoke-ReleaseCheck.ps1 -IncludeStand    # + боевой прогон на VM (минуты)
 pwsh tools/Invoke-ReleaseCheck.ps1 -VerifyPublished # ПОСЛЕ выпуска: ассеты релиза и SHA256
 
-Invoke-Pester ./tests -Output Detailed              # 309 Pester тестов (105+138+66)
+Invoke-Pester ./tests -Output Detailed              # 368 Pester тестов (считать прогоном, не грепом)
 pwsh tools/Invoke-SmokeTest.ps1                     # Смоук: ReportOnly + геометрия UI
 pwsh tools/proxmox/Invoke-StandTest.ps1 -Mode Report # Стенд на Proxmox (RU=VM 190, EN: -ConfigPath ...en.json = VM 191)
 # Ночная матрица: cron 03:30 на proxmos (/opt/winclean-stand, /etc/cron.d/winclean-stand), отчёт в Telegram
@@ -352,7 +354,7 @@ Invoke-ScriptAnalyzer -Path .\WinClean.ps1 -Severity Warning,Error
 - **Синхронизировать README** EN и RU при любых изменениях
 - **Обновлять CHANGELOG** при каждом изменении
 - **Версия в нескольких местах** - см. раздел "Версионирование"
-- **docs/ не в git** - черновики (статья для Хабра, ждёт скриншоты)
+- **docs/*.md в git** (публичные deep-dive страницы с v2.19); черновики Хабра - в `docs/_habr/` (gitignored)
 - 🔴 **Pester тесты (изменилось 20.07.2026)**: `Helpers.Tests.ps1` и `Fixes.Tests.ps1` теперь **дот-сорсят WinClean.ps1**, а не держат копии его функций. Следствие: **прогон тестов требует прав администратора** (в скрипте `#Requires -RunAsAdministrator`). Копии были тавтологией - поломка в продукте не могла уронить тест, и они уже успели разойтись с оригиналом.
   - Регекс-проверки скоупить к телу функции через `Get-FunctionBody` (в `Fixes.Tests.ps1`), иначе тест находит ту же строку в комментарии или в другой функции и проходит при удалённом коде.
   - **Греп-тест не заменяет поведенческий.** Мутационная проверка 20.07: отключение фильтра возраста не поймал ни один греп-тест, поймали два интеграционных.

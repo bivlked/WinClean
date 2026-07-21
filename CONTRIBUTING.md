@@ -128,7 +128,22 @@ Invoke-Pester ./tests/Integration.Tests.ps1
 All PRs automatically run:
 - PSScriptAnalyzer (linting)
 - Syntax check
-- Pester tests (309 tests)
+- Pester tests (368 tests)
+
+### Release-impacting changes
+
+Some changes affect the **release contract**, not just the code, and can pass a normal PR review while still breaking distribution. If your change touches **any** of these:
+
+- the version number (in `WinClean.ps1` or the docs),
+- the bootstrap scripts (`get.ps1`, `install.ps1`) or the release assets / `WinClean.ps1.sha256`,
+- README badges, the CHANGELOG, or the version references in docs,
+
+then before opening the PR:
+
+1. Run the full release gate: `pwsh tools/Invoke-ReleaseCheck.ps1` (fail-closed: version consistency across all places, no em/en dashes, doc test-counters, syntax, PSScriptAnalyzer, Pester with no skips, smoke test, git state).
+2. In the PR description, note the change is release-impacting and outline the publication plan (GitHub Release with both assets + SHA256, and PowerShell Gallery if applicable).
+
+The full release runbook is in [docs/release-process.md](docs/release-process.md).
 
 ### Commit Messages
 
@@ -236,7 +251,22 @@ Invoke-Pester ./tests/Integration.Tests.ps1
 Все PR автоматически проходят:
 - PSScriptAnalyzer (линтинг)
 - Проверка синтаксиса
-- Pester тесты (309 тестов)
+- Pester тесты (368 тестов)
+
+### Изменения, влияющие на релиз
+
+Некоторые изменения затрагивают **релизный контракт**, а не только код, и могут пройти обычное ревью, но при этом сломать распространение. Если ваше изменение трогает **любое** из:
+
+- номер версии (в `WinClean.ps1` или документации),
+- bootstrap-скрипты (`get.ps1`, `install.ps1`) или ассеты релиза / `WinClean.ps1.sha256`,
+- бейджи README, CHANGELOG или ссылки на версию в документации,
+
+то перед открытием PR:
+
+1. Запустите полный релиз-гейт: `pwsh tools/Invoke-ReleaseCheck.ps1` (fail-closed: согласованность версии во всех местах, отсутствие длинных/средних тире, счётчики тестов в документации, синтаксис, PSScriptAnalyzer, Pester без пропусков, смоук-тест, состояние git).
+2. В описании PR отметьте, что изменение влияет на релиз, и опишите план публикации (GitHub Release с обоими ассетами + SHA256, при необходимости PowerShell Gallery).
+
+Полный порядок релиза - в [docs/release-process.md](docs/release-process.md).
 
 ---
 

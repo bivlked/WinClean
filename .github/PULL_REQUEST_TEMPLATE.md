@@ -38,6 +38,7 @@ Describe the tests you ran:
 - [ ] I have updated documentation if needed
 - [ ] My changes don't introduce new warnings
 - [ ] I have tested my changes thoroughly
+- [ ] **Release-impacting** (version, `get.ps1`/`install.ps1`, release assets, badges, CHANGELOG): if any of these changed, I ran `pwsh tools/Invoke-ReleaseCheck.ps1` and described the publication plan below / **Влияет на релиз** (версия, bootstrap, ассеты, бейджи, CHANGELOG): если да - запустил `Invoke-ReleaseCheck.ps1` и описал план публикации
 
 ## Screenshots (if applicable) / Скриншоты
 

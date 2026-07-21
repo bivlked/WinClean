@@ -77,7 +77,11 @@ if (-not $version) {
     )
     foreach ($readme in @('README.md', 'README_RU.md')) {
         $text = Get-Content (Join-Path $repoRoot $readme) -Raw
-        $versionSites += @{ What = "$readme badge"; Ok = $text -match "-$([regex]::Escape($version))-blue" }
+        # v2.19: the version badge is dynamic (shields.io github/v/release), so it carries no
+        # hardcoded version to drift. Guard that it stayed dynamic rather than being
+        # re-hardcoded; the flow diagram still names the version explicitly, so that is the
+        # place the release must bump.
+        $versionSites += @{ What = "$readme dynamic release badge"; Ok = $text -match "img\.shields\.io/github/v/release/" }
         $versionSites += @{ What = "$readme flow diagram"; Ok = $text -match "WinClean v$([regex]::Escape($version))" }
     }
 

@@ -69,11 +69,18 @@ If you discover a security vulnerability in WinClean, please report it responsib
 
 When using WinClean:
 
-1. **Always download from official sources** (GitHub releases)
-2. **Verify the script** before running (`-ReportOnly` mode)
-3. **Run with minimum necessary privileges** (though admin is required)
-4. **Keep PowerShell updated** to the latest version
-5. **Review the changelog** before updating to new versions
+1. **Always download from official sources** (GitHub Releases or PowerShell Gallery).
+2. **For integrity, use `get.ps1` / `install.ps1`.** They fail-closed: the script is downloaded from the latest GitHub Release and its SHA256 is compared exactly against the published `WinClean.ps1.sha256` asset. A mismatch or a missing hash asset aborts the run, and the scripts never fall back to a mutable branch. If you download `WinClean.ps1` manually, verify its hash yourself against the release asset.
+3. **For a safe preview, use `-ReportOnly`.** It shows the actions WinClean would take and changes nothing. Note this is a *preview of behavior*, not an *integrity check* - the two are separate concerns.
+4. **Run with minimum necessary privileges** (though administrator is required).
+5. **Keep PowerShell updated** to the latest version.
+6. **Review the changelog** before updating to new versions.
+
+## Supply Chain
+
+- **Bootstrap:** `get.ps1` and `install.ps1` pull from GitHub Release assets (immutable), not from `main`, and verify SHA256 fail-closed (see above). See [docs/safety.md](docs/safety.md) for the full trust model.
+- **CI GitHub Actions** are pinned to full commit SHAs (not moving tags like `@v4`), and [Dependabot](.github/dependabot.yml) opens update PRs so the pins stay current. This limits the blast radius of a compromised action tag for a utility that runs elevated.
+- **Releases** are verified end-to-end on real Windows 11 VMs (ru-RU and en-US) before publishing; the release gate is documented in [docs/release-process.md](docs/release-process.md).
 
 ## Scope
 

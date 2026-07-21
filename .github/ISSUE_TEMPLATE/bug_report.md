@@ -30,15 +30,28 @@ If applicable, add screenshots.
 
 ## Environment / Окружение
 
-- **Windows Version**: [e.g., Windows 11 23H2 Build 22631]
-- **PowerShell Version**: [e.g., 7.4.1]
-- **WinClean Version**: [e.g., 2.9]
+- **Windows Version**: [e.g., Windows 11 24H2 Build 26100]
+- **PowerShell Version**: [e.g., 7.5.0]
+- **WinClean Version**: [from the banner / release tag / PSGallery, e.g., 2.19]
+
+## How you installed & ran / Как установили и запустили
+
+- **Install method / Способ установки**: [ get.ps1 | install.ps1 | PowerShell Gallery | manual download | clone ]
+- **Version source / Откуда версия**: [ script banner | GitHub release tag | PSGallery ]
+- **Ran elevated (as Administrator)? / Запуск от администратора?**: [ yes / no ]
+- **Used `-ReportOnly`? / Использовали `-ReportOnly`?**: [ yes / no ]
+- **Other parameters / Прочие параметры**: [e.g., -SkipUpdates -SkipDockerCleanup]
 
 ## Log Output / Вывод лога
 
 ```
-Paste relevant log output here
+Paste relevant log output here (%TEMP%\WinClean_<date>.log)
 ```
+
+## Result JSON (optional) / Result JSON (по желанию)
+
+If you ran with `-ResultJsonPath`, attach or paste the JSON - it makes triage much faster.
+Если запускали с `-ResultJsonPath`, приложите JSON - это сильно ускорит разбор.
 
 ## Additional Context / Дополнительный контекст
 
