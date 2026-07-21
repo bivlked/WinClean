@@ -4516,6 +4516,15 @@ function Start-WinClean {
         Remove-Item -LiteralPath $ResultJsonPath -Force -ErrorAction SilentlyContinue
     }
 
+    # v2.19: reset the per-run phase buckets and step counter. The script normally runs
+    # once per process (entry-point guarded), but dot-sourcing it and calling Start-WinClean
+    # twice in one session would otherwise accumulate phase names across runs and leave the
+    # progress counter where the last run stopped.
+    $script:Stats.PhasesCompleted = @()
+    $script:Stats.PhasesFailed    = @()
+    $script:Stats.PhasesSkipped   = @()
+    $script:Stats.CurrentStep     = 0
+
     # Initialize log
     "WinClean v$($script:Version) - Started at $(Get-Date)" | Out-File -FilePath $script:LogPath -Encoding utf8
     "=" * 70 | Out-File -FilePath $script:LogPath -Append -Encoding utf8

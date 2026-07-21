@@ -12,6 +12,9 @@
     Artifacts are stored under tools/proxmox/results/<timestamp>/.
 .PARAMETER Mode
     Report (default): -ReportOnly -SkipUpdates, safe and fast (~2 min in guest).
+    ReportNoCleanup: -ReportOnly -SkipCleanup -SkipUpdates - verifies the v2.19
+    contract that -SkipCleanup suppresses the whole cleanup group (F1), e2e via the
+    PhasesSkipped buckets. Also fast; changes nothing.
     Full: real cleanup WITHOUT updates (-SkipUpdates; updates need Windows
     licensing/network time and are better exercised manually).
     FullWithUpdates: everything enabled - the complete production scenario (slow).
@@ -23,7 +26,7 @@
 #>
 [CmdletBinding()]
 param(
-    [ValidateSet('Report', 'Full', 'FullWithUpdates')]
+    [ValidateSet('Report', 'ReportNoCleanup', 'Full', 'FullWithUpdates')]
     [string]$Mode = 'Report',
 
     [ValidateSet('local', 'main', 'release')]
@@ -100,11 +103,13 @@ Invoke-WebRequest -Uri "https://raw.githubusercontent.com/bivlked/WinClean/`$tag
 # 3. Run WinClean
 $modeArgs = switch ($Mode) {
     'Report'          { "-ReportOnly -SkipUpdates" }
+    'ReportNoCleanup' { "-ReportOnly -SkipCleanup -SkipUpdates" }
     'Full'            { "-SkipUpdates" }
     'FullWithUpdates' { "" }
 }
 $timeout = switch ($Mode) {
     'Report'          { 1800 }
+    'ReportNoCleanup' { 1800 }
     'Full'            { 3600 }
     'FullWithUpdates' { 7200 }
 }
@@ -184,8 +189,13 @@ if (-not $jsonRaw) {
         $failures += "Controlled Folder Access state could not be verified - cleanup figures are unreliable"
     }
 
-    if ($Mode -eq 'Report') {
-        if (-not $result.ReportOnly) { $failures += "ReportOnly not confirmed in result JSON" }
+    # A report mode that silently ran for real is the 18.07 incident: guard it explicitly
+    # before trusting the ReportOnly-driven branch below, or a run that dropped ReportOnly
+    # would fall through to the "Full freed enough" check and pass while destroying data.
+    if ($Mode -in 'Report', 'ReportNoCleanup' -and -not $result.ReportOnly) {
+        $failures += "ReportOnly not confirmed in result JSON for mode $Mode"
+    }
+    if ($result.ReportOnly) {
         # A preview that frees bytes is the 18.07 incident happening again
         if ([long]$result.TotalFreedBytes -ne 0) {
             $failures += "Report mode freed $($result.TotalFreedBytes) bytes - it must change nothing"
