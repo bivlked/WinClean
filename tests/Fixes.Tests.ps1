@@ -632,13 +632,27 @@ Describe "v2.16: Disk Cleanup timeout" -Tag "Fix", "V216" {
         $scriptContent | Should -Match '\$maxWait = 900'
     }
 
-    It "Exceeding the wait is not counted as a warning" {
-        $scriptContent | Should -Match 'leaving it to finish in the background'
+    It "Exceeding the wait is reported as a warning (changed in v2.20)" {
+        # v2.16 logged this at INFO because killing cleanmgr was worse than waiting, and
+        # that part still holds. But the consequence was never stated: everything measured
+        # after this point is partial, and the run prints its total and writes its JSON
+        # while an elevated process is still deleting. Silence made a partial result look
+        # like a final one.
+        $body = Get-FunctionBody -Name 'Invoke-StorageSense'
+        $body | Should -Match 'still running - it continues in the background'
+        $body | Should -Match '\$script:Stats\.DiskCleanupPending = \$true'
     }
 
     It "cleanmgr is not killed on timeout" {
         # Killing it mid-delete achieved nothing and contradicted the log message
         $scriptContent | Should -Not -Match '\$cleanmgr \| Stop-Process'
+    }
+
+    It "Registry configuration is not pulled from under a still-running cleanmgr (v2.20)" {
+        # The finally block swept StateFlags immediately after deciding to let cleanmgr
+        # keep working, which removed the configuration it was running on
+        $body = Get-FunctionBody -Name 'Invoke-StorageSense'
+        $body | Should -Match 'if \(\$cleanmgr -and -not \$cleanmgr\.HasExited\)'
     }
 }
 

@@ -338,6 +338,9 @@ function New-RunStats {
     # 'unknown' must not be mistaken for a verified state by consumers of the JSON
     ControlledFolderAccess = 'unknown'
     Aborted              = $null     # v2.17: set when the run stops before finishing
+    # v2.20: cleanmgr outlived its timeout and is still deleting in the background. The
+    # totals reported by this run are partial, and a consumer must not read them as final.
+    DiskCleanupPending   = $false
     # v2.17 (p.11 of the audit): which top-level phases ran to completion vs threw.
     # Before this, one exception anywhere in the run silently skipped every phase
     # after it - Developer Cleanup, Docker/WSL, Visual Studio, Deep System Cleanup,
@@ -2462,14 +2465,25 @@ function Clear-BrowserCaches {
                 }
             } -ThrottleLimit 8
 
-            # Measure size after cleanup to get actual freed space
-            $sizeAfter = ($allPaths | ForEach-Object { Get-FolderSize -Path $_.Path } | Measure-Object -Sum).Sum
-            $sizeAfter = [long]($sizeAfter ?? 0)  # Ensure non-null value
+            # Measure size after cleanup to get actual freed space.
+            #
+            # v2.20: checked measurement. Get-FolderSize returns 0 both for "empty" and for
+            # "could not read", so an after-walk that lost access - the cache folder is
+            # being recreated by a browser that just started, ACLs changed mid-run - turned
+            # into "freed everything we measured before". The delta is only computed when
+            # every folder answered; otherwise the bytes stay unattributed instead of being
+            # invented.
+            $afterMeasurements = @($allPaths | ForEach-Object { Get-FolderSizeChecked -Path $_.Path })
+            $afterUnmeasured = @($afterMeasurements | Where-Object { $null -eq $_ }).Count
+            $sizeAfter = [long](($afterMeasurements | Where-Object { $null -ne $_ } | Measure-Object -Sum).Sum ?? 0)
+
             # Protect against negative values (can happen if browser recreates files during cleanup)
             $freedSpace = [math]::Max(0, $sizeBefore - $sizeAfter)
 
             # Update statistics with actual freed space (not estimated)
-            if ($freedSpace -gt 0) {
+            if ($afterUnmeasured -gt 0) {
+                Write-Log "Browser caches ($browserNames): cleaned, but $afterUnmeasured folder(s) could not be measured afterwards - freed space not counted" -Level DETAIL
+            } elseif ($freedSpace -gt 0) {
                 $script:Stats.TotalFreedBytes += $freedSpace
                 if (-not $script:Stats.FreedByCategory.ContainsKey("Browser")) {
                     $script:Stats.FreedByCategory["Browser"] = 0
@@ -2815,8 +2829,17 @@ function Clear-SystemCaches {
                 # Nothing to measure: say so instead of claiming a clean-up happened (v2.16)
                 Write-Log "Delivery Optimization: cmdlet ran, cache location not found - freed size unknown" -Level DETAIL
             } elseif ($doSizeBefore -gt 0) {
-                Write-Log "Delivery Optimization: nothing freed, $(Format-FileSize $doSizeBefore) still present" -Level WARNING
-                $script:Stats.WarningsCount++
+                # v2.20: this was a WARNING and fired on healthy systems. The measurement
+                # covers the WHOLE Delivery Optimization folder, but the supported cmdlet
+                # only removes cached content - the service's own logs and state files stay
+                # and are not ours to delete. So "size did not change" after a cmdlet that
+                # reported success is not evidence of failure, it is evidence that the
+                # remainder was never cache. Reproduced on the EN stand VM twice in a row
+                # (2 MB left behind), where it pushed the run over its warning budget.
+                #
+                # A genuine failure still surfaces: the cmdlet runs with -ErrorAction Stop,
+                # so an actual error lands in the catch below as a warning.
+                Write-Log "Delivery Optimization: cache cleared, $(Format-FileSize $doSizeBefore) of non-cache data (service logs and state) left in place" -Level DETAIL
             } else {
                 Write-Log "Delivery Optimization cache was already empty" -Level DETAIL
             }
@@ -4391,10 +4414,15 @@ function Invoke-StorageSense {
             }
 
             if (-not $cleanmgr.HasExited) {
-                # Let it finish in the background instead of killing it. Not a warning
-                # either: cleanmgr simply takes longer than we are willing to wait, and
-                # killing it mid-delete was both pointless and misreported as "continuing" (v2.16)
-                Write-Log "Disk Cleanup exceeded $maxWait seconds - leaving it to finish in the background" -Level INFO
+                # Still killing it would be worse - cleanmgr keeps working after a kill and
+                # the deletion is mid-flight (v2.16). But this is not an informational
+                # event either: everything measured after this point is partial, the run
+                # is about to print a total and write its JSON while an elevated process
+                # is still deleting, and the freed bytes it goes on to reclaim are counted
+                # by nobody.
+                $script:Stats.DiskCleanupPending = $true
+                Write-Log "Disk Cleanup exceeded $maxWait seconds and is still running - it continues in the background, so the freed figures below are partial" -Level WARNING
+                $script:Stats.WarningsCount++
             } elseif ($cleanmgr.ExitCode -ne 0) {
                 # v2.16: the exit code used to be ignored entirely, so a crash one second
                 # in was still logged as a success
@@ -4408,8 +4436,19 @@ function Invoke-StorageSense {
             # v2.16: sweep every handler, not just the ones from $categories - flags left
             # by an interrupted run or by an older version of this list stayed forever
             # (four such leftovers were found on a live machine).
-            Get-ChildItem -Path $regPath -ErrorAction SilentlyContinue | ForEach-Object {
-                Remove-ItemProperty -Path $_.PSPath -Name "StateFlags$sageset" -Force -ErrorAction SilentlyContinue
+            #
+            # v2.20: but NOT while cleanmgr is still running. The timeout branch above
+            # deliberately leaves it working in the background, and this sweep then pulled
+            # its configuration out from under it. Whether cleanmgr re-reads the flags per
+            # handler or only once at startup is not something to guess at while it holds
+            # an elevated deletion loop. The flags are swept by the next run's own sweep,
+            # which is exactly the leftover case v2.16 added it for.
+            if ($cleanmgr -and -not $cleanmgr.HasExited) {
+                Write-Log "Disk Cleanup is still running - its registry configuration will be swept by the next run" -Level DETAIL
+            } else {
+                Get-ChildItem -Path $regPath -ErrorAction SilentlyContinue | ForEach-Object {
+                    Remove-ItemProperty -Path $_.PSPath -Name "StateFlags$sageset" -Force -ErrorAction SilentlyContinue
+                }
             }
         }
     }
@@ -4682,6 +4721,9 @@ function Write-ResultJson {
             # completed, but LogPath below points at an incomplete file - an automated
             # consumer must not treat that log as the full record of what happened.
             LoggingDegraded     = [bool]$script:LogWriteFailed
+            # v2.20: true when Disk Cleanup outlived its timeout and was left running.
+            # TotalFreedBytes is then a lower bound, not the final figure.
+            DiskCleanupPending  = [bool]$script:Stats.DiskCleanupPending
             # 'enabled' means cleanup figures are understated (Defender blocked some
             # deletions without reporting an error); 'unknown' means the check itself
             # failed, so the figures are unverified rather than confirmed good
