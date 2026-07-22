@@ -466,10 +466,18 @@ function Write-Log {
             # Latched: one console line, not one per call - Write-Log fires hundreds of
             # times per run. Deliberately Write-Host and not Write-Log, which would
             # recurse straight back into this catch.
+            # v2.20, corrected in review: drop the writer so the NEXT call reopens it.
+            # Without this the guard above stays satisfied by a dead writer object and
+            # every later line is silently discarded for the rest of the run - the empty
+            # catch would simply have moved from the first failure to all the others.
+            try { if ($script:LogWriter) { $script:LogWriter.Dispose() } } catch { }
+            $script:LogWriter = $null
+            $script:LogWriterPath = $null
+
             if (-not $script:LogWriteFailed) {
                 $script:LogWriteFailed = $true
                 $script:Stats.WarningsCount++
-                Write-Host "  [WARN]  Log file could not be written ($($_.Exception.Message)) - the run continues, but $($script:LogPath) is incomplete" -ForegroundColor Yellow
+                Write-Host "  [WARN]  Log file could not be written ($($_.Exception.Message)) - the run continues, but $($script:LogPath) may be incomplete" -ForegroundColor Yellow
             }
         }
     }
@@ -1346,6 +1354,63 @@ function ConvertFrom-HumanReadableSize {
     }
 }
 
+function Resolve-PathThroughLinks {
+    <#
+    .SYNOPSIS
+        Resolves a path through reparse points at ANY level, not just the last segment
+    .DESCRIPTION
+        v2.20, corrected in review. The first version of the link-aware protected-path
+        check only asked whether the leaf itself was a reparse point. That closed the
+        obvious case ("C:\cache" is a junction to "C:\") and left the real one open:
+        "C:\cache\Windows" has no reparse attribute on the leaf, GetFullPath does not
+        resolve the junction above it, and the textual comparison never matches - measured,
+        with 120 real C:\Windows children visible through the link.
+
+        So every ancestor is examined, the deepest link found is resolved, and the walk
+        restarts on the rebuilt path (a resolved target can itself sit under another link).
+    .OUTPUTS
+        The fully resolved path, or $null when a link cannot be resolved - the caller must
+        treat that as "unknown", never as "fine".
+    #>
+    param([Parameter(Mandatory)][string]$Path)
+
+    $current = $Path
+    # Bounded: a link loop would otherwise spin here forever
+    for ($round = 0; $round -lt 64; $round++) {
+        $probe = $current
+        $tail = @()
+        $changed = $false
+
+        while ($probe) {
+            $item = $null
+            try { $item = Get-Item -LiteralPath $probe -Force -ErrorAction Stop } catch { $item = $null }
+
+            if ($item -and ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint)) {
+                $target = $null
+                try { $target = $item.ResolveLinkTarget($true) } catch { $target = $null }
+                if (-not $target) { return $null }
+
+                $current = if ($tail.Count -gt 0) {
+                    Join-Path $target.FullName ($tail -join [System.IO.Path]::DirectorySeparatorChar)
+                } else {
+                    $target.FullName
+                }
+                $changed = $true
+                break
+            }
+
+            $parent = Split-Path $probe -Parent
+            if (-not $parent -or $parent -eq $probe) { break }
+            $tail = ,(Split-Path $probe -Leaf) + $tail
+            $probe = $parent
+        }
+
+        if (-not $changed) { break }
+    }
+
+    return $current
+}
+
 function Get-RegistryValueCount {
     <#
     .SYNOPSIS
@@ -1453,20 +1518,30 @@ function Test-PathProtected {
     # there is nothing to delete through it, and treating it as protected would change
     # the meaning of the function for every caller that probes optional locations.
     if (-not $SkipLinkResolution) {
-        $linkItem = $null
-        try { $linkItem = Get-Item -LiteralPath $fullPath -Force -ErrorAction Stop } catch { $linkItem = $null }
+        # A path that cannot be inspected is not the same as a path that is not there.
+        # Access denied, an I/O error, a path too long: none of them mean "safe to empty",
+        # and collapsing them all to "not protected" is fail-open (raised in review).
+        # Same shape as Get-FolderSizeChecked: not-found is an answer, anything else is not.
+        try {
+            $null = Get-Item -LiteralPath $fullPath -Force -ErrorAction Stop
+        } catch [System.Management.Automation.ItemNotFoundException] {
+            return $false   # nothing there to clean through
+        } catch [System.IO.DirectoryNotFoundException] {
+            return $false
+        } catch [System.IO.FileNotFoundException] {
+            return $false
+        } catch {
+            return $true    # exists in some form but cannot be examined - refuse
+        }
 
-        if ($linkItem -and ($linkItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint)) {
-            $finalTarget = $null
-            try { $finalTarget = $linkItem.ResolveLinkTarget($true) } catch { $finalTarget = $null }
-
-            if (-not $finalTarget) {
-                # Broken link, or a runtime without ResolveLinkTarget (it needs .NET 6 /
-                # PowerShell 7.2, and this script supports 7.1). The real target is
-                # unknown, so protection cannot be verified - refuse rather than guess.
-                return $true
-            }
-            return (Test-PathProtected -Path $finalTarget.FullName -SkipLinkResolution)
+        $resolved = Resolve-PathThroughLinks -Path $fullPath
+        if (-not $resolved) {
+            # A link that cannot be resolved: the real target is unknown, so protection
+            # cannot be verified. Refuse rather than guess.
+            return $true
+        }
+        if ($resolved -ne $fullPath) {
+            return (Test-PathProtected -Path $resolved -SkipLinkResolution)
         }
     }
 
@@ -3304,17 +3379,26 @@ function Clear-DeveloperCaches {
                     $sizeAfter = Get-FolderSize $npmCache
                     $freed = $sizeBefore - $sizeAfter
 
+                    # Credit whatever really went, whether or not npm then failed
                     if ($freed -gt 0) {
                         $script:Stats.TotalFreedBytes += $freed
                         if (-not $script:Stats.FreedByCategory.ContainsKey("Developer")) {
                             $script:Stats.FreedByCategory["Developer"] = 0
                         }
                         $script:Stats.FreedByCategory["Developer"] += $freed
-                        Write-Log "npm cache cleaned - $(Format-FileSize $freed)" -Level SUCCESS
-                    } elseif ($npmExit -ne 0) {
-                        Write-Log "npm cache clean failed (exit code $npmExit) - removing the cache directly" -Level WARNING
+                    }
+
+                    # v2.20, corrected in review: the exit code is checked FIRST. Testing
+                    # "$freed -gt 0" first meant a partial failure (npm removes 400 MB, then
+                    # hits EPERM on a locked file and exits 1) reported plain success and
+                    # skipped the fallback - the exit code was read and then ignored in
+                    # exactly the case where it mattered.
+                    if ($npmExit -ne 0) {
+                        Write-Log "npm cache clean failed (exit code $npmExit)$(if ($freed -gt 0) { " after freeing $(Format-FileSize $freed)" }) - removing the cache directly" -Level WARNING
                         $script:Stats.WarningsCount++
                         Remove-FolderContent -Path $npmCache -Category "Developer" -Description "npm cache"
+                    } elseif ($freed -gt 0) {
+                        Write-Log "npm cache cleaned - $(Format-FileSize $freed)" -Level SUCCESS
                     } else {
                         # npm succeeded and there was nothing to reclaim. Not a cleanup
                         # success worth announcing, and definitely not freed bytes.
@@ -4257,8 +4341,14 @@ function Invoke-StorageSense {
     # configuration out from under it), and Storage Sense returns before that branch is
     # reached - so a timed-out run followed only by successful Storage Sense runs would
     # otherwise leave these flags in the registry forever. Caught in review before release.
-    Get-ChildItem -Path $regPath -ErrorAction SilentlyContinue | ForEach-Object {
-        Remove-ItemProperty -Path $_.PSPath -Name "StateFlags$sageset" -Force -ErrorAction SilentlyContinue
+    #
+    # Gated on cleanmgr not running: a previous run's cleanmgr may still be working in the
+    # background, and sweeping now would pull its configuration out from under it - which
+    # is precisely what the finally below refuses to do (also raised in review).
+    if (-not (Get-Process -Name 'cleanmgr' -ErrorAction SilentlyContinue)) {
+        Get-ChildItem -Path $regPath -ErrorAction SilentlyContinue | ForEach-Object {
+            Remove-ItemProperty -Path $_.PSPath -Name "StateFlags$sageset" -Force -ErrorAction SilentlyContinue
+        }
     }
 
     # Try Storage Sense first (Windows 11)
@@ -4295,6 +4385,12 @@ function Invoke-StorageSense {
         # different clock granularity and rounds the wrong way.
         $infoBefore = $task | Get-ScheduledTaskInfo -ErrorAction SilentlyContinue
         $lastRunBefore = if ($infoBefore) { $infoBefore.LastRunTime } else { $null }
+
+        # Free space before the task, so its success can be judged on evidence rather than
+        # on an exit code (see the verification below)
+        $sysDriveLetter = ($env:SystemDrive).TrimEnd(':')
+        $freeBefore = $null
+        try { $freeBefore = (Get-PSDrive -Name $sysDriveLetter -ErrorAction Stop).Free } catch { $freeBefore = $null }
 
         $started = $false
         try {
@@ -4356,8 +4452,25 @@ function Invoke-StorageSense {
                 if ($null -eq $taskResult) {
                     Write-Log "Storage Sense ran but its result could not be read - using Disk Cleanup as well" -Level INFO
                 } elseif ($taskResult -eq 0) {
-                    Write-Log "Storage Sense completed" -Level SUCCESS
-                    $storageSenseDone = $true
+                    # v2.20, corrected in review: exit code 0 is not evidence of cleanup.
+                    # Storage Sense obeys its own settings, and when it is switched off in
+                    # Settings the task still starts, does nothing it is not allowed to do,
+                    # and exits 0. Skipping the fallback on that basis would suppress all
+                    # 23 cleanmgr handlers and free nothing - the exact "reported success
+                    # while doing nothing" this release exists to remove, and newly
+                    # reachable now that this branch is no longer dead code.
+                    $freedBySense = 0
+                    try {
+                        $freeAfter = (Get-PSDrive -Name $sysDriveLetter -ErrorAction Stop).Free
+                        if ($null -ne $freeBefore) { $freedBySense = $freeAfter - $freeBefore }
+                    } catch { $freedBySense = 0 }
+
+                    if ($freedBySense -gt 0) {
+                        Write-Log "Storage Sense completed - $(Format-FileSize $freedBySense)" -Level SUCCESS
+                        $storageSenseDone = $true
+                    } else {
+                        Write-Log "Storage Sense reported success but freed nothing measurable - running Disk Cleanup as well" -Level INFO
+                    }
                 } else {
                     Write-Log ("Storage Sense failed (task result 0x{0:X8}) - using Disk Cleanup instead" -f $taskResult) -Level INFO
                 }
@@ -5050,8 +5163,12 @@ function Start-WinClean {
         Show-FinalStatistics
         # Release the log file handle (v2.17, p.7): a stand or the user may want to
         # move/zip the log right after the run finishes.
+        # v2.20: guarded. Dispose on a writer whose stream already failed throws, and this
+        # is the last statement of the outer finally - the exception escaped Start-WinClean
+        # and the entry point never reached its exit-code check, so a run with errors could
+        # still exit 0 (raised in review).
         if ($script:LogWriter) {
-            $script:LogWriter.Dispose()
+            try { $script:LogWriter.Dispose() } catch { }
             $script:LogWriter = $null
             $script:LogWriterPath = $null
         }

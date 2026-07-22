@@ -1123,6 +1123,13 @@ Describe "v2.20: an operation that did nothing does not report success" -Tag "Fi
                 @()
             }
 
+            # Prove the mock is in effect BEFORE the product is allowed to touch anything.
+            # If it ever stopped intercepting (a Pester upgrade, a scoping change, the
+            # product switching to another API), the real enumeration would return the real
+            # channels and this test would clear the developer's own event logs for real -
+            # and only fail afterwards (raised in review).
+            @(Get-WinEvent -ListLog *).Count | Should -Be 0 -Because 'the mock must intercept before Clear-EventLogs runs'
+
             $warningsBefore = $script:Stats.WarningsCount
             Clear-EventLogs
             $script:Stats.WarningsCount | Should -BeGreaterThan $warningsBefore

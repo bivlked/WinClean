@@ -702,14 +702,16 @@ Describe "Test-PathProtected" -Tag "Unit", "Helper", "Security" {
 
             $script:linkToProtected = Join-Path $script:linkSandbox 'looks-harmless'
             $script:linkToInnocent  = Join-Path $script:linkSandbox 'redirected-cache'
+            $script:linkToDrive     = Join-Path $script:linkSandbox 'volume-link'
             New-Item -ItemType Junction -Path $script:linkToProtected -Target $env:ProgramFiles -ErrorAction SilentlyContinue | Out-Null
             New-Item -ItemType Junction -Path $script:linkToInnocent -Target $script:innocentTarget -ErrorAction SilentlyContinue | Out-Null
+            New-Item -ItemType Junction -Path $script:linkToDrive -Target "$env:SystemDrive\" -ErrorAction SilentlyContinue | Out-Null
         }
 
         AfterAll {
             # Deleting a junction removes the link and leaves the target alone (measured),
             # but remove the links explicitly anyway before the sandbox
-            foreach ($l in $script:linkToProtected, $script:linkToInnocent) {
+            foreach ($l in $script:linkToProtected, $script:linkToInnocent, $script:linkToDrive) {
                 if ($l -and (Test-Path -LiteralPath $l)) {
                     Remove-Item -LiteralPath $l -Force -Recurse -ErrorAction SilentlyContinue
                 }
@@ -725,6 +727,23 @@ Describe "Test-PathProtected" -Tag "Unit", "Helper", "Security" {
         It "Still allows a junction that points somewhere harmless" {
             Test-Path -LiteralPath $script:linkToInnocent | Should -BeTrue -Because 'without the junction this test proves nothing'
             Test-PathProtected -Path $script:linkToInnocent | Should -BeFalse
+        }
+
+        It "Refuses a path whose ANCESTOR is a junction into a protected area" {
+            # The case the first version of this fix missed, found by review and measured:
+            # the leaf carries no reparse attribute, GetFullPath does not resolve the link
+            # above it, and 120 real C:\Windows children were visible through it.
+            $throughLink = Join-Path $script:linkToDrive 'Windows'
+            Test-Path -LiteralPath $throughLink | Should -BeTrue -Because 'the path must really resolve through the junction'
+            Test-PathProtected -Path $throughLink | Should -BeTrue
+        }
+
+        It "Does not refuse a deep path under a harmless junction" {
+            # The other half: refusing everything under any link would be trivially safe
+            # and would break anyone whose cache folder is redirected
+            $deep = Join-Path $script:linkToInnocent 'sub'
+            New-Item -ItemType Directory -Path $deep -Force | Out-Null
+            Test-PathProtected -Path $deep | Should -BeFalse
         }
     }
 

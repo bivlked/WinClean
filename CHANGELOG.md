@@ -37,8 +37,13 @@ path turned out to have been unreachable since it was written.
   was looked up under `\Microsoft\Windows\DiskCleanup\`, where it does not exist; the real
   one lives under `\Microsoft\Windows\DiskFootprint\`. Every run therefore fell back to
   `cleanmgr`, which took 901 seconds of an 1101-second run on a real workstation and did
-  not finish. The task is now found by name, and - just as important - a task that ran and
-  *failed* no longer counts as success, which would have skipped the fallback entirely
+  not finish. The task is now found by name, so the fast path is reachable at all.
+  **This does not by itself make that 901-second run fast**: on the workstation it was
+  measured on, the task is found and then fails with `0x80040154`, so the fallback still
+  runs - what removes the wait there is the new `-SkipDiskCleanup`. Two guards matter as
+  much as the lookup: a task that ran and *failed* no longer counts as success, and
+  neither does one that exits 0 without freeing anything measurable. Either would have
+  suppressed all 23 Disk Cleanup handlers while reporting success
 - **Four operations reported success while doing nothing**: `npm cache clean` (its exit
   code was never read, so a locked cache printed "cleaned"), event logs (a total
   enumeration failure produced "cleared (0 logs)"), privacy traces (the success line was
