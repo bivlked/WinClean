@@ -95,7 +95,13 @@ rm -f /tmp/pwsh.tar.gz /tmp/pwsh-release.json
 #    Remote configs are synced: stale stand.config*.json from renamed/removed
 #    stands would otherwise stay in the nightly matrix forever.
 Write-Host "[2/4] Copying harness and configs..." -ForegroundColor Cyan
+# v2.20: the exit code was discarded. If the rm half failed (permissions, a busy file),
+# the upload below would proceed and deployment would report success while a renamed or
+# removed stand config stayed behind - the nightly matrix would keep driving an obsolete VM.
 $null = ssh -o BatchMode=yes $target "mkdir -p $remoteDir/results && rm -f $remoteDir/stand.config*.json"
+if ($LASTEXITCODE -ne 0) {
+    throw "Remote preparation failed (exit $LASTEXITCODE): could not create $remoteDir/results or clear old stand configs"
+}
 
 $files = @(
     (Join-Path $PSScriptRoot 'StandCommon.ps1')

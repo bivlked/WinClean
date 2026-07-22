@@ -230,7 +230,12 @@ try {
 # --- 9. Stand run (opt-in) ---------------------------------------------------
 if ($IncludeStand) {
     Write-Host "  ...running the stand VM, this takes a few minutes" -ForegroundColor DarkGray
-    $standOut = & pwsh -NoProfile -File (Join-Path $PSScriptRoot 'proxmox\Invoke-StandTest.ps1') -Mode Full -Source local 2>&1
+    # Join-Path per segment: a backslash inside the argument is a literal character on
+    # Linux/macOS, not a separator, so "proxmox\Invoke-StandTest.ps1" would be one odd
+    # filename there. This gate is not deployed to the Proxmox host today (only the four
+    # scripts in Deploy-StandRunner are), so this is hygiene rather than a live defect.
+    $standScript = Join-Path (Join-Path $PSScriptRoot 'proxmox') 'Invoke-StandTest.ps1'
+    $standOut = & pwsh -NoProfile -File $standScript -Mode Full -Source local 2>&1
     $standPassed = $LASTEXITCODE -eq 0
     Add-Result -Name 'Stand test (full run on a VM)' -Passed $standPassed `
         -Detail (($standOut | Where-Object { $_ -match 'STAND TEST|freed|warnings' } | Select-Object -Last 2) -join ' | ')

@@ -3242,7 +3242,11 @@ function Clear-DeveloperCaches {
     .SYNOPSIS
         Cleans developer tool caches (npm, pip, nuget, composer, etc.)
     #>
-    if ($SkipDevCleanup) {
+    # v2.20: matches the contract the dispatcher enforces (-SkipCleanup suppresses the
+    # whole cleanup group). Unreachable through Start-WinClean, which already gates the
+    # phase - this is the guard a direct caller of the dot-sourced function gets, and it
+    # disagreed with the documented meaning of -SkipCleanup.
+    if ($SkipCleanup -or $SkipDevCleanup) {
         Write-Log "Developer cache cleanup skipped (parameter)" -Level INFO
         return
     }
@@ -3420,7 +3424,8 @@ function Clear-DockerWSL {
     .SYNOPSIS
         Cleans Docker images, containers, and WSL2 disk
     #>
-    if ($SkipDockerCleanup) {
+    # v2.20: see Clear-DeveloperCaches - same contract, same reason
+    if ($SkipCleanup -or $SkipDockerCleanup) {
         Write-Log "Docker/WSL cleanup skipped (parameter)" -Level INFO
         return
     }
@@ -3606,7 +3611,8 @@ function Clear-VisualStudio {
     .SYNOPSIS
         Cleans Visual Studio caches and temporary files
     #>
-    if ($SkipVSCleanup) {
+    # v2.20: see Clear-DeveloperCaches - same contract, same reason
+    if ($SkipCleanup -or $SkipVSCleanup) {
         Write-Log "Visual Studio cleanup skipped (parameter)" -Level INFO
         return
     }

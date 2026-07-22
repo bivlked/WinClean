@@ -62,11 +62,19 @@ $rel = Invoke-RestMethod 'https://api.github.com/repos/PowerShell/PowerShell/rel
 $asset = $rel.assets | Where-Object { $_.name -like 'PowerShell-*-win-x64.msi' } | Select-Object -First 1
 $msi = 'C:\Windows\Temp\ps7.msi'
 Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $msi
-Start-Process msiexec.exe -ArgumentList "/i `"$msi`" /quiet /norestart" -Wait
-Test-Path 'C:\Program Files\PowerShell\7\pwsh.exe'
+# v2.20: -PassThru so the MSI result is actually available. Existence of pwsh.exe was the
+# only check before, and msiexec can lay down a partial install and return 1603 - that
+# broken installation would then be snapshotted as the stand baseline.
+$msiProc = Start-Process msiexec.exe -ArgumentList "/i `"$msi`" /quiet /norestart" -Wait -PassThru
+# 0 = success, 3010 = success but a reboot is pending
+if ($msiProc.ExitCode -notin 0, 3010) { "MSIEXEC_FAILED:$($msiProc.ExitCode)"; exit 1 }
+# Existence is not enough either - run it and require the version this stand needs
+$ver = & 'C:\Program Files\PowerShell\7\pwsh.exe' -NoProfile -Command '$PSVersionTable.PSVersion.ToString()'
+if ([version]$ver -lt [version]'7.1') { "PWSH_TOO_OLD:$ver"; exit 1 }
+"PWSH_OK:$ver"
 '@
-    if ($install.Output -notmatch 'True') {
-        throw "PowerShell 7 installation failed: $($install.Error)"
+    if ($install.Output -notmatch 'PWSH_OK:') {
+        throw "PowerShell 7 installation failed: $($install.Output) $($install.Error)"
     }
     Write-Host "PowerShell 7 installed." -ForegroundColor Green
 } else {
