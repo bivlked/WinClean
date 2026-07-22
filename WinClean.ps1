@@ -1,5 +1,5 @@
 <#PSScriptInfo
-.VERSION 2.19
+.VERSION 2.20
 .GUID 8f7c3b2a-1d4e-5f6a-9b8c-0d1e2f3a4b5c
 .AUTHOR bivlked
 .COMPANYNAME
@@ -12,6 +12,7 @@
 .REQUIREDSCRIPTS
 .EXTERNALSCRIPTDEPENDENCIES
 .RELEASENOTES
+    v2.20: Correctness and honesty round - a junction could bypass protected-path checks, four operations reported success while doing nothing, Storage Sense was unreachable so on machines where it works the slow Disk Cleanup no longer runs; where it fails, the new -SkipDiskCleanup is what removes the wait
     v2.19: Contract and documentation round - -SkipCleanup now skips ALL cleanup categories, result JSON gains a tri-state PhasesSkipped, AppUpdatesCount renamed to AppUpdatesOffered (offered, not installed), full docs overhaul
     v2.18: Correctness and hardening follow-up from external code review - diskpart failure detection, driver-store accounting, strict superseded-version rule, exact bootstrap host allowlist
     v2.17: Silent failure hardening - operations that quietly do nothing now say so instead of reporting success
@@ -28,7 +29,7 @@
 
 <#
 .SYNOPSIS
-    WinClean - Ultimate Windows 11 Maintenance Script v2.19
+    WinClean - Ultimate Windows 11 Maintenance Script v2.20
 .DESCRIPTION
     Комплексный скрипт для обновления и очистки Windows 11:
     - Обновление Windows (включая драйверы)
@@ -42,8 +43,18 @@
     - Подробный цветной вывод + лог-файл
 .NOTES
     Author: biv
-    Version: 2.19
+    Version: 2.20
     Requires: PowerShell 7.1+, Windows 11, Administrator rights
+    Changes in 2.20:
+    - SECURITY: a junction whose target is a protected root could be used as a cleanup
+      root - the path check compared text and never resolved the link
+    - Storage Sense was looked up at a path where it does not exist, so every run fell
+      back to Disk Cleanup (15 of 18 minutes on a real workstation). Where Storage Sense
+      itself fails, the fallback still runs - use -SkipDiskCleanup there
+    - npm, event logs, privacy traces and winget source update no longer report success
+      when they did nothing
+    - Added -SkipDiskCleanup to skip only the slow Disk Cleanup step
+    - Result JSON gains LoggingDegraded and DiskCleanupPending
     Changes in 2.19:
     - -SkipCleanup now skips the ENTIRE cleanup group (system, deep, developer,
       Docker/WSL, Visual Studio), matching the documented "skip all cleanup" contract.
@@ -257,6 +268,13 @@
     Пропустить очистку Docker/WSL
 .PARAMETER SkipVSCleanup
     Пропустить очистку Visual Studio
+.PARAMETER SkipDiskCleanup
+    Пропустить только шаг Storage Sense / Disk Cleanup (штатная утилита Windows).
+    Этот шаг бывает самым долгим: на реальной рабочей станции cleanmgr занял 15 минут
+    из 18 и не успел завершиться, тогда как на чистой виртуальной машине те же
+    23 категории отрабатывают за 10 секунд. Причина разницы НЕ установлена: измерение
+    показывает лишь, что стоимость зависит от накопленного состояния машины. Остальная
+    очистка при этом выполняется - в отличие от -SkipCleanup, который гасит её целиком
 .PARAMETER DisableTelemetry
     Отключить телеметрию Windows (через групповую политику)
 .PARAMETER ReportOnly
@@ -282,6 +300,7 @@ param(
     [switch]$SkipDevCleanup,
     [switch]$SkipDockerCleanup,
     [switch]$SkipVSCleanup,
+    [switch]$SkipDiskCleanup,
     [switch]$DisableTelemetry,
     [switch]$ReportOnly,
     [string]$LogPath,
@@ -298,7 +317,22 @@ $OutputEncoding = [System.Text.Encoding]::UTF8
 $PSDefaultParameterValues['*:Encoding'] = 'utf8'
 
 # Statistics storage (synchronized hashtable for safe concurrent access)
-$script:Stats = [hashtable]::Synchronized(@{
+function New-RunStats {
+    <#
+    .SYNOPSIS
+        Builds a fresh per-run statistics object
+    .DESCRIPTION
+        v2.20: this was a literal assigned once when the script loaded, and Start-WinClean
+        reset only the phase buckets and the step counter - while the comment there
+        described "dot-source and call Start-WinClean twice" as the case being handled.
+        Everything else survived: freed bytes, per-category totals, update counts, warning
+        and error counts, RebootRequired, Aborted and StartTime. A second run in the same
+        session therefore reported the first run's bytes and errors, and computed its
+        duration from the moment the script was dot-sourced.
+
+        One definition, used both at load time and at the start of every run.
+    #>
+    return [hashtable]::Synchronized(@{
     TotalFreedBytes      = [long]0
     FreedByCategory      = @{}
     WindowsUpdatesCount  = 0
@@ -316,6 +350,9 @@ $script:Stats = [hashtable]::Synchronized(@{
     # 'unknown' must not be mistaken for a verified state by consumers of the JSON
     ControlledFolderAccess = 'unknown'
     Aborted              = $null     # v2.17: set when the run stops before finishing
+    # v2.20: cleanmgr outlived its timeout and is still deleting in the background. The
+    # totals reported by this run are partial, and a consumer must not read them as final.
+    DiskCleanupPending   = $false
     # v2.17 (p.11 of the audit): which top-level phases ran to completion vs threw.
     # Before this, one exception anywhere in the run silently skipped every phase
     # after it - Developer Cleanup, Docker/WSL, Visual Studio, Deep System Cleanup,
@@ -330,7 +367,10 @@ $script:Stats = [hashtable]::Synchronized(@{
     PhasesCompleted      = @()
     PhasesFailed         = @()
     PhasesSkipped        = @()
-})
+    })
+}
+
+$script:Stats = New-RunStats
 
 # Progress activities seen so far, so all of them can be closed at the end (v2.16)
 $script:ProgressActivities = @()
@@ -338,6 +378,10 @@ $script:ProgressActivities = @()
 # Memoized Test-InternetConnection result for the whole run (v2.17, p.5 of the audit):
 # the check costs up to ~15s offline and is called from two separate update phases
 $script:InternetConnectionCache = $null
+
+# Latched by Write-Log when the log file cannot be written, so the failure is reported
+# once instead of on every call - and surfaces in the result JSON as LoggingDegraded
+$script:LogWriteFailed = $false
 
 # Initialize log path (script scope for access in functions)
 if (-not $LogPath) {
@@ -352,7 +396,7 @@ if (-not $LogPath) {
 }
 
 # Script version (single source of truth for version checking)
-$script:Version = "2.19"
+$script:Version = "2.20"
 
 # Protected paths that should never be deleted
 $script:ProtectedPaths = @(
@@ -415,7 +459,29 @@ function Write-Log {
                 $script:LogWriterPath = $script:LogPath
             }
             $script:LogWriter.WriteLine($logMessage)
-        } catch { }
+        } catch {
+            # v2.20: this used to be an empty catch, so a log that stopped being written
+            # (full volume, revoked permissions, the v2.14 case where cleanup deleted the
+            # log out from under us) was invisible: destructive work carried on, the final
+            # JSON said ErrorsCount=0, and LogPath pointed at a truncated file.
+            #
+            # Latched: one console line, not one per call - Write-Log fires hundreds of
+            # times per run. Deliberately Write-Host and not Write-Log, which would
+            # recurse straight back into this catch.
+            # v2.20, corrected in review: drop the writer so the NEXT call reopens it.
+            # Without this the guard above stays satisfied by a dead writer object and
+            # every later line is silently discarded for the rest of the run - the empty
+            # catch would simply have moved from the first failure to all the others.
+            try { if ($script:LogWriter) { $script:LogWriter.Dispose() } } catch { }
+            $script:LogWriter = $null
+            $script:LogWriterPath = $null
+
+            if (-not $script:LogWriteFailed) {
+                $script:LogWriteFailed = $true
+                $script:Stats.WarningsCount++
+                Write-Host "  [WARN]  Log file could not be written ($($_.Exception.Message)) - the run continues, but $($script:LogPath) may be incomplete" -ForegroundColor Yellow
+            }
+        }
     }
 
     # Console output with colors
@@ -1239,11 +1305,29 @@ function ConvertFrom-HumanReadableSize {
         an unhandled exception instead of returning 0), the word form of bytes, and
         "MiB"/"GiB"/etc binary-unit spelling (this script's own *B literals are already
         1024-based, so the multiplier is identical to KB/MB/GB/TB).
+        v2.20: a lone separator is no longer assumed to be the decimal point. The grouping
+        SHAPE decides first, and only a string that could honestly be read either way is
+        settled by the culture - so the result for such a string is culture-dependent.
+    .PARAMETER SizeString
+        The text to convert, e.g. "2.5 GB", "1,234 KB", "816 КБ".
+    .PARAMETER Culture
+        Consulted only for an ambiguous grouping such as "1,234", where en-US means 1234
+        and ru-RU means 1.234. Defaults to the current culture, which is what the Shell
+        used to format the string this function's only caller parses. Shapes that cannot
+        be a grouping ("1,5", "1,2345") are decimal in every culture.
     .EXAMPLE
         ConvertFrom-HumanReadableSize "2.5 GB"  # Returns 2684354560
         ConvertFrom-HumanReadableSize "512MB"   # Returns 536870912
+    .EXAMPLE
+        ConvertFrom-HumanReadableSize "1,234 KB" -Culture ([cultureinfo]'en-US')  # 1263616
+        ConvertFrom-HumanReadableSize "1,234 KB" -Culture ([cultureinfo]'ru-RU')  # 1264
     #>
-    param([string]$SizeString)
+    param(
+        [string]$SizeString,
+        # Only consulted for a genuinely ambiguous string (see the disambiguation below).
+        # Injectable so the rule can be tested without changing the machine's locale.
+        [cultureinfo]$Culture = [cultureinfo]::CurrentCulture
+    )
 
     if (-not $SizeString) { return 0 }
 
@@ -1263,15 +1347,53 @@ function ConvertFrom-HumanReadableSize {
     $numberPart = $Matches[1]
     $unit = $Matches[2].ToUpper()
 
-    # Decimal-separator ambiguity ("1.234,5" EU vs "1,234.5" US vs a lone "," or "."):
-    # whichever mark appears LAST is the decimal point; anything earlier was a
-    # thousands grouping and is dropped.
+    # Decimal-separator disambiguation.
+    #
+    # When BOTH marks appear the answer is certain: whichever comes LAST is the decimal
+    # point and the earlier one was grouping ("1.234,5" EU against "1,234.5" US).
+    #
+    # A LONE mark is the hard case, and v2.20 is where it was fixed. The old rule was
+    # "a lone mark is the decimal point", which read the ordinary en-US thousands form
+    # "1,234 KB" as 1.234 KB - low by a factor of a thousand, on the shell fallback that
+    # measures the Recycle Bin.
+    # The obvious repair is worse. Handing the string to [double]::TryParse with the
+    # current culture looks right and is not: measured on .NET, AllowThousands does NOT
+    # validate the grouping shape, so en-US reads "1,5" as 15 and "1,2345" as 12345 -
+    # trading a 1000x under-read for a 10x over-read, and breaking "1,5 GB".
+    # So the SHAPE is checked here first, and the culture is consulted only for a string
+    # that could honestly be either reading.
     $lastComma = $numberPart.LastIndexOf(',')
     $lastDot = $numberPart.LastIndexOf('.')
-    if ($lastComma -gt $lastDot) {
-        $numberPart = $numberPart.Replace('.', '').Replace(',', '.')
-    } elseif ($lastDot -gt $lastComma) {
-        $numberPart = $numberPart.Replace(',', '')
+
+    if ($lastComma -ge 0 -and $lastDot -ge 0) {
+        if ($lastComma -gt $lastDot) {
+            $numberPart = $numberPart.Replace('.', '').Replace(',', '.')
+        } else {
+            $numberPart = $numberPart.Replace(',', '')
+        }
+    } elseif ($lastComma -ge 0 -or $lastDot -ge 0) {
+        $sep = if ($lastComma -ge 0) { ',' } else { '.' }
+
+        # A thousands grouping is "1-3 digits, then one or more groups of exactly 3".
+        # "1,5" and "1,2345" cannot be that, so there the mark is the decimal point and
+        # no culture can argue otherwise.
+        if ($numberPart -match "^\d{1,3}($([regex]::Escape($sep))\d{3})+$") {
+            $isDecimal = $Culture.NumberFormat.NumberDecimalSeparator -eq $sep
+            if (-not $isDecimal -and $Culture.NumberFormat.NumberGroupSeparator -ne $sep) {
+                # The culture uses this mark for neither purpose - ru-RU groups with a
+                # no-break space and would call a lone dot meaningless. Our own
+                # Format-FileSize writes invariant text, so fall back to reading it that
+                # way: a dot is the decimal point, a comma is grouping.
+                $isDecimal = ($sep -eq '.')
+            }
+            if ($isDecimal) {
+                $numberPart = $numberPart.Replace(',', '.')
+            } else {
+                $numberPart = $numberPart.Replace($sep, '')
+            }
+        } else {
+            $numberPart = $numberPart.Replace(',', '.')
+        }
     }
 
     $multiplier = switch ($unit) {
@@ -1290,10 +1412,123 @@ function ConvertFrom-HumanReadableSize {
     }
 }
 
+function Resolve-PathThroughLinks {
+    <#
+    .SYNOPSIS
+        Resolves a path through reparse points at ANY level, not just the last segment
+    .DESCRIPTION
+        v2.20, corrected in review. The first version of the link-aware protected-path
+        check only asked whether the leaf itself was a reparse point. That closed the
+        obvious case ("C:\cache" is a junction to "C:\") and left the real one open:
+        "C:\cache\Windows" has no reparse attribute on the leaf, GetFullPath does not
+        resolve the junction above it, and the textual comparison never matches - measured,
+        with 120 real C:\Windows children visible through the link.
+
+        So every ancestor is examined, the deepest link found is resolved, and the walk
+        restarts on the rebuilt path (a resolved target can itself sit under another link).
+    .OUTPUTS
+        The fully resolved path, or $null when a link cannot be resolved - the caller must
+        treat that as "unknown", never as "fine".
+    #>
+    param([Parameter(Mandatory)][string]$Path)
+
+    $current = $Path
+    # Bounded: a link loop would otherwise spin here forever
+    for ($round = 0; $round -lt 64; $round++) {
+        # Raised in review: the ancestor walk used to climb past the root of a UNC share.
+        # Split-Path turns \\server\share into \\server, which is not a filesystem object,
+        # so Get-Item failed, the fail-closed rule above answered $null, and every UNC
+        # cleanup root was refused. Nothing above the volume root is ours to inspect.
+        $rootPath = ''
+        try { $rootPath = [System.IO.Path]::GetPathRoot($current).TrimEnd('\', '/') } catch { $rootPath = '' }
+
+        $probe = $current
+        $tail = @()
+        $changed = $false
+
+        while ($probe) {
+            # Raised in review: an ancestor that could not be examined used to be silently
+            # classified as "not a link" and the walk carried on upward, so an unreadable
+            # junction ancestor answered "safe to empty". That is the half of the guard
+            # which closes the real attack (C:\cache\Windows where C:\cache is the link),
+            # and it was the half that failed open. Unknown is not safe.
+            $item = $null
+            try { $item = Get-Item -LiteralPath $probe -Force -ErrorAction Stop } catch { return $null }
+
+            if ($item -and ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint)) {
+                $target = $null
+                try { $target = $item.ResolveLinkTarget($true) } catch { $target = $null }
+                if (-not $target) { return $null }
+
+                $current = if ($tail.Count -gt 0) {
+                    Join-Path $target.FullName ($tail -join [System.IO.Path]::DirectorySeparatorChar)
+                } else {
+                    $target.FullName
+                }
+                $changed = $true
+                break
+            }
+
+            $parent = Split-Path $probe -Parent
+            if (-not $parent -or $parent -eq $probe) { break }
+            if ($rootPath -and $parent.Length -lt $rootPath.Length) { break }
+            $tail = ,(Split-Path $probe -Leaf) + $tail
+            $probe = $parent
+        }
+
+        # Nothing left to resolve: this is the fully resolved answer
+        if (-not $changed) { return $current }
+    }
+
+    # The bound was exhausted while links were still being followed, which means the chain
+    # could not be resolved. The contract for that is $null. Returning the partially
+    # resolved path (raised in review) handed Test-PathProtected a value that still
+    # contained a link and was then judged on its text alone - fail-open in the one
+    # function this release rewrote to fail closed.
+    return $null
+}
+
+function Get-RegistryValueCount {
+    <#
+    .SYNOPSIS
+        Counts the real values under a registry key, ignoring PowerShell's own metadata
+    .DESCRIPTION
+        v2.20. Privacy cleanup used to announce "cleared" without looking, because
+        Remove-Item with -ErrorAction SilentlyContinue never throws. Confirming the result
+        needs a before/after count, and Get-ItemProperty decorates every key with PSPath,
+        PSParentPath, PSChildName, PSDrive and PSProvider - counting those would make an
+        emptied key look like it still holds five entries.
+
+        Tri-state on purpose (corrected in review before release): 0 for a key that is
+        absent or genuinely empty, the count for a readable key, and $null when the key is
+        there but cannot be read. The first draft returned 0 for unreadable too, which
+        recreated the very bug it was written to fix: a delete that failed, followed by an
+        unreadable after-read, would have counted as 0 and been reported as cleared.
+    .OUTPUTS
+        [int] the number of values, or $null when the key exists but cannot be read
+    #>
+    param([Parameter(Mandatory)][string]$Key)
+
+    try {
+        $props = Get-ItemProperty -LiteralPath $Key -ErrorAction Stop
+    } catch [System.Management.Automation.ItemNotFoundException] {
+        return 0        # not there at all - nothing to clear, and nothing to worry about
+    } catch {
+        return $null    # there, but unreadable: refuse to answer rather than answer 0
+    }
+
+    if (-not $props) { return 0 }
+
+    return @($props.PSObject.Properties | Where-Object {
+        $_.Name -notin 'PSPath', 'PSParentPath', 'PSChildName', 'PSDrive', 'PSProvider'
+    }).Count
+}
+
 function Test-PathProtected {
     <#
     .SYNOPSIS
-        Checks whether a path is a protected root itself (v2.17: normalized)
+        Checks whether a path must be refused as a bulk-cleanup root (v2.17: normalized,
+        v2.20: link-aware)
     .DESCRIPTION
         Guards the roots listed in $script:ProtectedPaths against being emptied.
         Paths are resolved with GetFullPath first, otherwise the check is trivially
@@ -1303,8 +1538,25 @@ function Test-PathProtected {
         Only the roots themselves are protected, not everything below them: the script
         legitimately cleans %SystemRoot%\Temp and other subfolders. Callers that must
         never touch a subtree pass explicit paths instead.
+
+        v2.20: the checks above compare TEXT, and GetFullPath does not resolve reparse
+        points (measured, not assumed). A junction whose visible path looks innocent can
+        therefore point at a protected root, and enumerating that junction lists the
+        TARGET's children - deleting them deletes the real files. So an existing link is
+        resolved to its final target and the same rules are applied to that.
+
+        Only the cleanup ROOT needs this. Links found deeper in the tree are already
+        harmless: Get-ChildItem -Recurse does not descend into a reparse point, and
+        Remove-Item on a junction removes the link and leaves the target intact (both
+        measured on a live filesystem).
+    .PARAMETER SkipLinkResolution
+        Internal. Set when re-checking an already-resolved target so a pathological link
+        chain cannot recurse.
     #>
-    param([string]$Path)
+    param(
+        [string]$Path,
+        [switch]$SkipLinkResolution
+    )
 
     if ([string]::IsNullOrWhiteSpace($Path)) { return $true }   # nothing sane to clean
 
@@ -1337,6 +1589,50 @@ function Test-PathProtected {
             return $true
         }
     }
+
+    # v2.20: resolve a link root and re-check the real target (see .DESCRIPTION).
+    # A path that is not there answers $false - there is nothing to delete through it, and
+    # callers probe optional locations constantly. A path that EXISTS but cannot be
+    # examined answers $true; the two are decided separately below.
+    #
+    # (This comment described the opposite of the code until review caught it: the first
+    # draft lumped "cannot be inspected" in with "does not exist". A comment asserting a
+    # safety property the code does not have is how the fail-open bootstrap shipped in
+    # v2.17, and it ended up copied into SECURITY.md.)
+    if (-not $SkipLinkResolution) {
+        # A path that cannot be inspected is not the same as a path that is not there.
+        # Access denied, an I/O error, a path too long: none of them mean "safe to empty",
+        # and collapsing them all to "not protected" is fail-open (raised in review).
+        # Same shape as Get-FolderSizeChecked: not-found is an answer, anything else is not.
+        try {
+            $null = Get-Item -LiteralPath $fullPath -Force -ErrorAction Stop
+        } catch [System.Management.Automation.ItemNotFoundException] {
+            return $false   # nothing there to clean through
+        } catch [System.IO.DirectoryNotFoundException] {
+            return $false
+        } catch [System.IO.FileNotFoundException] {
+            return $false
+        } catch [System.Management.Automation.DriveNotFoundException] {
+            # An unmapped or removed drive is a not-found answer too (raised in review).
+            # Without this it fell to the refuse arm below, and every cleanup target on a
+            # removable drive became a "Protected path skipped" WARNING - noise in exactly
+            # the channel this release uses as its silent-failure alarm.
+            return $false
+        } catch {
+            return $true    # exists in some form but cannot be examined - refuse
+        }
+
+        $resolved = Resolve-PathThroughLinks -Path $fullPath
+        if (-not $resolved) {
+            # A link that cannot be resolved: the real target is unknown, so protection
+            # cannot be verified. Refuse rather than guess.
+            return $true
+        }
+        if ($resolved -ne $fullPath) {
+            return (Test-PathProtected -Path $resolved -SkipLinkResolution)
+        }
+    }
+
     return $false
 }
 
@@ -1693,6 +1989,7 @@ function New-SystemRestorePoint {
         Set-RunMarker -Phase 'RestorePointFrequencyOverride' -Data @{ PreviousValue = $prevFreqOuter }
 
         $childKilled = $false
+        $childExited = $true    # only meaningful once a kill has been attempted
         try {
             $proc = Start-Process -FilePath 'powershell.exe' `
                 -ArgumentList @('-NoProfile', '-NoLogo', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', $encodedCommand) `
@@ -1702,6 +1999,13 @@ function New-SystemRestorePoint {
             if (-not $proc.WaitForExit($timeoutMs)) {
                 $proc.Kill($true)
                 $childKilled = $true
+                # v2.20, corrected in review: Kill returns once termination has been
+                # REQUESTED, not once the tree is gone. Without this wait the finally
+                # below could read the creation frequency while the dying child was still
+                # writing 0 into it, see a non-zero value, conclude there was nothing to
+                # repair and delete the marker - leaving the frequency pinned at 0 with no
+                # record of it, which is exactly the damage this mechanism exists for.
+                $childExited = $proc.WaitForExit(5000)
                 throw "restore point creation timed out after $($timeoutMs / 1000) seconds"
             }
 
@@ -1713,15 +2017,29 @@ function New-SystemRestorePoint {
             # is still in place - repair it here and now. Clearing the marker
             # unconditionally would throw away the record of exactly the damage this
             # mechanism exists for, so it survives whenever the repair did not.
-            if ($childKilled) {
-                if (Restore-RestorePointFrequency -PreviousValue $prevFreqOuter) {
-                    Clear-RunMarker
-                } else {
-                    Write-Log "Restore point child was killed and its registry override could not be undone - the next run will retry" -Level WARNING
+            #
+            # v2.20: this repair now runs on BOTH paths. A child that exits normally can
+            # still have failed its own finally (a transient registry error), and the
+            # parent then deleted the marker anyway - leaving the creation frequency
+            # pinned at 0 indefinitely with nothing left to make a later run retry.
+            # Restore-RestorePointFrequency is idempotent by design: it returns $true
+            # without touching anything when the value is no longer 0, so verifying on the
+            # normal path costs nothing and turns an assumption into a check.
+            if (Restore-RestorePointFrequency -PreviousValue $prevFreqOuter) {
+                if ($childKilled -and -not $childExited) {
+                    # Raised in review: the wait above has a bound, and a child that
+                    # outlives it can still write the override AFTER this check passed.
+                    # Keeping the marker costs one repair attempt on the next run;
+                    # clearing it here would lose the only record that anything happened.
+                    Write-Log "Restore point child was killed but had not exited 5 seconds later - the marker is kept, because it can still re-apply the override after this check" -Level WARNING
                     $script:Stats.WarningsCount++
+                } else {
+                    Clear-RunMarker
                 }
             } else {
-                Clear-RunMarker
+                $how = if ($childKilled) { 'was killed' } else { 'exited normally' }
+                Write-Log "Restore point child $how but its registry override could not be undone - the marker is kept so the next run retries" -Level WARNING
+                $script:Stats.WarningsCount++
             }
         }
 
@@ -2014,12 +2332,43 @@ function Update-Applications {
         if (-not $ReportOnly) {
             Write-Log "Updating winget sources..." -Level INFO
             # Run with timeout to prevent hanging
-            $job = Start-Job -ScriptBlock { param($path) & $path source update 2>&1 } -ArgumentList $wingetPath
+            # v2.20: the job's own exit code is returned as well. Only completion was
+            # checked before, and a completed job is not a successful winget: a corrupt
+            # source fails, the job still reaches Completed, and the upgrade list below
+            # was then built from stale data without a word in the log.
+            $job = Start-Job -ScriptBlock {
+                param($path)
+                & $path source update 2>&1 | Out-String
+                $LASTEXITCODE
+            } -ArgumentList $wingetPath
             $completed = $job | Wait-Job -Timeout 120  # 2 minutes timeout
             if (-not $completed) {
                 $job | Stop-Job
                 Write-Log "Winget source update timed out - package list may be stale" -Level WARNING
                 $script:Stats.WarningsCount++
+            } else {
+                # v2.20, corrected in review: "no usable result" is a failure in its own
+                # right. When the winget entry is a WindowsApps AppExecLink stub - passes
+                # Test-Path, but will not start once App Installer is deregistered - the
+                # job still reaches Completed, Receive-Job swallows the error and
+                # $LASTEXITCODE is never set, so the last output element is $null. The old
+                # guard short-circuited on exactly that and said nothing, which made an
+                # unusable winget the one silent path left in this block. Measured by the
+                # reviewer: one output element, and it was $null.
+                # [int] on a non-numeric last line would also have thrown; TryParse cannot.
+                $jobState = $job.State
+                $jobOutput = @($job | Receive-Job -ErrorAction SilentlyContinue)
+                $sourceExit = if ($jobOutput.Count -gt 0) { $jobOutput[-1] } else { $null }
+                $exitValue = 0
+                $exitKnown = $null -ne $sourceExit -and [int]::TryParse([string]$sourceExit, [ref]$exitValue)
+
+                if ($jobState -ne 'Completed' -or -not $exitKnown) {
+                    Write-Log "Winget source update produced no usable exit code (job state: $jobState) - package list may be stale" -Level WARNING
+                    $script:Stats.WarningsCount++
+                } elseif ($exitValue -ne 0) {
+                    Write-Log "Winget source update failed (exit code $exitValue) - package list may be stale" -Level WARNING
+                    $script:Stats.WarningsCount++
+                }
             }
             $job | Remove-Job -Force -ErrorAction SilentlyContinue
         }
@@ -2305,9 +2654,6 @@ function Clear-BrowserCaches {
         # Get browser names for logging
         $browserNames = ($allPaths | Select-Object -ExpandProperty Browser -Unique) -join ', '
 
-        # Measure size before cleanup
-        $sizeBefore = ($allPaths | ForEach-Object { Get-FolderSize -Path $_.Path } | Measure-Object -Sum).Sum
-
         if ($ReportOnly) {
             # v2.18: $sizeBefore comes from Get-FolderSize, which returns 0 for BOTH an
             # empty cache and an unreadable one, so "Would clean ... - 0 B" announced a
@@ -2325,6 +2671,15 @@ function Clear-BrowserCaches {
                 }
             }
         } else {
+            # v2.20, corrected in review: both sides are now measured PER PATH with the
+            # SAME function. "Before" used Get-FolderSize (raw enumerator, inaccessible
+            # files silently skipped, reparse points excluded) while "after" used
+            # Get-FolderSizeChecked, so the two numbers did not describe the same set of
+            # files and a genuine deletion could be subtracted into the "nothing freed"
+            # branch. Measuring before only in this branch also stops ReportOnly from
+            # walking every cache twice.
+            $beforeMeasurements = @($allPaths | ForEach-Object { Get-FolderSizeChecked -Path $_.Path })
+
             # Actual cleanup
             $allPaths | ForEach-Object -Parallel {
                 $item = $_
@@ -2339,11 +2694,38 @@ function Clear-BrowserCaches {
                 }
             } -ThrottleLimit 8
 
-            # Measure size after cleanup to get actual freed space
-            $sizeAfter = ($allPaths | ForEach-Object { Get-FolderSize -Path $_.Path } | Measure-Object -Sum).Sum
-            $sizeAfter = [long]($sizeAfter ?? 0)  # Ensure non-null value
-            # Protect against negative values (can happen if browser recreates files during cleanup)
-            $freedSpace = [math]::Max(0, $sizeBefore - $sizeAfter)
+            # Measure size after cleanup to get actual freed space.
+            #
+            # v2.20: checked measurement. Get-FolderSize returns 0 both for "empty" and for
+            # "could not read", so an after-walk that lost access - the cache folder is
+            # being recreated by a browser that just started, ACLs changed mid-run - turned
+            # into "freed everything we measured before". The delta is only computed when
+            # every folder answered; otherwise the bytes stay unattributed instead of being
+            # invented.
+            $afterMeasurements = @($allPaths | ForEach-Object { Get-FolderSizeChecked -Path $_.Path })
+
+            # Pair the two sides path by path. The previous rule discarded the delta for
+            # ALL caches when a single one of ~30 could not be measured; only the paths
+            # that actually failed are dropped now.
+            $measuredBefore = [long]0
+            $measuredAfter = [long]0
+            $afterUnmeasured = 0
+            for ($i = 0; $i -lt $allPaths.Count; $i++) {
+                $beforeOne = $beforeMeasurements[$i]
+                $afterOne = $afterMeasurements[$i]
+                if ($null -eq $beforeOne -or $null -eq $afterOne) {
+                    $afterUnmeasured++
+                    continue
+                }
+                $measuredBefore += $beforeOne
+                $measuredAfter += $afterOne
+            }
+
+            # Clamped once over the total, not per path (raised in review). TotalFreedBytes
+            # means net space reclaimed, so clamping each path separately would report
+            # 100 MB when one cache shrank by 100 MB while another was recreated and grew
+            # by 80 MB - inventing 80 MB of "freed" space the disk never got back.
+            $freedSpace = [math]::Max(0, $measuredBefore - $measuredAfter)
 
             # Update statistics with actual freed space (not estimated)
             if ($freedSpace -gt 0) {
@@ -2353,6 +2735,11 @@ function Clear-BrowserCaches {
                 }
                 $script:Stats.FreedByCategory["Browser"] += $freedSpace
                 Write-Log "Browser caches cleaned ($browserNames) - $(Format-FileSize $freedSpace)" -Level SUCCESS
+                if ($afterUnmeasured -gt 0) {
+                    Write-Log "Browser caches: $afterUnmeasured folder(s) could not be measured - their share is not included above" -Level DETAIL
+                }
+            } elseif ($afterUnmeasured -gt 0) {
+                Write-Log "Browser caches ($browserNames): cleaned, but $afterUnmeasured folder(s) could not be measured - freed space not counted" -Level DETAIL
             } else {
                 # v2.16: was logged as SUCCESS. A running browser locks its cache, so
                 # "cleaned" with zero freed was a plain lie to the user
@@ -2692,8 +3079,23 @@ function Clear-SystemCaches {
                 # Nothing to measure: say so instead of claiming a clean-up happened (v2.16)
                 Write-Log "Delivery Optimization: cmdlet ran, cache location not found - freed size unknown" -Level DETAIL
             } elseif ($doSizeBefore -gt 0) {
-                Write-Log "Delivery Optimization: nothing freed, $(Format-FileSize $doSizeBefore) still present" -Level WARNING
-                $script:Stats.WarningsCount++
+                # v2.20: this was a WARNING and fired on healthy systems. The measurement
+                # covers the WHOLE Delivery Optimization folder, but the supported cmdlet
+                # only removes cached content - the service's own logs and state files stay
+                # and are not ours to delete. So "size did not change" after a cmdlet that
+                # reported success is not evidence of failure, it is evidence that the
+                # remainder was never cache. Reproduced on the EN stand VM twice in a row
+                # (2 MB left behind), where it pushed the run over its warning budget.
+                #
+                # A genuine failure still surfaces: the cmdlet runs with -ErrorAction Stop,
+                # so an actual error lands in the catch below as a warning.
+                # Deliberately does NOT claim the cache was cleared: an unchanged folder
+                # size cannot prove that every remaining byte is non-cache. It states what
+                # is actually known - the cmdlet reported success and this much is still
+                # on disk - and leaves the reader to judge (tightened in review; the first
+                # wording asserted "cache cleared", which is the opposite failure of the
+                # warning it replaced).
+                Write-Log "Delivery Optimization: cmdlet reported success, $(Format-FileSize $doSizeBefore) still on disk (the folder also holds service logs and state, which it does not remove)" -Level DETAIL
             } else {
                 Write-Log "Delivery Optimization cache was already empty" -Level DETAIL
             }
@@ -2732,7 +3134,17 @@ function Clear-EventLogs {
         # Enumerate only logs worth clearing: enabled, non-empty, Administrative/Operational.
         # This skips ~1000 Analytic/Debug/empty channels - much faster and avoids
         # chronic partial-failure warnings (v2.14; was: wevtutil el over all channels)
-        $logs = Get-WinEvent -ListLog * -ErrorAction SilentlyContinue | Where-Object {
+        # v2.20: keep the enumeration errors. A wholesale failure (Event Log service down,
+        # WMI broken) produced an empty list, zero failed clears and therefore the success
+        # branch: "Event logs cleared (0 logs)" while nothing was touched.
+        # v2.20, corrected in review: the enumeration result is kept BEFORE filtering.
+        # Deciding on the filtered list meant that 40 readable channels out of 510 with
+        # 470 enumeration errors produced a plain "Event logs cleared (40 logs)" SUCCESS,
+        # and that an empty filter result on a perfectly healthy machine was reported as
+        # a failed enumeration. Those are different states and now read differently.
+        $enumErrors = $null
+        $allLogs = @(Get-WinEvent -ListLog * -ErrorAction SilentlyContinue -ErrorVariable enumErrors)
+        $logs = $allLogs | Where-Object {
             $_.RecordCount -gt 0 -and
             $_.IsEnabled -and
             $_.LogName -ne 'Security' -and  # Keep the main Security log (exact match)
@@ -2750,11 +3162,37 @@ function Clear-EventLogs {
             }
         }
 
-        if ($failedCount -gt 0) {
-            Write-Log "Event logs cleared: $clearedCount, failed: $failedCount" -Level WARNING
+        $enumErrorCount = @($enumErrors).Count
+
+        if ($allLogs.Count -eq 0) {
+            # Nothing could be listed at all - the Event Log service is down or the API
+            # is broken. Clearing zero channels is not a clean system.
+            Write-Log "Event logs: channels could not be enumerated ($enumErrorCount error(s)) - nothing was cleared" -Level WARNING
             $script:Stats.WarningsCount++
         } else {
-            Write-Log "Event logs cleared ($clearedCount logs)" -Level SUCCESS
+            # Partial loss is reported separately from the clearing result, because the
+            # channels that failed to list were never even candidates and their records
+            # are still on disk.
+            #
+            # DETAIL, not WARNING (raised in review): a listing error is a gap in coverage,
+            # not the failure of an operation we claimed to perform, and this machine is
+            # not evidence about anyone else's - measured here on 25H2 it is 510 channels
+            # with zero errors, but third-party or protected channels can error out
+            # routinely elsewhere, and a warning that fires every run teaches people to
+            # ignore warnings. Total failure below stays a warning. Worded as errors rather
+            # than channels because that is what was counted.
+            if ($enumErrorCount -gt 0) {
+                Write-Log "Event logs: $enumErrorCount error(s) while listing channels - whatever they refer to was never considered for clearing" -Level DETAIL
+            }
+
+            if ($failedCount -gt 0) {
+                Write-Log "Event logs cleared: $clearedCount, failed: $failedCount" -Level WARNING
+                $script:Stats.WarningsCount++
+            } elseif ($clearedCount -eq 0) {
+                Write-Log "Event logs: no channel needed clearing" -Level DETAIL
+            } else {
+                Write-Log "Event logs cleared ($clearedCount logs)" -Level SUCCESS
+            }
         }
     } catch {
         Write-Log "Error clearing event logs: $_" -Level WARNING
@@ -2819,58 +3257,67 @@ function Clear-PrivacyTraces {
 
     $clearedItems = @()
 
-    # Clear Run dialog history (RunMRU)
-    $runMruKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\RunMRU"
-    if (Test-Path $runMruKey) {
-        try {
-            # Get current values before clearing
-            $mruValues = Get-ItemProperty -Path $runMruKey -ErrorAction SilentlyContinue
-            $valueCount = ($mruValues.PSObject.Properties | Where-Object { $_.Name -match '^[a-z]$' }).Count
+    # v2.20: success is now confirmed by looking, not by the absence of an exception.
+    # Remove-Item with -ErrorAction SilentlyContinue cannot throw, so the catch blocks
+    # here were dead code and "$clearedItems += ..." ran unconditionally: the log said
+    # "Privacy traces cleared: Explorer typed paths" even when policy or permissions had
+    # rejected the deletion and the key was still sitting there, fully populated.
+    # RunMRU joins this list rather than keeping its own copy of the same logic: it used
+    # the pre-count as proof of success in exactly the way the others did (caught in
+    # review before release, when the first version of this fix left it behind).
+    $historyKeys = @(
+        @{ Path = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\RunMRU";         Label = 'Run history' }
+        @{ Path = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\TypedPaths";     Label = 'Explorer typed paths' }
+        @{ Path = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\WordWheelQuery"; Label = 'Explorer search history' }
+    )
+    foreach ($entry in $historyKeys) {
+        if (-not (Test-Path $entry.Path)) { continue }
 
-            # Remove the key and recreate it empty
-            Remove-Item -Path $runMruKey -Force -ErrorAction SilentlyContinue
-            New-Item -Path $runMruKey -Force -ErrorAction SilentlyContinue | Out-Null
-
-            if ($valueCount -gt 0) {
-                $clearedItems += "Run history ($valueCount entries)"
-            }
-        } catch {
-            Write-Log "Could not clear Run history: $_" -Level WARNING
+        $before = Get-RegistryValueCount -Key $entry.Path
+        if ($null -eq $before) {
+            # Present but unreadable: we cannot tell whether there is anything to clear,
+            # and silently moving on would look identical to "there was nothing"
+            Write-Log "$($entry.Label): key could not be read - left untouched" -Level WARNING
+            $script:Stats.WarningsCount++
+            continue
         }
-    }
+        # An empty key is not a trace that was cleared - it is a trace that was not there
+        if ($before -eq 0) { continue }
 
-    # Clear TypedPaths (Explorer address bar history)
-    $typedPathsKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\TypedPaths"
-    if (Test-Path $typedPathsKey) {
-        try {
-            Remove-Item -Path $typedPathsKey -Force -ErrorAction SilentlyContinue
-            New-Item -Path $typedPathsKey -Force -ErrorAction SilentlyContinue | Out-Null
-            $clearedItems += "Explorer typed paths"
-        } catch { }
-    }
+        Remove-Item -Path $entry.Path -Force -ErrorAction SilentlyContinue
+        New-Item -Path $entry.Path -Force -ErrorAction SilentlyContinue | Out-Null
 
-    # Clear WordWheelQuery (Explorer search history)
-    $searchKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\WordWheelQuery"
-    if (Test-Path $searchKey) {
-        try {
-            Remove-Item -Path $searchKey -Force -ErrorAction SilentlyContinue
-            New-Item -Path $searchKey -Force -ErrorAction SilentlyContinue | Out-Null
-            $clearedItems += "Explorer search history"
-        } catch { }
+        $after = Get-RegistryValueCount -Key $entry.Path
+        if ($null -eq $after) {
+            Write-Log "$($entry.Label): result could not be verified - not counted as cleared" -Level WARNING
+            $script:Stats.WarningsCount++
+        } elseif ($after -eq 0) {
+            $clearedItems += $entry.Label
+        } else {
+            Write-Log "$($entry.Label): $after of $before entries remain - not cleared" -Level WARNING
+            $script:Stats.WarningsCount++
+        }
     }
 
     # Clear Recent documents folder
     $recentFolder = [Environment]::GetFolderPath('Recent')
-    if (Test-Path $recentFolder) {
-        try {
-            $recentCount = (Get-ChildItem -Path $recentFolder -Force -ErrorAction SilentlyContinue).Count
-            Get-ChildItem -Path $recentFolder -Force -ErrorAction SilentlyContinue | ForEach-Object {
+    if (-not [string]::IsNullOrWhiteSpace($recentFolder) -and (Test-Path $recentFolder)) {
+        $recentBefore = @(Get-ChildItem -LiteralPath $recentFolder -Force -ErrorAction SilentlyContinue).Count
+        if ($recentBefore -gt 0) {
+            Get-ChildItem -LiteralPath $recentFolder -Force -ErrorAction SilentlyContinue | ForEach-Object {
                 Remove-Item -LiteralPath $_.FullName -Recurse -Force -ErrorAction SilentlyContinue
             }
-            if ($recentCount -gt 0) {
-                $clearedItems += "Recent documents ($recentCount items)"
+            # Report what actually went, not what was there before the attempt
+            $recentAfter = @(Get-ChildItem -LiteralPath $recentFolder -Force -ErrorAction SilentlyContinue).Count
+            $removed = $recentBefore - $recentAfter
+            if ($removed -gt 0) {
+                $clearedItems += "Recent documents ($removed items)"
             }
-        } catch { }
+            if ($recentAfter -gt 0) {
+                Write-Log "Recent documents: $recentAfter of $recentBefore items could not be removed (in use?)" -Level WARNING
+                $script:Stats.WarningsCount++
+            }
+        }
     }
 
     if ($clearedItems.Count -gt 0) {
@@ -3070,7 +3517,11 @@ function Clear-DeveloperCaches {
     .SYNOPSIS
         Cleans developer tool caches (npm, pip, nuget, composer, etc.)
     #>
-    if ($SkipDevCleanup) {
+    # v2.20: matches the contract the dispatcher enforces (-SkipCleanup suppresses the
+    # whole cleanup group). Unreachable through Start-WinClean, which already gates the
+    # phase - this is the guard a direct caller of the dot-sourced function gets, and it
+    # disagreed with the documented meaning of -SkipCleanup.
+    if ($SkipCleanup -or $SkipDevCleanup) {
         Write-Log "Developer cache cleanup skipped (parameter)" -Level INFO
         return
     }
@@ -3091,20 +3542,51 @@ function Clear-DeveloperCaches {
             $npm = Get-Command npm -ErrorAction SilentlyContinue
             if ($npm) {
                 try {
-                    $sizeBefore = Get-FolderSize $npmCache
+                    # v2.20, corrected in review: both sides are measured with the checked
+                    # variant. Get-FolderSize answers 0 for "empty" and for "could not
+                    # read" alike, so a cache that became unreadable after the clean - npm
+                    # recreating it, ACLs changing mid-run - produced "freed everything we
+                    # measured before" and put invented bytes into TotalFreedBytes. The
+                    # same defect was fixed for browser caches in this release; npm kept it.
+                    $sizeBefore = Get-FolderSizeChecked -Path $npmCache
                     & npm cache clean --force 2>&1 | Out-Null
-                    $sizeAfter = Get-FolderSize $npmCache
-                    $freed = $sizeBefore - $sizeAfter
+                    # v2.20: npm fails without throwing (EPERM on a locked cache is the
+                    # common case). The exit code was never read, so a failed clean that
+                    # freed nothing landed in the "else" branch below and was logged as
+                    # SUCCESS - the same lie fixed for browser caches in v2.16.
+                    $npmExit = $LASTEXITCODE
+                    $sizeAfter = Get-FolderSizeChecked -Path $npmCache
+                    $npmMeasured = ($null -ne $sizeBefore -and $null -ne $sizeAfter)
+                    $freed = if ($npmMeasured) { [math]::Max(0, $sizeBefore - $sizeAfter) } else { 0 }
 
+                    # Credit whatever really went, whether or not npm then failed
                     if ($freed -gt 0) {
                         $script:Stats.TotalFreedBytes += $freed
                         if (-not $script:Stats.FreedByCategory.ContainsKey("Developer")) {
                             $script:Stats.FreedByCategory["Developer"] = 0
                         }
                         $script:Stats.FreedByCategory["Developer"] += $freed
+                    }
+
+                    # v2.20, corrected in review: the exit code is checked FIRST. Testing
+                    # "$freed -gt 0" first meant a partial failure (npm removes 400 MB, then
+                    # hits EPERM on a locked file and exits 1) reported plain success and
+                    # skipped the fallback - the exit code was read and then ignored in
+                    # exactly the case where it mattered.
+                    if ($npmExit -ne 0) {
+                        Write-Log "npm cache clean failed (exit code $npmExit)$(if ($freed -gt 0) { " after freeing $(Format-FileSize $freed)" }) - removing the cache directly" -Level WARNING
+                        $script:Stats.WarningsCount++
+                        Remove-FolderContent -Path $npmCache -Category "Developer" -Description "npm cache"
+                    } elseif ($freed -gt 0) {
                         Write-Log "npm cache cleaned - $(Format-FileSize $freed)" -Level SUCCESS
+                    } elseif (-not $npmMeasured) {
+                        # Cleaned, but "how much" has no honest answer - say that instead
+                        # of calling an unreadable cache an empty one.
+                        Write-Log "npm cache cleaned, but its size could not be measured - freed space not counted" -Level DETAIL
                     } else {
-                        Write-Log "npm cache cleaned (via npm)" -Level SUCCESS
+                        # npm succeeded and there was nothing to reclaim. Not a cleanup
+                        # success worth announcing, and definitely not freed bytes.
+                        Write-Log "npm cache was already empty" -Level DETAIL
                     }
                 } catch {
                     Remove-FolderContent -Path $npmCache -Category "Developer" -Description "npm cache"
@@ -3237,7 +3719,8 @@ function Clear-DockerWSL {
     .SYNOPSIS
         Cleans Docker images, containers, and WSL2 disk
     #>
-    if ($SkipDockerCleanup) {
+    # v2.20: see Clear-DeveloperCaches - same contract, same reason
+    if ($SkipCleanup -or $SkipDockerCleanup) {
         Write-Log "Docker/WSL cleanup skipped (parameter)" -Level INFO
         return
     }
@@ -3423,7 +3906,8 @@ function Clear-VisualStudio {
     .SYNOPSIS
         Cleans Visual Studio caches and temporary files
     #>
-    if ($SkipVSCleanup) {
+    # v2.20: see Clear-DeveloperCaches - same contract, same reason
+    if ($SkipCleanup -or $SkipVSCleanup) {
         Write-Log "Visual Studio cleanup skipped (parameter)" -Level INFO
         return
     }
@@ -4011,6 +4495,155 @@ function Invoke-DISMCleanup {
     }
 }
 
+function Select-StorageSenseTask {
+    <#
+    .SYNOPSIS
+        Picks the single Storage Sense task out of a lookup result
+    .DESCRIPTION
+        Pure decision, split out in v2.20 so the rule can be tested without a scheduler.
+        Windows ships exactly one task with this name; silently taking the first of
+        several means starting something nobody identified, so ambiguity yields no task
+        and says why.
+        Returns Task (the task or $null) and Reason ('ok' | 'none' | 'ambiguous').
+    #>
+    param([object[]]$Tasks)
+
+    $found = @($Tasks | Where-Object { $null -ne $_ })
+    if ($found.Count -eq 0) { return @{ Task = $null; Reason = 'none' } }
+    if ($found.Count -gt 1) { return @{ Task = $null; Reason = 'ambiguous' } }
+    return @{ Task = $found[0]; Reason = 'ok' }
+}
+
+function Get-StorageSenseVerdict {
+    <#
+    .SYNOPSIS
+        Decides whether a Storage Sense run counts as a cleanup that actually happened
+    .DESCRIPTION
+        Pure decision, split out in v2.20 so the rule can be tested. Two things must both
+        hold before Disk Cleanup is skipped: the task reported success, AND free space
+        actually grew.
+        A result of 0 on its own is not evidence. Storage Sense obeys its own settings;
+        switched off in Settings, the task still starts, does nothing it is not allowed to
+        do, and exits 0. Skipping all 23 cleanmgr handlers on that basis would free
+        nothing and report success - the defect this release exists to remove, and one
+        that only became reachable once this branch stopped being dead code.
+        $null TaskResult means "could not be read" and $null FreedBytes means "could not
+        be measured"; neither may be read as success.
+        Returns Done ($true only when cleanmgr may be skipped) and Reason
+        ('unreadable' | 'failed' | 'not-measured' | 'nothing-freed' | 'success').
+    #>
+    param(
+        [AllowNull()][object]$TaskResult,
+        [AllowNull()][object]$FreedBytes
+    )
+
+    if ($null -eq $TaskResult) { return @{ Done = $false; Reason = 'unreadable' } }
+
+    # [int] would THROW here, and precisely on the codes this function exists to catch.
+    # LastTaskResult is a UInt32 and every HRESULT failure has the high bit set, so its
+    # unsigned value exceeds Int32.MaxValue: the 0x80040154 cited above arrives as
+    # 2147746132. The exception escaped Invoke-StorageSense, Invoke-Phase recorded
+    # DeepSystemCleanup as failed, and Clear-WindowsOld never ran.
+    # The first test written for this passed the PowerShell literal 0x80040154, which the
+    # parser types as Int32 -2147221164 - so the cast succeeded and the test was green
+    # BECAUSE of the defect. Tests for this function must use the production type.
+    $resultValue = [long]0
+    if (-not [long]::TryParse([string]$TaskResult, [ref]$resultValue)) {
+        return @{ Done = $false; Reason = 'unreadable' }
+    }
+    if ($resultValue -ne 0) { return @{ Done = $false; Reason = 'failed' } }
+    if ($null -eq $FreedBytes) { return @{ Done = $false; Reason = 'not-measured' } }
+    if ([long]$FreedBytes -le 0) { return @{ Done = $false; Reason = 'nothing-freed' } }
+    return @{ Done = $true; Reason = 'success' }
+}
+
+function Wait-StorageSenseTask {
+    <#
+    .SYNOPSIS
+        Waits for the Storage Sense task to stop running
+    .DESCRIPTION
+        Split out in v2.20 so the wait can be tested without a scheduler and without
+        actually waiting two minutes: the caller injects how to read the task, how to
+        read its info, and how to wait.
+
+        'vanished' is a distinct outcome because the loop used to break on a task that
+        disappeared while leaving its finished flag false, so the caller announced "did
+        not finish within 120 seconds" after five - a number that never happened.
+
+        Returns Outcome ('finished' | 'vanished' | 'timeout' | 'unverifiable'), Elapsed
+        seconds and the last Task seen. 'unverifiable' means the task was never observed
+        running AND its previous run time could not be read before the start, so there is
+        nothing to compare against - it is not a failure, but it is not evidence of a run
+        either, and the caller must not treat it as one.
+    #>
+    param(
+        [scriptblock]$GetTask,
+        [scriptblock]$GetTaskInfo,
+        [AllowNull()][object]$LastRunBefore,
+        [int]$TimeoutSeconds = 120,
+        [int]$CheckInterval = 5,
+        [scriptblock]$Wait = { param($seconds) Start-Sleep -Seconds $seconds }
+    )
+
+    $elapsed = 0
+    $wasRunning = $false
+    $task = $null
+
+    while ($elapsed -lt $TimeoutSeconds) {
+        & $Wait $CheckInterval
+        $elapsed += $CheckInterval
+
+        # Task states are language-independent: Ready, Running, Disabled
+        $task = & $GetTask
+        if (-not $task) {
+            return @{ Outcome = 'vanished'; Elapsed = $elapsed; Task = $null }
+        }
+
+        if ($task.State -eq 'Running') {
+            $wasRunning = $true
+            continue
+        }
+
+        if ($wasRunning) {
+            # Was running and is not any more
+            return @{ Outcome = 'finished'; Elapsed = $elapsed; Task = $task }
+        }
+
+        if ($elapsed -ge 10) {
+            # Never observed as Running - it may simply have been quicker than the poll
+            # interval. The task's own LastRunTime moving is the evidence.
+            #
+            # Raised in review: without a baseline there is no evidence to weigh, and the
+            # old disjunction let the MISSING baseline satisfy the test, because -not $null
+            # is true. Any readable task info then returned "finished" for a task that may
+            # never have started - a false success that goes on to skip all 23 cleanmgr
+            # handlers.
+            #
+            # Corrected again in the next review round: the first repair returned here at
+            # once, which gave a slow-starting task no chance to be seen and let cleanmgr
+            # start alongside it. Keep watching instead - being observed Running is direct
+            # evidence and needs no baseline - and only answer "unverifiable" if the whole
+            # window passes without ever seeing it.
+            if ($null -ne $LastRunBefore) {
+                $infoNow = & $GetTaskInfo $task
+                if ($infoNow -and $infoNow.LastRunTime -ne $LastRunBefore) {
+                    return @{ Outcome = 'finished'; Elapsed = $elapsed; Task = $task }
+                }
+            }
+        }
+    }
+
+    # Never seen running, and there was no previous run time to compare against: the window
+    # is over and nothing about this invocation was ever observed. That is not a timeout in
+    # the useful sense - there is simply no evidence either way, and the caller must not
+    # read it as one.
+    if (-not $wasRunning -and $null -eq $LastRunBefore) {
+        return @{ Outcome = 'unverifiable'; Elapsed = $elapsed; Task = $task }
+    }
+
+    return @{ Outcome = 'timeout'; Elapsed = $elapsed; Task = $task }
+}
+
 function Invoke-StorageSense {
     <#
     .SYNOPSIS
@@ -4018,79 +4651,211 @@ function Invoke-StorageSense {
     #>
     Write-Log "Storage Sense" -Level SECTION
 
+    # v2.20: the one step users asked to be able to switch off on its own. Until now the
+    # only way was -SkipCleanup, which also suppresses temp files, browsers, dev caches,
+    # Docker/WSL, Visual Studio and the driver store - everything, to avoid one step.
     if ($ReportOnly) {
         Write-Log "Would run: Storage Sense" -Level DETAIL
         return
     }
 
+    # cleanmgr's saved selection lives under this sageset. Both are needed up front: the
+    # sweep below runs on every path that is allowed to change the system, not only when
+    # cleanmgr is reached. (-ReportOnly returns above because it promises to change
+    # nothing at all; -SkipDiskCleanup returns AFTER the sweep, see below.)
+    $sageset = 9999
+    $regPath = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\VolumeCaches"
+
+    # Sweep leftovers from a previous run before doing anything else. The cleanmgr branch
+    # deliberately skips its own sweep while cleanmgr is still running (it would pull the
+    # configuration out from under it), and Storage Sense returns before that branch is
+    # reached - so a timed-out run followed only by successful Storage Sense runs would
+    # otherwise leave these flags in the registry forever. Caught in review before release.
+    #
+    # Gated on cleanmgr not running: a previous run's cleanmgr may still be working in the
+    # background, and sweeping now would pull its configuration out from under it - which
+    # is precisely what the finally below refuses to do (also raised in review).
+    if (-not (Get-Process -Name 'cleanmgr' -ErrorAction SilentlyContinue)) {
+        Get-ChildItem -Path $regPath -ErrorAction SilentlyContinue | ForEach-Object {
+            Remove-ItemProperty -Path $_.PSPath -Name "StateFlags$sageset" -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    # After the sweep, deliberately (raised in review). The flag means "do not run this
+    # step", not "do not touch anything": returning before the sweep left a timed-out
+    # previous run's StateFlags in the registry forever, which is the exact case the sweep
+    # was added for.
+    if ($SkipDiskCleanup) {
+        Write-Log "Storage Sense / Disk Cleanup skipped (parameter)" -Level INFO
+        return
+    }
+
     # Try Storage Sense first (Windows 11)
-    # Use Get-ScheduledTask for language-independent status checking
-    $ssTaskPath = "\Microsoft\Windows\DiskCleanup\"
+    #
+    # v2.20: the task was looked up at "\Microsoft\Windows\DiskCleanup\", where it does not
+    # exist - that folder holds SilentCleanup. The real one lives under
+    # "\Microsoft\Windows\DiskFootprint\". So this branch was UNREACHABLE on every machine
+    # and every run fell through to the legacy cleanmgr path: 10 seconds on a fresh VM,
+    # 15 minutes on a real workstation (measured: 901s of a 1101s run, and it did not even
+    # finish). Searching by name instead of by a hardcoded path also survives the folder
+    # moving again.
     $ssTaskName = "StorageSense"
-    $task = Get-ScheduledTask -TaskPath $ssTaskPath -TaskName $ssTaskName -ErrorAction SilentlyContinue
+    $ssTasks = @(Get-ScheduledTask -TaskName $ssTaskName -ErrorAction SilentlyContinue)
+    # Windows ships exactly one. If a machine somehow has more, say so and take none:
+    # silently picking the first of several tasks with the same name means starting
+    # something nobody identified (raised in review).
+    $ssSelection = Select-StorageSenseTask -Tasks $ssTasks
+
+    # Set by every branch that has already said why cleanmgr is being used, so the
+    # fallback below cannot contradict it. Raised in review: an ambiguous lookup logged
+    # both "2 tasks with that name - not guessing" and, two lines later, "task not found".
+    $ssExplained = $false
+
+    if ($ssSelection.Reason -eq 'ambiguous') {
+        $ssExplained = $true
+        Write-Log "Storage Sense: $($ssTasks.Count) tasks with that name ($(($ssTasks | ForEach-Object { $_.TaskPath }) -join ', ')) - not guessing, using Disk Cleanup" -Level INFO
+    }
+    $task = $ssSelection.Task
+
+    # v2.20, corrected in review: pin the exact task. Later lookups searched by name only
+    # and took the first hit, which quietly undid the refusal-to-guess rule above the
+    # moment a second same-named task appeared while we were waiting.
+    $ssTaskPath = if ($task) { $task.TaskPath } else { $null }
+
+    # Raised in review, then measured: -TaskPath rejects $null with a binding error that
+    # -ErrorAction SilentlyContinue does NOT suppress, so a task object without a path
+    # would turn every later lookup into an exception - and the wait would read that as
+    # "the task vanished". The path is only passed when there is one.
+    $ssLookup = @{ TaskName = $ssTaskName; ErrorAction = 'SilentlyContinue' }
+    if ($ssTaskPath) { $ssLookup['TaskPath'] = $ssTaskPath }
+
+    # Verified below; only a task that demonstrably ran successfully skips cleanmgr
+    $storageSenseDone = $false
 
     # A disabled task cannot be started - fall back to cleanmgr instead of
     # waiting the full timeout for a task that never runs (v2.14)
     if ($task -and $task.State -ne 'Disabled') {
         Write-Log "Running Storage Sense..." -Level INFO
 
-        # Record time before running to compare with LastRunTime
-        $startTime = Get-Date
-        Start-ScheduledTask -TaskPath $ssTaskPath -TaskName $ssTaskName -ErrorAction SilentlyContinue
+        # v2.20: compare against the task's OWN previous run time, not wall-clock. The old
+        # code compared LastRunTime with $startTime taken in this process, which is a
+        # different clock granularity and rounds the wrong way.
+        $infoBefore = $task | Get-ScheduledTaskInfo -ErrorAction SilentlyContinue
+        $lastRunBefore = if ($infoBefore) { $infoBefore.LastRunTime } else { $null }
 
-        # Wait for task to complete with timeout
-        $timeout = 120  # 2 minutes max
-        $elapsed = 0
-        $checkInterval = 5
-        $wasRunning = $false
+        # Free space before the task, so its success can be judged on evidence rather than
+        # on an exit code (see the verification below)
+        $sysDriveLetter = ($env:SystemDrive).TrimEnd(':')
+        $freeBefore = $null
+        try { $freeBefore = (Get-PSDrive -Name $sysDriveLetter -ErrorAction Stop).Free } catch { $freeBefore = $null }
 
-        while ($elapsed -lt $timeout) {
-            Start-Sleep -Seconds $checkInterval
-            $elapsed += $checkInterval
+        $started = $false
+        try {
+            $task | Start-ScheduledTask -ErrorAction Stop
+            $started = $true
+        } catch {
+            # v2.20: the start used to be -ErrorAction SilentlyContinue with the result
+            # ignored, so a task that never started still cost the full 120s wait before
+            # anything was reported
+            Write-Log "Storage Sense could not be started ($($_.Exception.Message)) - using Disk Cleanup" -Level INFO
+            $ssExplained = $true
+        }
 
-            # Get current task state (language-independent: Ready, Running, Disabled)
-            $task = Get-ScheduledTask -TaskPath $ssTaskPath -TaskName $ssTaskName -ErrorAction SilentlyContinue
-            if ($task) {
-                $state = $task.State
+        if ($started) {
+            $timeout = 120  # 2 minutes max
+            $waitResult = Wait-StorageSenseTask `
+                -GetTask { @(Get-ScheduledTask @ssLookup) | Select-Object -First 1 } `
+                -GetTaskInfo { param($t) $t | Get-ScheduledTaskInfo -ErrorAction SilentlyContinue } `
+                -LastRunBefore $lastRunBefore `
+                -TimeoutSeconds $timeout `
+                -CheckInterval 5
+            # Only overwrite when the wait actually saw a task: on 'vanished' the original
+            # selection is kept, so the fallback below does not also announce "task not
+            # found" for something that was found and then disappeared.
+            if ($waitResult.Task) { $task = $waitResult.Task }
 
-                if ($state -eq 'Running') {
-                    $wasRunning = $true
-                } elseif ($wasRunning -and $state -eq 'Ready') {
-                    # Task was running and now finished
-                    Write-Log "Storage Sense completed" -Level SUCCESS
-                    break
-                } elseif (-not $wasRunning -and $elapsed -ge 10) {
-                    # Task didn't start running within 10 seconds - check LastRunTime
-                    $taskInfo = Get-ScheduledTaskInfo -TaskPath $ssTaskPath -TaskName $ssTaskName -ErrorAction SilentlyContinue
-                    if ($taskInfo -and $taskInfo.LastRunTime -gt $startTime) {
-                        Write-Log "Storage Sense completed" -Level SUCCESS
-                        break
+            if ($waitResult.Outcome -eq 'finished') {
+                # v2.20 fail-closed: a task that ran and FAILED used to be logged as
+                # "Storage Sense completed" and cleanmgr was skipped - a silent failure that
+                # would have left the machine uncleaned while the run reported success.
+                # Verified on a live machine where this task returns 0x80040154.
+                $infoAfter = $task | Get-ScheduledTaskInfo -ErrorAction SilentlyContinue
+                $taskResult = if ($infoAfter) { $infoAfter.LastTaskResult } else { $null }
+
+                # $null means "could not be measured", which is not the same answer as
+                # "freed nothing" - the old code collapsed both into 0.
+                $freedBySense = $null
+                try {
+                    $freeAfter = (Get-PSDrive -Name $sysDriveLetter -ErrorAction Stop).Free
+                    if ($null -ne $freeBefore) { $freedBySense = $freeAfter - $freeBefore }
+                } catch { $freedBySense = $null }
+
+                $verdict = Get-StorageSenseVerdict -TaskResult $taskResult -FreedBytes $freedBySense
+                $storageSenseDone = $verdict.Done
+
+                switch ($verdict.Reason) {
+                    'success'      { Write-Log "Storage Sense completed - $(Format-FileSize $freedBySense)" -Level SUCCESS }
+                    'unreadable'   { Write-Log "Storage Sense ran but its result could not be read - using Disk Cleanup as well" -Level INFO }
+                    'failed'       { Write-Log ("Storage Sense failed (task result 0x{0:X8}) - using Disk Cleanup instead" -f $taskResult) -Level INFO }
+                    'not-measured' { Write-Log "Storage Sense reported success but free space could not be measured - running Disk Cleanup as well" -Level INFO }
+                    'nothing-freed' { Write-Log "Storage Sense reported success but freed nothing measurable - running Disk Cleanup as well" -Level INFO }
+                    default        { Write-Log "Storage Sense verdict '$($verdict.Reason)' not recognised - running Disk Cleanup as well" -Level INFO }
+                }
+            } elseif ($waitResult.Outcome -eq 'vanished') {
+                # v2.20, corrected in review: this path used to fall into the timeout
+                # message below, so a task that disappeared after five seconds was
+                # reported as having failed to finish within 120 - a number that never
+                # happened on that run.
+                Write-Log "Storage Sense task disappeared while being watched - using Disk Cleanup instead" -Level INFO
+            } elseif ($waitResult.Outcome -eq 'unverifiable') {
+                Write-Log "Storage Sense: its previous run time could not be read, so there is no way to tell whether this run happened - using Disk Cleanup instead" -Level INFO
+            } else {
+                # WARNING, not INFO (restored in review): falling back to cleanmgr is a
+                # fine outcome, but this particular one leaves a task we asked for and
+                # could not account for, and cleanmgr is about to start alongside it. The
+                # v2.20 draft downgraded this to INFO and dropped the counter, so a run
+                # where Storage Sense hung for two minutes printed COMPLETED SUCCESSFULLY
+                # in green.
+                Write-Log "Storage Sense did not finish within $timeout seconds - using Disk Cleanup instead" -Level WARNING
+                $script:Stats.WarningsCount++
+
+                $task = @(Get-ScheduledTask @ssLookup) | Select-Object -First 1
+                if ($task -and $task.State -eq 'Running') {
+                    # The stop used to be fire-and-forget with an unconditional "stopped"
+                    # line after it (raised in review). Two cleaners deleting at once is
+                    # exactly the state the free-space accounting cannot describe, so the
+                    # claim is now made only when the task actually stopped.
+                    $task | Stop-ScheduledTask -ErrorAction SilentlyContinue
+                    $taskAfterStop = @(Get-ScheduledTask @ssLookup) | Select-Object -First 1
+                    if ($taskAfterStop -and $taskAfterStop.State -eq 'Running') {
+                        Write-Log "Storage Sense task could not be stopped and is still running - Disk Cleanup will run alongside it, so the freed figures below cover both" -Level WARNING
+                        $script:Stats.WarningsCount++
+                    } else {
+                        Write-Log "Storage Sense task stopped" -Level INFO
                     }
                 }
             }
-        }
 
-        if ($elapsed -ge $timeout) {
-            Write-Log "Storage Sense timed out after $timeout seconds" -Level WARNING
-            # Force stop the task if still running
-            $task = Get-ScheduledTask -TaskPath $ssTaskPath -TaskName $ssTaskName -ErrorAction SilentlyContinue
-            if ($task -and $task.State -eq 'Running') {
-                Stop-ScheduledTask -TaskPath $ssTaskPath -TaskName $ssTaskName -ErrorAction SilentlyContinue
-                Write-Log "Storage Sense task stopped" -Level INFO
+            # Every branch above has stated its own reason
+            $ssExplained = $true
+        }
+    }
+
+    if (-not $storageSenseDone) {
+        # Fallback to cleanmgr. Every other reason for landing here (ambiguous lookup,
+        # start failed, task failed, timed out, vanished, unverifiable) has already said
+        # so in its own words and set $ssExplained, so only the two states that produce no
+        # message of their own are reported here.
+        if (-not $ssExplained) {
+            if (-not $task) {
+                Write-Log "Storage Sense task not found, using Disk Cleanup..." -Level INFO
+            } elseif ($task.State -eq 'Disabled') {
+                Write-Log "Storage Sense task is disabled, using Disk Cleanup..." -Level INFO
             }
-            $script:Stats.WarningsCount++
-        }
-    } else {
-        # Fallback to cleanmgr
-        if ($task) {
-            Write-Log "Storage Sense task is disabled, using Disk Cleanup..." -Level INFO
-        } else {
-            Write-Log "Storage Sense task not found, using Disk Cleanup..." -Level INFO
         }
 
-        # Configure cleanup categories
-        $sageset = 9999
-        $regPath = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\VolumeCaches"
+        # Configure cleanup categories ($sageset / $regPath are set at the top of the
+        # function, because the leftover sweep needs them on every path)
 
         # Note (v2.14): "Previous Installations" removed - Windows.old deletion must go
         # through Clear-WindowsOld which asks for user confirmation.
@@ -4127,6 +4892,8 @@ function Invoke-StorageSense {
             "Windows Upgrade Log Files"
         )
 
+        # Defined before the try so the finally can always ask whether it exists
+        $cleanmgr = $null
         try {
             # Set StateFlags for cleanup categories.
             # v2.16: count what was actually armed. Previously a failed write was
@@ -4154,9 +4921,27 @@ function Invoke-StorageSense {
                 return
             }
 
-            # Run cleanmgr with progress feedback and reasonable timeout
-            $cleanmgr = Start-Process -FilePath "cleanmgr.exe" -ArgumentList "/sagerun:$sageset" `
-                -WindowStyle Hidden -PassThru
+            # Run cleanmgr with progress feedback and reasonable timeout.
+            #
+            # Raised in review, then measured: Start-Process on a missing or blocked
+            # executable leaves the variable $null, and $null.HasExited is also $null - so
+            # "-not $cleanmgr.HasExited" is TRUE and the loop below reported progress every
+            # minute for the full fifteen, then set DiskCleanupPending and warned that an
+            # elevated process was still deleting. All for a process that never started.
+            # Reachable on Server SKUs without Desktop Experience and under AppLocker/WDAC.
+            $cleanmgr = $null
+            try {
+                $cleanmgr = Start-Process -FilePath "cleanmgr.exe" -ArgumentList "/sagerun:$sageset" `
+                    -WindowStyle Hidden -PassThru -ErrorAction Stop
+            } catch {
+                $cleanmgr = $null
+            }
+
+            if (-not $cleanmgr) {
+                Write-Log "Disk Cleanup could not be started (cleanmgr.exe is missing or blocked) - it cleaned nothing" -Level WARNING
+                $script:Stats.WarningsCount++
+                return
+            }
 
             # v2.16: raised from 420s. cleanmgr regularly needs longer on a workstation
             # with a large component store, and killing it produced a warning on every
@@ -4176,10 +4961,15 @@ function Invoke-StorageSense {
             }
 
             if (-not $cleanmgr.HasExited) {
-                # Let it finish in the background instead of killing it. Not a warning
-                # either: cleanmgr simply takes longer than we are willing to wait, and
-                # killing it mid-delete was both pointless and misreported as "continuing" (v2.16)
-                Write-Log "Disk Cleanup exceeded $maxWait seconds - leaving it to finish in the background" -Level INFO
+                # Still killing it would be worse - cleanmgr keeps working after a kill and
+                # the deletion is mid-flight (v2.16). But this is not an informational
+                # event either: everything measured after this point is partial, the run
+                # is about to print a total and write its JSON while an elevated process
+                # is still deleting, and the freed bytes it goes on to reclaim are counted
+                # by nobody.
+                $script:Stats.DiskCleanupPending = $true
+                Write-Log "Disk Cleanup exceeded $maxWait seconds and is still running - it continues in the background, so the freed figures below are partial" -Level WARNING
+                $script:Stats.WarningsCount++
             } elseif ($cleanmgr.ExitCode -ne 0) {
                 # v2.16: the exit code used to be ignored entirely, so a crash one second
                 # in was still logged as a success
@@ -4193,8 +4983,19 @@ function Invoke-StorageSense {
             # v2.16: sweep every handler, not just the ones from $categories - flags left
             # by an interrupted run or by an older version of this list stayed forever
             # (four such leftovers were found on a live machine).
-            Get-ChildItem -Path $regPath -ErrorAction SilentlyContinue | ForEach-Object {
-                Remove-ItemProperty -Path $_.PSPath -Name "StateFlags$sageset" -Force -ErrorAction SilentlyContinue
+            #
+            # v2.20: but NOT while cleanmgr is still running. The timeout branch above
+            # deliberately leaves it working in the background, and this sweep then pulled
+            # its configuration out from under it. Whether cleanmgr re-reads the flags per
+            # handler or only once at startup is not something to guess at while it holds
+            # an elevated deletion loop. The flags are swept by the next run's own sweep,
+            # which is exactly the leftover case v2.16 added it for.
+            if ($cleanmgr -and -not $cleanmgr.HasExited) {
+                Write-Log "Disk Cleanup is still running - its registry configuration will be swept by the next run" -Level DETAIL
+            } else {
+                Get-ChildItem -Path $regPath -ErrorAction SilentlyContinue | ForEach-Object {
+                    Remove-ItemProperty -Path $_.PSPath -Name "StateFlags$sageset" -Force -ErrorAction SilentlyContinue
+                }
             }
         }
     }
@@ -4450,6 +5251,7 @@ function Write-ResultJson {
                 SkipDevCleanup    = [bool]$SkipDevCleanup
                 SkipDockerCleanup = [bool]$SkipDockerCleanup
                 SkipVSCleanup     = [bool]$SkipVSCleanup
+                SkipDiskCleanup   = [bool]$SkipDiskCleanup
                 DisableTelemetry  = [bool]$DisableTelemetry
             }
             TotalFreedBytes     = [long]$script:Stats.TotalFreedBytes
@@ -4462,6 +5264,13 @@ function Write-ResultJson {
             WarningsCount       = $script:Stats.WarningsCount
             ErrorsCount         = $script:Stats.ErrorsCount
             RebootRequired      = [bool]$script:Stats.RebootRequired
+            # v2.20: true when writing the log file failed at some point. The run still
+            # completed, but LogPath below points at an incomplete file - an automated
+            # consumer must not treat that log as the full record of what happened.
+            LoggingDegraded     = [bool]$script:LogWriteFailed
+            # v2.20: true when Disk Cleanup outlived its timeout and was left running.
+            # TotalFreedBytes is then a lower bound, not the final figure.
+            DiskCleanupPending  = [bool]$script:Stats.DiskCleanupPending
             # 'enabled' means cleanup figures are understated (Defender blocked some
             # deletions without reporting an error); 'unknown' means the check itself
             # failed, so the figures are unverified rather than confirmed good
@@ -4487,10 +5296,13 @@ function Write-ResultJson {
         $result | ConvertTo-Json -Depth 4 | Out-File -FilePath $Path -Encoding utf8
         Write-Log "Result JSON written: $Path" -Level INFO
     } catch {
-        # Must be loud: an automated stand reads this file, and a stale copy from the
-        # previous run would be reported as a successful fresh run
-        Write-Log "Failed to write result JSON: $_" -Level WARNING
-        $script:Stats.WarningsCount++
+        # v2.20: this comment said "must be loud" while the code raised a warning, and the
+        # exit code is decided by ErrorsCount alone - so a run that failed to produce the
+        # artefact the user explicitly asked for still exited 0 and printed "completed with
+        # warnings". The stand then reads a stale file from the previous run as a fresh
+        # result. The user asked for this file: not producing it is a failure of the run.
+        Write-Log "Failed to write result JSON: $_" -Level ERROR
+        $script:Stats.ErrorsCount++
     }
 }
 
@@ -4543,14 +5355,14 @@ function Start-WinClean {
         Remove-Item -LiteralPath $ResultJsonPath -Force -ErrorAction SilentlyContinue
     }
 
-    # v2.19: reset the per-run phase buckets and step counter. The script normally runs
-    # once per process (entry-point guarded), but dot-sourcing it and calling Start-WinClean
-    # twice in one session would otherwise accumulate phase names across runs and leave the
-    # progress counter where the last run stopped.
-    $script:Stats.PhasesCompleted = @()
-    $script:Stats.PhasesFailed    = @()
-    $script:Stats.PhasesSkipped   = @()
-    $script:Stats.CurrentStep     = 0
+    # v2.19 reset the phase buckets and the step counter here; v2.20 makes the run
+    # genuinely fresh. The partial version left freed bytes, warning/error counts,
+    # Aborted and StartTime from a previous call in the same session, so the second
+    # run's summary and JSON described both runs at once. See New-RunStats.
+    $script:Stats = New-RunStats
+    $script:ProgressActivities = @()
+    $script:InternetConnectionCache = $null
+    $script:LogWriteFailed = $false
 
     # Initialize log
     "WinClean v$($script:Version) - Started at $(Get-Date)" | Out-File -FilePath $script:LogPath -Encoding utf8
@@ -4698,7 +5510,16 @@ function Start-WinClean {
             Clear-KernelDumps
             # Neither of these reports what it freed, so measure the drive around them
             Measure-FreeSpaceGain -Category 'ComponentStore' -Operation { Invoke-DISMCleanup }
-            Measure-FreeSpaceGain -Category 'DiskCleanup' -Operation { Invoke-StorageSense }
+            # Raised in review: measuring around a step the user switched off credited it
+            # with whatever the drive happened to gain meanwhile - DISM releasing files a
+            # moment earlier is enough - and printed "DiskCleanup freed approximately
+            # 300.00 MB" for something that executed nothing. Invoke-StorageSense is still
+            # called so its registry leftovers get swept; it just is not measured.
+            if ($SkipDiskCleanup) {
+                Invoke-StorageSense
+            } else {
+                Measure-FreeSpaceGain -Category 'DiskCleanup' -Operation { Invoke-StorageSense }
+            }
             Clear-WindowsOld
         }
 
@@ -4727,8 +5548,12 @@ function Start-WinClean {
         Show-FinalStatistics
         # Release the log file handle (v2.17, p.7): a stand or the user may want to
         # move/zip the log right after the run finishes.
+        # v2.20: guarded. Dispose on a writer whose stream already failed throws, and this
+        # is the last statement of the outer finally - the exception escaped Start-WinClean
+        # and the entry point never reached its exit-code check, so a run with errors could
+        # still exit 0 (raised in review).
         if ($script:LogWriter) {
-            $script:LogWriter.Dispose()
+            try { $script:LogWriter.Dispose() } catch { }
             $script:LogWriter = $null
             $script:LogWriterPath = $null
         }

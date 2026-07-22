@@ -221,6 +221,7 @@ cd WinClean
 | `-SkipDevCleanup` | Skip developer caches (npm, pip, etc.) | `false` |
 | `-SkipDockerCleanup` | Skip Docker/WSL cleanup | `false` |
 | `-SkipVSCleanup` | Skip Visual Studio cleanup | `false` |
+| `-SkipDiskCleanup` | Skip only the Storage Sense / Disk Cleanup step, which can be the slowest | `false` |
 | `-DisableTelemetry` | Disable Windows telemetry via Group Policy | `false` |
 | `-ReportOnly` | **Dry run** - show what would be done | `false` |
 | `-LogPath` | Custom log file path | Auto |
@@ -302,7 +303,7 @@ WinClean is built to be safe to run on a working machine. The short version:
 
 ```
 ┌────────────────────────────────────────────────────────────────┐
-│                     WinClean v2.19                             │
+│                     WinClean v2.20                             │
 ├────────────────────────────────────────────────────────────────┤
 │  PREPARATION                                                   │
 │  ├─ ✓ Check Administrator Rights                               │
@@ -321,7 +322,8 @@ WinClean is built to be safe to run on a working machine. The short version:
 ├────────────────────────────────────────────────────────────────┤
 │  DEEP CLEANUP                                                  │
 │  ├─ 🔧 DISM Component Cleanup                                  │
-│  ├─ 💾 Storage Sense, or Disk Cleanup (up to 23 handlers)     │
+│  ├─ 💾 Storage Sense, then Disk Cleanup unless it proved      │
+│  │     it worked (up to 23 handlers)                          │
 │  ├─ 🚗 Driver Store (superseded packages)                     │
 │  ├─ 🧹 Stale Kernel Dumps (older than 30 days)                │
 │  └─ 📁 Windows.old Removal (prompted; 15s default = yes)       │

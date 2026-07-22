@@ -14,6 +14,208 @@ Windows Update driver listing, run-to-run delta and HTML report. See CLAUDE.md.
 
 ---
 
+## [2.20] - 2026-07-22
+
+A correctness and honesty round driven by a full audit of the code base, a third-party
+review and an independent Codex pass. No new cleanup features. Several places reported
+success while doing nothing, one path check could be bypassed, and the fast disk-cleanup
+path turned out to have been unreachable since it was written.
+
+### Security
+
+- **A junction could be used to clean a protected root.** The protected-path check
+  compared text, and `GetFullPath` does not resolve reparse points, so a link whose
+  visible path looked harmless while pointing at `Program Files` passed the guard;
+  enumerating that link then listed the target's contents. The cleanup root is now
+  resolved to its final target before the rules are applied. Measured on a live
+  filesystem: links found deeper in a tree were already safe, so only the root needed it,
+  and a link pointing somewhere harmless is still cleaned normally
+
+### Fixed
+
+- **Storage Sense was unreachable, so every run used the slow path.** The scheduled task
+  was looked up under `\Microsoft\Windows\DiskCleanup\`, where it does not exist; the real
+  one lives under `\Microsoft\Windows\DiskFootprint\`. Every run therefore fell back to
+  `cleanmgr`, which took 901 seconds of an 1101-second run on a real workstation and did
+  not finish. The task is now found by name, so the fast path is reachable at all.
+  **This does not by itself make that 901-second run fast**: on the workstation it was
+  measured on, the task is found and then fails with `0x80040154`, so the fallback still
+  runs - what removes the wait there is the new `-SkipDiskCleanup`. Two guards matter as
+  much as the lookup: a task that ran and *failed* no longer counts as success, and
+  neither does one that exits 0 without freeing anything measurable. Either would have
+  suppressed all 23 Disk Cleanup handlers while reporting success
+- **Four operations reported success while doing nothing**: `npm cache clean` (its exit
+  code was never read, so a locked cache printed "cleaned"), event logs (a total
+  enumeration failure produced "cleared (0 logs)"), privacy traces (the success line was
+  appended without checking, because `Remove-Item -ErrorAction SilentlyContinue` cannot
+  throw), and the winget source update (only job completion was checked, not its result)
+- **A failed log write was invisible.** All writer errors were swallowed, so a run could
+  continue destroying files while the log silently stopped recording. The first failure is
+  now reported once and surfaces as `LoggingDegraded` in the result JSON
+- **A failed result-JSON write exited 0.** The code raised a warning while its own comment
+  said it must be loud, and the exit code is decided by the error count alone - so a run
+  that failed to produce the file the user asked for reported success
+- **Disk Cleanup left running past its timeout was reported as an aside.** It is now a
+  warning with `DiskCleanupPending` in the result JSON: the totals printed after it are
+  partial. Its registry configuration is also no longer swept while it is still running
+- **Delivery Optimization warned on healthy systems.** The measurement covered the whole
+  folder while the supported cmdlet only removes cached content, so leftover service logs
+  read as "nothing freed". Reproduced twice on the en-US stand
+- **Browser cleanup could invent freed bytes.** The after-measurement returned 0 both for
+  "empty" and for "could not read", so a folder that became unreadable counted as fully
+  freed
+- **The restore-point frequency override could stay applied forever.** It was only
+  repaired when the child process had been killed; a child that exited normally after its
+  own restore failed had its marker cleared anyway
+- **`-SkipCleanup` was ignored by three functions when they were called directly**, which
+  contradicted the documented contract for anyone dot-sourcing the script
+- Stand tooling: `Deploy-StandRunner` ignored ssh's exit code, and `New-StandVM` accepted
+  a PowerShell installation on file existence alone, ignoring msiexec's result
+
+Found by an independent review **of the fixes above**, before release:
+
+- **A winget that cannot start was the one silent path left in that block.** Only a
+  non-zero exit code was reported. When the winget entry is a Windows Apps stub that
+  passes `Test-Path` but will not launch, the job still completes, the error is swallowed
+  and no exit code is ever set - and the guard short-circuited on exactly that null. The
+  package list was then built from stale data without a word in the log
+- **A partial event-log enumeration failure still read as success.** The check used the
+  *filtered* list, so 40 readable channels out of 510 with 470 errors printed "Event logs
+  cleared (40 logs)". The unfiltered result decides now, and channels that could not be
+  listed are reported separately from channels that failed to clear
+- **The npm cache measurement had the defect this release fixed for browsers.** Both
+  sides used the walker that answers 0 for "empty" and for "unreadable" alike, so a cache
+  that became unreadable after the clean counted as fully freed
+- **The browser measurement subtracted two different file sets.** "Before" used the raw
+  walker (inaccessible files skipped silently), "after" used the checked one (refuses to
+  answer on any error), so a real deletion could land in the "nothing freed" branch. Both
+  sides are now measured per path with the same function, and a single unmeasurable
+  folder no longer discards the delta for all thirty. A second review pass caught the
+  first attempt at this: clamping each path at zero separately would have reported 100 MB
+  when one cache shrank by 100 MB while another was recreated and grew by 80 MB, so the
+  measurable pairs are summed first and clamped once
+- **Killing the restore-point child raced its own cleanup.** `Kill` returns once
+  termination has been requested, not once the process is gone, so the repair could read
+  the creation frequency while the dying child was still writing 0 into it, see a healthy
+  value, and delete the marker - producing exactly the damage the marker exists to record.
+  The wait is bounded, so a child that outlives it keeps the marker rather than being
+  assumed dead
+- **Storage Sense re-resolved its task by name while waiting**, quietly undoing the rule
+  that refuses to guess between same-named tasks; and a task that disappeared after five
+  seconds was reported as "did not finish within 120 seconds", a number that never
+  happened
+- **A thousands separator was read as a decimal point, dividing sizes by a thousand.**
+  `"1,234 KB"` - the ordinary en-US form, and exactly what the shell returns for Recycle
+  Bin entries when the exact size property is unavailable - was read as 1.234 KB. The old
+  rule said a lone separator is always the decimal point. The obvious repair would have
+  been worse than the defect: measured on .NET, `AllowThousands` does not validate the
+  grouping shape, so parsing with the current culture reads `"1,5"` as 15 on en-US, that
+  is a tenfold over-read replacing a thousandfold under-read. The grouping shape is
+  checked first now (one to three digits, then groups of exactly three), and the culture
+  is consulted only for a string that could honestly be read either way
+- **A test file that failed to load kept CI green.** Measured on Pester 5.7.1: a parse
+  error yields `Result=Failed` and `FailedContainersCount=1` while the failed, skipped and
+  not-run counters all stay at 0 - so counting tests alone could not see an entire test
+  file going missing. Both `tools/Invoke-Tests.ps1` and the release gate now check it
+
+Found by a full pre-release review (four specialised reviewers plus a cross-engine pass),
+after the stand had already passed on both machines:
+
+- **The Storage Sense verdict crashed on every real failure code, and the test for it was
+  green because of the defect.** `LastTaskResult` is a `UInt32`; every HRESULT failure has
+  the high bit set, so `0x80040154` arrives as 2147746132 and the `[int]` cast threw. The
+  exception left `Invoke-StorageSense`, the phase was recorded as failed, and
+  `Clear-WindowsOld` never ran. The test passed the PowerShell literal `0x80040154`, which
+  the parser types as `Int32` -2147221164, so the cast succeeded there. Two reviewers found
+  this independently; the fix parses instead of casting, and the test now uses the type
+  Windows actually supplies
+- **A missing baseline counted as proof that Storage Sense had run.** When the pre-run task
+  info could not be read, `-not $LastRunBefore` was true, so the first evidence check
+  returned "finished" for a task that might never have started - and a stale success code
+  plus any unrelated free-space growth then skipped all 23 Disk Cleanup handlers. That
+  state is now its own outcome and always falls back
+- **A `cleanmgr.exe` that never started produced fifteen minutes of fabricated progress.**
+  `Start-Process` leaves `$null` when the executable is missing or blocked, and
+  `$null.HasExited` is `$null`, so the wait loop ran its full course and then reported that
+  an elevated process was still deleting in the background
+- **Two more fail-open holes in the protected-path guard.** An ancestor that could not be
+  examined was silently treated as "not a link", and exhausting the resolution bound
+  returned the partially resolved path instead of `$null`. Both let a path be judged on its
+  text, which is the bypass this release exists to close
+- **A stale comment in that same guard asserted the opposite of the code.** This is how the
+  fail-open bootstrap shipped in 2.17, and that claim reached SECURITY.md before anyone
+  checked it
+- Storage Sense also: a two-minute timeout is a warning again rather than a silent INFO,
+  "task stopped" is claimed only after checking that it stopped, an ambiguous lookup no
+  longer also says the task was not found, and an unmapped drive is treated as absent
+  rather than as unexaminable
+- **`-SkipDiskCleanup` skipped the registry sweep it promised to run, and was credited with
+  bytes it never freed** - the step was measured even when switched off, so unrelated
+  free-space growth was reported as `DiskCleanup freed approximately N MB`
+- **A release note pasted into the wrong help block satisfied the release gate on its own.**
+  The gate matched `.RELEASENOTES` against the whole file, so the real entry could have been
+  deleted while the check stayed green. It is scoped to the `.RELEASENOTES` section now, and
+  a test pins that the note exists in exactly one place
+
+A fourth review round, on the fixes above:
+
+- **The repair for the missing baseline gave up too early.** Returning "unverifiable" after
+  ten seconds left a slow-starting task free to begin afterwards, with Disk Cleanup already
+  running alongside it. The whole wait window is used to watch now, and being seen running
+  is accepted as evidence on its own, because it needs nothing to compare against
+- **The ancestor walk climbed past the root of a UNC share**, where `Get-Item` cannot
+  succeed, so the newly fail-closed rule refused every UNC cleanup root. The walk stops at
+  the volume root
+- **Scoping the release-note check to the PSScriptInfo block was still too wide** - a
+  matching line under any other field satisfied it. It reads the `.RELEASENOTES` section
+
+### Added
+
+- **`-SkipDiskCleanup`** skips only the Storage Sense / Disk Cleanup step. Until now the
+  only way to avoid the slowest step was `-SkipCleanup`, which suppresses every category
+- Result JSON fields `LoggingDegraded` and `DiskCleanupPending`
+- `tools/Invoke-Tests.ps1`: one definition of the supported Pester range, the test path and
+  the "a skipped test fails the run" rule, used by both CI and the release gate
+
+### Changed
+
+- **The release gate no longer claims things it did not verify.** "In sync with origin" was
+  read from the local remote-tracking ref without ever fetching, and the Pester version was
+  unbounded while CI pinned an upper bound - with Pester 6 published, one `Install-Module`
+  would have split the two
+
+### Documentation
+
+- `docs/troubleshooting.md` explains why the same application can be offered for update on
+  every run, which is a question WinClean will be blamed for and cannot fix in code. Two
+  causes, both reproduced on a live machine: `winget` refuses to manage user-scope packages
+  from an elevated process (and WinClean requires elevation), and an installer that records
+  a stale version in its own uninstall entry makes the offer permanent, because that entry
+  is what `winget` compares against rather than the installed executable. Includes the
+  read-only diagnosis and both ways out
+
+### Tests
+
+- 376 to 452 automated tests. New coverage: the junction guard (a link to a protected root
+  is refused, a harmless one is not), a fresh per-run statistics object, the registry value
+  counter, and a mocked event-log enumeration failure
+- **The Storage Sense rewrite had no tests at all** - the largest gap in this release, and
+  the one place where a defect ("exit code 0 proves a cleanup happened") had already been
+  found. Its three decisions are now separate functions with 15 behavioural tests: which
+  task to use and when to refuse to guess, whether a run counts as a cleanup, and how the
+  wait ends. The wait no longer needs a scheduler or two real minutes to be tested
+- Three deliberate mutations were used to confirm the new tests can fail: removing the
+  free-space requirement, collapsing "task vanished" into "timed out", and letting the
+  selector pick the first of several same-named tasks. All three were caught, and the file
+  was restored by hash after each
+- Two logging tests could not fail: their only assertion sat inside `if (Test-Path $log)`,
+  so a missing log file - the very defect they exist to catch - made them pass. Both were
+  verified by mutation after the fix
+- The version tests compared against the regex `2\.1[3-9]`, which stopped matching at 2.20
+  and would have failed on the bump itself
+
+---
+
 ## [2.19] - 2026-07-22
 
 A contract-correctness and documentation round, following a second external review (this time

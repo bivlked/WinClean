@@ -80,36 +80,19 @@ jobs:
         shell: pwsh
         run: |
           Set-PSRepository PSGallery -InstallationPolicy Trusted
-          # Upper bound: Pester 6 will change semantics, and it must not arrive silently
-          Install-Module Pester -Force -Scope CurrentUser -MinimumVersion 5.0 -MaximumVersion 5.99.99
+
+          # The supported range lives in tools/Invoke-Tests.ps1, which the release gate
+          # also runs. Repeating the bound here is how CI and the gate drifted apart on
+          # the analyzer, so ask the script which range it will accept.
+          $range = (./tools/Invoke-Tests.ps1 -RequiredPesterRange) -split ' '
+          Install-Module Pester -Force -Scope CurrentUser -MinimumVersion $range[0] -MaximumVersion $range[1]
 
       - name: Run Pester Tests
         shell: pwsh
         run: |
-          $config = New-PesterConfiguration
-          $config.Run.Path = "./tests"
-          $config.Run.PassThru = $true
-          $config.Output.Verbosity = "Detailed"
-          $config.TestResult.Enabled = $true
-          $config.TestResult.OutputFormat = "NUnitXml"
-          $config.TestResult.OutputPath = "./test-results.xml"
-
-          $result = Invoke-Pester -Configuration $config
-
-          # v2.17: skipped tests fail the build. The integration suite silently skips
-          # itself without administrator rights, and a green run that verified nothing
-          # is worse than a red one. GitHub Windows runners are elevated, so any skip
-          # here means something is actually wrong.
-          $notRun = $result.SkippedCount + $result.NotRunCount
-          if ($notRun -gt 0) {
-            Write-Host "::error::$notRun test(s) did not run - integration coverage is missing"
-            exit 1
-          }
-          if ($result.FailedCount -gt 0) {
-            Write-Host "::error::$($result.FailedCount) test(s) failed"
-            exit 1
-          }
-          Write-Host "::notice::All $($result.PassedCount) tests passed"
+          # Same script, same version bound and same "a skipped test fails the run" rule
+          # that tools/Invoke-ReleaseCheck.ps1 applies locally.
+          ./tools/Invoke-Tests.ps1 -FailOnProblem -ResultPath ./test-results.xml
 
       - name: Upload Test Results
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

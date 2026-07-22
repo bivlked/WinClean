@@ -26,6 +26,8 @@ This page documents every field, gives a full sample, and explains how to consum
 | `WarningsCount` | number | Count of warnings raised during the run. Warnings are the silent-failure alarm; treat a non-zero value as something to inspect. |
 | `ErrorsCount` | number | Count of errors raised during the run. A healthy run reports `0`. |
 | `RebootRequired` | bool | `true` when a change (a Windows update, an app update finishing on reboot) needs a restart to take effect. |
+| `LoggingDegraded` | bool | v2.20. `true` when writing the log file failed at some point during the run. The run itself still completed, but `LogPath` points at an incomplete file: do not read that log as the full record of what happened. |
+| `DiskCleanupPending` | bool | v2.20. `true` when Disk Cleanup outlived its timeout and was left running in the background. `TotalFreedBytes` is then a lower bound rather than the final figure, because deletion continued after this file was written. |
 | `ControlledFolderAccess` | string | Tri-state, see below. Reflects whether Defender's Controlled Folder Access may have silently blocked deletions. |
 | `Aborted` | string or null | `null` unless the run stopped early for a known reason (currently only a declined pending reboot, `"PendingRebootDeclined"`, sets it). When set, the phase arrays below are incomplete by design. Note `null` does not by itself prove every phase ran - see the invariant note below. |
 | `PhasesCompleted` | array of string | Phases whose action ran to completion without an uncaught exception. |
@@ -45,6 +47,7 @@ An object of booleans mirroring the run's switches:
 | `SkipDevCleanup` | bool |
 | `SkipDockerCleanup` | bool |
 | `SkipVSCleanup` | bool |
+| `SkipDiskCleanup` | bool |
 | `DisableTelemetry` | bool |
 
 `-ReportOnly`, `-LogPath` and `-ResultJsonPath` are not repeated here (`ReportOnly` and `LogPath` are top-level fields; the JSON path is the file you are reading).
@@ -90,7 +93,7 @@ VisualStudioCleanup, DeepSystemCleanup, DiskSpaceReport, Telemetry
 
 ```json
 {
-  "Version": "2.19",
+  "Version": "2.20",
   "Timestamp": "2026-07-21T03:15:42.1234567+00:00",
   "DurationSeconds": 196.4,
   "ReportOnly": false,
@@ -101,6 +104,7 @@ VisualStudioCleanup, DeepSystemCleanup, DiskSpaceReport, Telemetry
     "SkipDevCleanup": false,
     "SkipDockerCleanup": false,
     "SkipVSCleanup": false,
+    "SkipDiskCleanup": false,
     "DisableTelemetry": false
   },
   "TotalFreedBytes": 3201171456,
@@ -117,6 +121,8 @@ VisualStudioCleanup, DeepSystemCleanup, DiskSpaceReport, Telemetry
   "ErrorsCount": 0,
   "RebootRequired": false,
   "ControlledFolderAccess": "disabled",
+  "LoggingDegraded": false,
+  "DiskCleanupPending": false,
   "Aborted": null,
   "PhasesCompleted": [
     "Preparation",
@@ -182,4 +188,4 @@ The Proxmox stand (`tools/proxmox/Invoke-StandTest.ps1`) reads this JSON and fai
 - `ControlledFolderAccess` is not `"unknown"`.
 - In report modes (`Report`, `ReportNoCleanup`): `ReportOnly` is `true` and `TotalFreedBytes == 0` (a preview that frees bytes is a regression).
 - In full modes: `TotalFreedBytes` is well above a trivial threshold.
-- The phase arrays are disjoint, their union is the nine known phases, and any skip flag in `Parameters` is reflected in `PhasesSkipped` (for example, the `ReportNoCleanup` mode sets `-SkipCleanup` and expects the whole cleanup group to be skipped). These phase checks apply only to result JSON produced by 2.19 or newer: the nightly also runs a pass against the latest published release, which can predate the schema, and asserting it there would fail the run for version skew rather than for a defect. When they are skipped, the harness says so.
+- The phase arrays are disjoint, their union is the nine known phases, and a skip flag that gates a whole phase is reflected in `PhasesSkipped` (for example, the `ReportNoCleanup` mode sets `-SkipCleanup` and expects the whole cleanup group to be skipped). `-SkipDiskCleanup` is the exception and deliberately so: it suppresses one step inside `DeepSystemCleanup`, not the phase, so that phase still lands in `PhasesCompleted`. These phase checks apply only to result JSON produced by 2.19 or newer: the nightly also runs a pass against the latest published release, which can predate the schema, and asserting it there would fail the run for version skew rather than for a defect. When they are skipped, the harness says so.

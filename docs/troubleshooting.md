@@ -27,6 +27,57 @@ If `winget` is not installed, the application-update phase is skipped and the ru
 
 ---
 
+## The same application is offered for update on every single run
+
+WinClean asks `winget` what can be upgraded and then asks it to upgrade. When the same package keeps appearing run after run, the loop is almost always outside WinClean. There are two distinct causes, and they need different answers.
+
+### Cause 1: the package is installed for the current user, and WinClean runs elevated
+
+WinClean requires administrator rights, and `winget` refuses to manage **user-scope** packages from an elevated process:
+
+```
+The package installed for user scope cannot be uninstalled when running with administrator privileges.
+```
+
+An upgrade replaces the installed package, so it hits the same wall. Such packages will be offered, fail, and be offered again on the next run, forever. WinClean reports the failure honestly, but only as a warning that some upgrades failed: `winget upgrade --all` runs as one batch and returns a single exit code, so the message cannot name the package. It cannot fix it either, because a run cannot drop its own privileges half way through.
+
+**Fix:** upgrade those packages yourself from a **normal, non-elevated** PowerShell window:
+
+```powershell
+winget upgrade --id <PackageId>
+```
+
+### Cause 2: the package's own installer records the wrong version
+
+`winget` decides whether an upgrade exists by reading `DisplayVersion` from the package's uninstall entry in the registry, **not** by looking at the installed executable. If an installer writes fresh files but records a stale version in its own entry, the loop is permanent: the registry says 1.14.1, winget offers 1.14.7, the installer places 1.14.7 and writes 1.14.1 again.
+
+**Diagnosis** (read-only, run in any PowerShell window):
+
+```powershell
+# what winget reads
+Get-ChildItem 'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall',
+              'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall',
+              'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall' |
+    ForEach-Object { Get-ItemProperty $_.PSPath } |
+    Where-Object DisplayName -like '*<AppName>*' |
+    Select-Object DisplayName, DisplayVersion, InstallLocation
+
+# what is actually installed
+(Get-Item '<InstallLocation>\<App>.exe').VersionInfo.FileVersion
+```
+
+If the two disagree, the installer is at fault, not winget and not WinClean. Report it to the application's vendor, and meanwhile choose one of:
+
+- correct the recorded version so winget stops offering it, and let a genuinely newer release be offered normally:
+  ```powershell
+  Set-ItemProperty '<the uninstall key above>' -Name DisplayVersion -Value '<the real version>'
+  ```
+- or silence the package entirely with `winget pin add --id <PackageId>`, accepting that real updates are silenced too.
+
+Either way the summary line stays truthful: it counts updates **offered**, not installed. See [result-json.md](result-json.md) for the `AppUpdatesOffered` field.
+
+---
+
 ## Windows updates are skipped (PowerShell Gallery unreachable)
 
 WinClean installs the `PSWindowsUpdate` module from the PowerShell Gallery. If the Gallery is unreachable (offline, proxy, TLS), the module cannot install and the Windows-update phase is skipped. The rest of the run continues normally.
@@ -97,6 +148,7 @@ Then check the log file to see exactly what was changed.
 
 - **Очистка почти ничего не освобождает:** включён Controlled Folder Access - добавьте `pwsh.exe` в список разрешённых приложений. В JSON поле `ControlledFolderAccess` = `enabled`.
 - **Обновления приложений пропущены:** не найден `winget` - установите App Installer из Microsoft Store.
+- **Одно и то же приложение предлагается к обновлению каждый прогон:** причина вне WinClean. Либо пакет установлен для пользователя, а WinClean работает с правами администратора, и `winget` в повышенном контексте такие пакеты трогать отказывается - обновите его сами в обычном окне PowerShell (`winget upgrade --id <PackageId>`). Либо установщик пакета кладёт свежие файлы, но пишет в свою же запись в реестре старую версию, а `winget` смотрит именно туда: сверьте `DisplayVersion` из ветки `Uninstall` с `FileVersion` установленного exe.
 - **Обновления Windows пропущены:** недоступен PowerShell Gallery - модуль `PSWindowsUpdate` не ставится, прогон продолжается.
 - **Нужны права администратора и PowerShell 7.1+:** откройте `Win+X` -> Терминал (Администратор), вкладка PowerShell 7.
 - **One-liner не запускается:** это fail-closed - при отсутствии ассета или несовпадении SHA256 запуск отменяется намеренно; скачайте вручную со страницы Releases.

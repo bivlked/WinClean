@@ -433,12 +433,30 @@ Describe "v2.15: positional binding hardening" -Tag "Fix", "V215" {
 #region Script Version Verification
 
 Describe "Script Version" -Tag "Version" {
-    It "Version is 2.13 or higher" {
-        $scriptContent | Should -Match '\$script:Version\s*=\s*[''"]2\.1[3-9]'
+    <#
+    v2.20: these used to be the regex '2\.1[3-9]', which stopped matching the moment the
+    version crossed 2.19 - the tests failed on the version bump itself rather than on any
+    defect. Compare versions as versions, and check the invariant that actually matters:
+    the two places agree with each other.
+    #>
+    BeforeAll {
+        $script:declaredVersion = if ($scriptContent -match '(?m)^\$script:Version\s*=\s*"([\d.]+)"') { $Matches[1] } else { $null }
+        $script:scriptInfoVersion = if ($scriptContent -match '(?m)^\.VERSION\s+([\d.]+)\s*$') { $Matches[1] } else { $null }
     }
 
-    It "PSScriptInfo version matches" {
-        $scriptContent | Should -Match '\.VERSION\s+2\.1[3-9]'
+    It "Declares a parseable version" {
+        $script:declaredVersion | Should -Not -BeNullOrEmpty
+        { [version]$script:declaredVersion } | Should -Not -Throw
+    }
+
+    It "Is 2.13 or higher" {
+        [version]$script:declaredVersion | Should -BeGreaterOrEqual ([version]'2.13')
+    }
+
+    It "PSScriptInfo carries the same version as `$script:Version" {
+        # PSGallery publishes from PSScriptInfo while the banner and the update check read
+        # $script:Version - a mismatch ships a package that lies about its own version
+        $script:scriptInfoVersion | Should -Be $script:declaredVersion
     }
 }
 
@@ -632,13 +650,27 @@ Describe "v2.16: Disk Cleanup timeout" -Tag "Fix", "V216" {
         $scriptContent | Should -Match '\$maxWait = 900'
     }
 
-    It "Exceeding the wait is not counted as a warning" {
-        $scriptContent | Should -Match 'leaving it to finish in the background'
+    It "Exceeding the wait is reported as a warning (changed in v2.20)" {
+        # v2.16 logged this at INFO because killing cleanmgr was worse than waiting, and
+        # that part still holds. But the consequence was never stated: everything measured
+        # after this point is partial, and the run prints its total and writes its JSON
+        # while an elevated process is still deleting. Silence made a partial result look
+        # like a final one.
+        $body = Get-FunctionBody -Name 'Invoke-StorageSense'
+        $body | Should -Match 'still running - it continues in the background'
+        $body | Should -Match '\$script:Stats\.DiskCleanupPending = \$true'
     }
 
     It "cleanmgr is not killed on timeout" {
         # Killing it mid-delete achieved nothing and contradicted the log message
         $scriptContent | Should -Not -Match '\$cleanmgr \| Stop-Process'
+    }
+
+    It "Registry configuration is not pulled from under a still-running cleanmgr (v2.20)" {
+        # The finally block swept StateFlags immediately after deciding to let cleanmgr
+        # keep working, which removed the configuration it was running on
+        $body = Get-FunctionBody -Name 'Invoke-StorageSense'
+        $body | Should -Match 'if \(\$cleanmgr -and -not \$cleanmgr\.HasExited\)'
     }
 }
 
@@ -788,9 +820,12 @@ Describe "v2.16: silent failures are reported" -Tag "Fix", "V216", "SilentFailur
         $scriptContent | Should -Match '(?s)Winget source update timed out[^\r\n]*\r?\n\s*\$script:Stats\.WarningsCount\+\+'
     }
 
-    It "Result JSON write failure counts as a warning" {
-        # An automated stand would otherwise read the previous run's file as fresh
-        $scriptContent | Should -Match '(?s)Failed to write result JSON[^\r\n]*\r?\n\s*\$script:Stats\.WarningsCount\+\+'
+    It "Result JSON write failure counts as an error, not a warning (v2.20)" {
+        # An automated stand would otherwise read the previous run's file as fresh.
+        # Changed deliberately in v2.20: the exit code is decided by ErrorsCount alone,
+        # so as a warning this failure still exited 0 - the run reported success while
+        # the artefact the user explicitly requested was missing.
+        $scriptContent | Should -Match '(?s)Failed to write result JSON[^\r\n]*\r?\n\s*\$script:Stats\.ErrorsCount\+\+'
     }
 
     It "Downloaded updates are not counted as installed" {
@@ -1066,6 +1101,329 @@ Describe "v2.19: get.ps1 forwards exactly WinClean's parameter set" -Tag "Fix", 
         $allWc  = @($script:wcSwitch + $script:wcValue | Sort-Object)
         $allGet = @($script:getSwitch + $script:getValue | Sort-Object)
         ($allGet -join ',') | Should -Be ($allWc -join ',')
+    }
+}
+
+#endregion
+
+#region V220: silent failures that reported success
+
+Describe "v2.20: an operation that did nothing does not report success" -Tag "Fix", "V220" {
+
+    Context "Event log enumeration failure" {
+        <#
+        Behavioural, not a grep: Get-WinEvent is mocked to fail the way a stopped Event Log
+        service fails. The old code then had an empty list, zero failed clears, and took the
+        success branch - "Event logs cleared (0 logs)" while nothing was touched. Nothing is
+        actually cleared here either, because the loop never has a channel to run on.
+        #>
+        It "Warns instead of claiming success when no channel can be listed" {
+            Mock Get-WinEvent {
+                Write-Error 'The Event Log service is unavailable' -ErrorAction SilentlyContinue
+                @()
+            }
+
+            # Prove the mock is in effect BEFORE the product is allowed to touch anything.
+            # If it ever stopped intercepting (a Pester upgrade, a scoping change, the
+            # product switching to another API), the real enumeration would return the real
+            # channels and this test would clear the developer's own event logs for real -
+            # and only fail afterwards (raised in review).
+            @(Get-WinEvent -ListLog *).Count | Should -Be 0 -Because 'the mock must intercept before Clear-EventLogs runs'
+
+            $warningsBefore = $script:Stats.WarningsCount
+            Clear-EventLogs
+            $script:Stats.WarningsCount | Should -BeGreaterThan $warningsBefore
+        }
+    }
+
+    Context "npm exit code" {
+        # npm fails without throwing (EPERM on a locked cache), so the native exit code is
+        # the only signal. Scoped to the function body: a match anywhere in the file would
+        # stay green if this handling were deleted.
+        It "Captures the npm exit code and uses it" {
+            $body = Get-FunctionBody -Name 'Clear-DeveloperCaches'
+            $body | Should -Match '\$npmExit\s*=\s*\$LASTEXITCODE'
+            $body | Should -Match '\$npmExit\s*-ne\s*0'
+        }
+
+        It "No longer reports a bare success when nothing was freed" {
+            $body = Get-FunctionBody -Name 'Clear-DeveloperCaches'
+            $body | Should -Not -Match 'npm cache cleaned \(via npm\)'
+        }
+    }
+
+    Context "winget source update exit code" {
+        It "Reads the source-update exit code, not just job completion" {
+            $body = Get-FunctionBody -Name 'Update-Applications'
+            $body | Should -Match 'Winget source update failed'
+        }
+    }
+
+    Context "Per-run state" {
+        It "Start-WinClean builds a fresh stats object instead of patching three fields" {
+            $body = Get-FunctionBody -Name 'Start-WinClean'
+            $body | Should -Match '\$script:Stats\s*=\s*New-RunStats'
+            $body | Should -Match '\$script:InternetConnectionCache\s*=\s*\$null'
+        }
+    }
+
+    Context "Logging failure is visible" {
+        It "Latches the first log write failure instead of swallowing every one" {
+            $body = Get-FunctionBody -Name 'Write-Log'
+            $body | Should -Match '\$script:LogWriteFailed'
+            # Write-Log must not report its own failure through Write-Log
+            $body | Should -Match 'Write-Host'
+        }
+
+        It "Surfaces it in the result JSON so a consumer knows the log is incomplete" {
+            $body = Get-FunctionBody -Name 'Write-ResultJson'
+            $body | Should -Match 'LoggingDegraded'
+        }
+    }
+
+    Context "Privacy traces are confirmed, not assumed" {
+        It "Compares the value count before and after instead of appending unconditionally" {
+            $body = Get-FunctionBody -Name 'Clear-PrivacyTraces'
+            $body | Should -Match 'Get-RegistryValueCount'
+            # The old shape: success text appended right after a SilentlyContinue delete
+            $body | Should -Match '\$after\s*-eq\s*0'
+        }
+    }
+}
+
+#endregion
+
+#region V220R: findings from the pre-release review of v2.20
+
+Describe "v2.20 review: measurements and failures answer honestly" -Tag "Fix", "V220R" {
+    <#
+    These cover the defects an independent review found in the v2.20 fixes themselves.
+    Behavioural coverage for the Storage Sense decisions lives in Helpers.Tests.ps1
+    (Select-StorageSenseTask / Get-StorageSenseVerdict / Wait-StorageSenseTask); what is
+    left here is code that cannot be reached without a real scheduler, browser or winget.
+    #>
+
+    Context "Browser caches: both sides of the subtraction describe the same files" {
+        It "Does not measure 'before' with the raw walker and 'after' with the checked one" {
+            $body = Get-FunctionBody -Name 'Clear-BrowserCaches'
+            # Get-FolderSize skips inaccessible files silently; Get-FolderSizeChecked
+            # refuses to answer at all. Mixing them subtracted two different file sets.
+            $body | Should -Not -Match 'sizeBefore\s*=.*Get-FolderSize\s'
+        }
+
+        It "Pairs the measurements per path instead of discarding the whole delta" {
+            $body = Get-FunctionBody -Name 'Clear-BrowserCaches'
+            $body | Should -Match '\$beforeMeasurements'
+            $body | Should -Match '\$afterUnmeasured\+\+'
+        }
+    }
+
+    Context "npm cache: an unreadable cache is not an emptied one" {
+        It "Measures both sides with the checked variant" {
+            $body = Get-FunctionBody -Name 'Clear-DeveloperCaches'
+            $body | Should -Match '\$sizeBefore = Get-FolderSizeChecked'
+            $body | Should -Match '\$sizeAfter = Get-FolderSizeChecked'
+        }
+
+        It "Says so instead of calling it empty when the size is unknown" {
+            $body = Get-FunctionBody -Name 'Clear-DeveloperCaches'
+            $body | Should -Match '\$npmMeasured'
+        }
+    }
+
+    Context "Event logs: a partial enumeration failure is not a success" {
+        It "Decides on the unfiltered channel list" {
+            $body = Get-FunctionBody -Name 'Clear-EventLogs'
+            $body | Should -Match '\$allLogs\.Count -eq 0'
+            # The old discriminator read the FILTERED list, so 40 readable channels out of
+            # 510 with 470 errors produced a plain success line
+            $body | Should -Not -Match 'if \(-not \$logs -and \$enumErrors\)'
+        }
+
+        It "Reports channels that could not be listed separately from clearing failures" {
+            $body = Get-FunctionBody -Name 'Clear-EventLogs'
+            $body | Should -Match '\$enumErrorCount'
+        }
+    }
+
+    Context "winget: an unusable executable is reported, not passed over" {
+        It "Treats a missing exit code as a failure rather than short-circuiting on null" {
+            $body = Get-FunctionBody -Name 'Update-Applications'
+            $body | Should -Match '\[int\]::TryParse'
+            $body | Should -Match '\$jobState'
+            # The old guard: a null exit code silently satisfied it
+            $body | Should -Not -Match '0 -ne \[int\]\$sourceExit'
+        }
+    }
+
+    Context "Restore point: the killed child is gone before the registry is judged" {
+        It "Waits for the process to actually exit after Kill" {
+            $body = Get-FunctionBody -Name 'New-SystemRestorePoint'
+            # Ordering, not proximity: a distance-bounded regex would break the next time
+            # the comment between the two lines grows.
+            $killAt = $body.IndexOf('Kill($true)')
+            $waitAt = $body.IndexOf('WaitForExit(5000)')
+            $killAt | Should -BeGreaterOrEqual 0
+            $waitAt | Should -BeGreaterThan $killAt
+        }
+    }
+
+    Context "Storage Sense: the task is pinned and the decisions are delegated" {
+        It "Looks the task up by name alone exactly once - the initial discovery" {
+            $body = Get-FunctionBody -Name 'Invoke-StorageSense'
+            $byNameOnly = [regex]::Matches($body, 'Get-ScheduledTask -TaskName \$ssTaskName').Count
+            $byNameOnly | Should -Be 1
+            # Every later lookup goes through the pinned parameter set
+            [regex]::Matches($body, 'Get-ScheduledTask @ssLookup').Count | Should -BeGreaterThan 1
+        }
+
+        It "Never passes a null TaskPath, which throws a binding error -ErrorAction cannot suppress" {
+            $body = Get-FunctionBody -Name 'Invoke-StorageSense'
+            $body | Should -Match "if \(\`$ssTaskPath\) \{ \`$ssLookup\['TaskPath'\] = \`$ssTaskPath \}"
+        }
+
+        It "Uses the helpers that carry the tested rules" {
+            $body = Get-FunctionBody -Name 'Invoke-StorageSense'
+            $body | Should -Match 'Select-StorageSenseTask'
+            $body | Should -Match 'Get-StorageSenseVerdict'
+            $body | Should -Match 'Wait-StorageSenseTask'
+        }
+
+        It "Distinguishes a task that disappeared from one that ran out of time" {
+            $body = Get-FunctionBody -Name 'Invoke-StorageSense'
+            $body | Should -Match "'vanished'"
+        }
+    }
+
+    Context "A test file that fails to load cannot slip past green" {
+        It "Invoke-Tests fails the run on a container that never produced tests" {
+            # Measured on Pester 5.7.1: a parse error gives Result=Failed and
+            # FailedContainersCount=1 while Failed/Skipped/NotRun are all 0
+            $text = Get-Content (Join-Path $PSScriptRoot '..' 'tools' 'Invoke-Tests.ps1') -Raw
+            $text | Should -Match 'FailedContainersCount'
+            $text | Should -Match '\$failedContainers -gt 0'
+        }
+
+        It "The release gate applies the same rule as CI" {
+            $text = Get-Content (Join-Path $PSScriptRoot '..' 'tools' 'Invoke-ReleaseCheck.ps1') -Raw
+            $text | Should -Match 'FailedContainersCount'
+        }
+    }
+}
+
+#endregion
+
+#region V220R2: second review round, before release
+
+Describe "v2.20 pre-release review: fixes to the fixes" -Tag "Fix", "V220R2" {
+    <#
+    Five reviewers (four specialised agents plus a cross-engine pass) went over this
+    release. The behavioural coverage for what they found lives in Helpers.Tests.ps1;
+    what remains here is code that needs a scheduler, a missing cleanmgr.exe or a
+    registry hive to reach.
+    #>
+
+    Context "Storage Sense: a step that did not happen cannot look like one that did" {
+        It "Refuses to wait on a process that never started" {
+            $body = Get-FunctionBody -Name 'Invoke-StorageSense'
+            # Measured: Start-Process on a missing exe leaves $null, and $null.HasExited is
+            # $null, so '-not $cleanmgr.HasExited' is TRUE - the loop reported progress for
+            # the full fifteen minutes and then set DiskCleanupPending for a process that
+            # did not exist.
+            $body | Should -Match 'if \(-not \$cleanmgr\) \{'
+            $startAt = $body.IndexOf('Start-Process -FilePath "cleanmgr.exe"')
+            $guardAt = $body.IndexOf('if (-not $cleanmgr) {')
+            $startAt | Should -BeGreaterOrEqual 0
+            $guardAt | Should -BeGreaterThan $startAt
+        }
+
+        It "Claims the task stopped only after checking that it stopped" {
+            $body = Get-FunctionBody -Name 'Invoke-StorageSense'
+            $body | Should -Match '\$taskAfterStop'
+            # The unconditional claim must be gone: the success line has to sit in an else
+            $body | Should -Match 'Stop-ScheduledTask[\s\S]{0,400}?\$taskAfterStop'
+        }
+
+        It "Counts a two-minute timeout as a warning again" {
+            $body = Get-FunctionBody -Name 'Invoke-StorageSense'
+            $body | Should -Match 'did not finish within \$timeout seconds[^\n]*-Level WARNING'
+        }
+
+        It "Does not contradict itself about whether the task was found" {
+            $body = Get-FunctionBody -Name 'Invoke-StorageSense'
+            # An ambiguous lookup used to log "2 tasks with that name" and then, two lines
+            # later, "task not found"
+            $body | Should -Match '\$ssExplained'
+            $body | Should -Match 'if \(-not \$ssExplained\)'
+        }
+
+        It "Sweeps the registry leftovers before honouring -SkipDiskCleanup" {
+            $body = Get-FunctionBody -Name 'Invoke-StorageSense'
+            $sweepAt = $body.IndexOf('Remove-ItemProperty -Path $_.PSPath')
+            $skipAt = $body.IndexOf('if ($SkipDiskCleanup) {')
+            $sweepAt | Should -BeGreaterOrEqual 0
+            $skipAt | Should -BeGreaterThan $sweepAt
+        }
+
+        It "Does not measure free space around a step the user switched off" {
+            $body = Get-FunctionBody -Name 'Start-WinClean'
+            # Bracketing a no-op with two drive reads credited DiskCleanup with whatever
+            # the drive gained meanwhile
+            $body | Should -Match 'if \(\$SkipDiskCleanup\) \{\s*\r?\n\s*Invoke-StorageSense'
+        }
+    }
+
+    Context "Link resolution fails closed on every unknown" {
+        It "Returns null when the resolution bound is exhausted" {
+            $body = Get-FunctionBody -Name 'Resolve-PathThroughLinks'
+            # Falling out of the bounded loop means "could not resolve", and the caller
+            # only fails closed on $null
+            $body | Should -Match 'if \(-not \$changed\) \{ return \$current \}'
+            $body.TrimEnd() | Should -Match 'return \$null\s*\}$'
+        }
+
+        It "Returns null when an ancestor cannot be examined" {
+            $body = Get-FunctionBody -Name 'Resolve-PathThroughLinks'
+            $body | Should -Match 'catch \{ return \$null \}'
+        }
+    }
+
+    Context "The release note exists in exactly one place" {
+        It "Appears exactly once inside PSScriptInfo, and its text is not duplicated outside" {
+            # A version bump pasted the whole v2.20 release-note sentence into
+            # Invoke-Phase's comment-based help, and that stray copy satisfied the release
+            # gate's .RELEASENOTES check on its own.
+            # Note the count is taken INSIDE the block: "vX.Y:" also opens legitimate prose
+            # in other help blocks, so a whole-file count would forbid ordinary comments.
+            $version = if ($scriptContent -match '(?m)^\$script:Version\s*=\s*"([\d.]+)"') { $Matches[1] } else { $null }
+            $version | Should -Not -BeNullOrEmpty
+
+            $psScriptInfo = if ($scriptContent -match '(?s)<#PSScriptInfo(.*?)#>') { $Matches[1] } else { '' }
+            $psScriptInfo | Should -Not -BeNullOrEmpty
+            ([regex]::Matches($psScriptInfo, "(?m)^\s*v$([regex]::Escape($version)):")).Count | Should -Be 1
+
+            # And the sentence itself belongs to that one place only
+            $noteLine = ([regex]::Match($psScriptInfo, "(?m)^\s*v$([regex]::Escape($version)):.*$")).Value.Trim()
+            $noteLine.Length | Should -BeGreaterThan 40
+            ([regex]::Matches($scriptContent, [regex]::Escape($noteLine))).Count | Should -Be 1
+        }
+
+        It "The gate looks for it only inside the .RELEASENOTES section" {
+            # Scoping to the whole PSScriptInfo block was still too wide: a "vX.Y:" line
+            # under any other field satisfied it while .RELEASENOTES was empty
+            $gate = Get-Content (Join-Path $PSScriptRoot '..' 'tools' 'Invoke-ReleaseCheck.ps1') -Raw
+            $gate | Should -Match '\$releaseNotes'
+            $gate | Should -Match "What = '\.RELEASENOTES first line'; Ok = \`$releaseNotes"
+            $gate | Should -Not -Match "What = '\.RELEASENOTES first line'; Ok = \`$scriptText"
+        }
+
+        It "Resolve-PathThroughLinks stops the ancestor walk at the volume root" {
+            # The walk climbed past the root of a UNC share, Get-Item on \\server failed,
+            # and the fail-closed rule then refused every UNC cleanup root
+            $body = Get-FunctionBody -Name 'Resolve-PathThroughLinks'
+            $body | Should -Match 'GetPathRoot'
+            $body | Should -Match '\$parent\.Length -lt \$rootPath\.Length'
+        }
     }
 }
 

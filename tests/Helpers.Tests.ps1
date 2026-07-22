@@ -187,6 +187,64 @@ Describe "ConvertFrom-HumanReadableSize" -Tag "Unit", "Helper" {
             ConvertFrom-HumanReadableSize -SizeString $SizeString | Should -Be $Expected
         }
 
+        It "Reads the en-US thousands form instead of dividing it by a thousand (v2.20)" {
+            # The defect: a lone separator was always taken for the decimal point, so the
+            # ordinary "1,234 KB" from an en-US shell was read as 1.234 KB
+            $enUS = [cultureinfo]::GetCultureInfo('en-US')
+            ConvertFrom-HumanReadableSize -SizeString "1,234 KB" -Culture $enUS | Should -Be 1263616
+        }
+
+        It "Still reads the same string as a decimal where the culture says so" {
+            # ru-RU writes 1.234 as "1,234" and groups thousands with a no-break space,
+            # so the identical text means something else there
+            $ruRU = [cultureinfo]::GetCultureInfo('ru-RU')
+            ConvertFrom-HumanReadableSize -SizeString "1,234 KB" -Culture $ruRU | Should -Be 1264
+        }
+
+        It "Does not let the culture override a shape that cannot be a grouping" {
+            # Guards the repair that would have been worse than the defect: .NET's
+            # AllowThousands does not validate grouping, so a culture-first parse reads
+            # "1,5" as 15 on en-US. Three digits are required after the separator.
+            $enUS = [cultureinfo]::GetCultureInfo('en-US')
+            ConvertFrom-HumanReadableSize -SizeString "1,5 GB" -Culture $enUS | Should -Be 1610612736
+            ConvertFrom-HumanReadableSize -SizeString "1,2345 MB" -Culture $enUS | Should -Be 1294467
+        }
+
+        It "Handles repeated grouping: '12,345,678 B' on en-US" {
+            $enUS = [cultureinfo]::GetCultureInfo('en-US')
+            ConvertFrom-HumanReadableSize -SizeString "12,345,678 B" -Culture $enUS | Should -Be 12345678
+        }
+
+        It "Applies the same rule to a lone dot: '<Culture>' reads '1.234 KB' as <Expected>" -ForEach @(
+            @{ Culture = 'en-US'; Expected = 1264 }      # dot is the decimal point there
+            @{ Culture = 'de-DE'; Expected = 1263616 }   # dot groups thousands there
+        ) {
+            ConvertFrom-HumanReadableSize -SizeString "1.234 KB" -Culture ([cultureinfo]::GetCultureInfo($Culture)) |
+                Should -Be $Expected
+        }
+
+        It "Falls back to the invariant reading when the culture uses the mark for neither purpose" {
+            # ru-RU: decimal is ',' and thousands are grouped with a no-break space, so a
+            # lone '.' matches neither rule. Without the fallback the code would treat it
+            # as grouping and read "1.234 KB" as 1234 KB - a thousandfold over-read on the
+            # maintainer's own default locale, and no other test reaches this branch.
+            $ruRU = [cultureinfo]::GetCultureInfo('ru-RU')
+            $ruRU.NumberFormat.NumberDecimalSeparator | Should -Be ','
+            $ruRU.NumberFormat.NumberGroupSeparator | Should -Not -Be '.'
+            ConvertFrom-HumanReadableSize -SizeString "1.234 KB" -Culture $ruRU | Should -Be 1264
+        }
+
+        It "Leaves an unambiguous two-separator string alone whatever the culture" {
+            # Both marks present means the last one is the decimal point, and no culture
+            # can make that ambiguous
+            foreach ($c in 'en-US', 'ru-RU', 'de-DE') {
+                ConvertFrom-HumanReadableSize -SizeString "1,234.5 MB" -Culture ([cultureinfo]::GetCultureInfo($c)) |
+                    Should -Be 1294467072
+                ConvertFrom-HumanReadableSize -SizeString "1.234,5 MB" -Culture ([cultureinfo]::GetCultureInfo($c)) |
+                    Should -Be 1294467072
+            }
+        }
+
         It "Converts binary-unit spellings: '<SizeString>'" -ForEach @(
             @{ SizeString = "1 MiB";   Expected = 1048576 }
             @{ SizeString = "1.5 GiB"; Expected = 1610612736 }
@@ -572,6 +630,102 @@ Describe "Get-FolderSizeChecked" -Tag "Unit", "Helper" {
 
 #endregion
 
+#region New-RunStats Tests (v2.20)
+
+Describe "New-RunStats" -Tag "Unit", "Helper", "V220" {
+    <#
+    v2.19 reset only the phase buckets and the step counter while claiming to handle
+    "dot-source and call Start-WinClean twice". Everything else survived into the second
+    run's summary and JSON. These tests pin the whole object, not just the three arrays.
+    #>
+    It "Returns a fresh object rather than the live one" {
+        $saved = $script:Stats
+        try {
+            $script:Stats.TotalFreedBytes = 123456
+            $script:Stats.WarningsCount = 7
+            $script:Stats.ErrorsCount = 3
+            $script:Stats.Aborted = 'PendingRebootDeclined'
+            $script:Stats.PhasesCompleted = @('Preparation')
+
+            $fresh = New-RunStats
+
+            $fresh.TotalFreedBytes | Should -Be 0
+            $fresh.WarningsCount | Should -Be 0
+            $fresh.ErrorsCount | Should -Be 0
+            $fresh.Aborted | Should -BeNullOrEmpty
+            @($fresh.PhasesCompleted).Count | Should -Be 0
+            @($fresh.FreedByCategory.Keys).Count | Should -Be 0
+        } finally {
+            $script:Stats = $saved
+        }
+    }
+
+    It "Starts the clock at creation, not at dot-source time" {
+        # DurationSeconds in the result JSON is computed from StartTime; a stale value
+        # made the second run in a session look hours long
+        $before = Get-Date
+        Start-Sleep -Milliseconds 20
+        (New-RunStats).StartTime | Should -BeGreaterThan $before
+    }
+
+    It "Is still a synchronized hashtable" {
+        # Parallel cleanup blocks rely on this
+        (New-RunStats).GetType().Name | Should -Be 'SyncHashtable'
+    }
+}
+
+#endregion
+
+#region Get-RegistryValueCount Tests (v2.20)
+
+Describe "Get-RegistryValueCount" -Tag "Unit", "Helper" {
+    <#
+    Extracted in v2.20 so privacy cleanup can confirm a deletion instead of announcing it.
+    Tested against a key this suite creates itself - never against the user's real Explorer
+    history, which the product function does touch.
+    #>
+    BeforeAll {
+        $script:probeKey = "HKCU:\Software\WinCleanTest_$(Get-Random)"
+        New-Item -Path $script:probeKey -Force | Out-Null
+    }
+
+    AfterAll {
+        Remove-Item -LiteralPath $script:probeKey -Recurse -Force -ErrorAction SilentlyContinue
+    }
+
+    It "Counts nothing for a key that holds no values" {
+        # The PowerShell metadata (PSPath, PSProvider and friends) must not be counted,
+        # or an emptied key would look like it still holds five entries
+        Get-RegistryValueCount -Key $script:probeKey | Should -Be 0
+    }
+
+    It "Counts the real values" {
+        Set-ItemProperty -Path $script:probeKey -Name 'url1' -Value 'a'
+        Set-ItemProperty -Path $script:probeKey -Name 'url2' -Value 'b'
+        Get-RegistryValueCount -Key $script:probeKey | Should -Be 2
+    }
+
+    It "Returns 0 for a key that does not exist" {
+        Get-RegistryValueCount -Key "HKCU:\Software\WinCleanTest_NoSuchKey_$(Get-Random)" | Should -Be 0
+    }
+
+    It "Returns null - not 0 - for a key that exists but cannot be read" {
+        # The distinction is the whole point. The first draft of this helper returned 0
+        # for an unreadable key, which recreated the bug it was written to fix: a delete
+        # that failed followed by an unreadable check would have counted as "cleared".
+        # Mocked rather than ACL-denied: creating a genuinely unreadable HKCU key on the
+        # developer's own machine is a side effect a unit test has no business leaving.
+        Mock Get-ItemProperty { throw [System.UnauthorizedAccessException]::new('denied') }
+        # Strictly $null, not "null or empty": the caller decides with `$null -eq $before`,
+        # and an empty array satisfies BeNullOrEmpty while failing that test, so the
+        # unreadable key would have fallen through and been reported as cleared.
+        $count = Get-RegistryValueCount -Key $script:probeKey
+        ($null -eq $count) | Should -BeTrue
+    }
+}
+
+#endregion
+
 #region Test-PathProtected Tests
 
 Describe "Test-PathProtected" -Tag "Unit", "Helper", "Security" {
@@ -593,6 +747,84 @@ Describe "Test-PathProtected" -Tag "Unit", "Helper", "Security" {
     It "Returns false for arbitrary paths" {
         Test-PathProtected -Path "C:\SomeRandomFolder" | Should -BeFalse
         Test-PathProtected -Path "D:\Projects\Test" | Should -BeFalse
+    }
+
+    Context "Reparse points (v2.20)" {
+        <#
+        Measured, not assumed: [System.IO.Path]::GetFullPath does NOT resolve a junction,
+        so every textual check above passes for a link whose target is protected, while
+        Get-ChildItem on that link lists the TARGET's children. The guard must resolve the
+        link. The second test is the one that keeps the fix honest - refusing every link
+        would be trivially "safe" and would break anyone who redirected a cache folder.
+        #>
+        BeforeAll {
+            $script:linkSandbox = Join-Path ([System.IO.Path]::GetTempPath()) "WinCleanLinkTest_$(Get-Random)"
+            $script:innocentTarget = Join-Path $script:linkSandbox 'innocent-target'
+            New-Item -ItemType Directory -Path $script:innocentTarget -Force | Out-Null
+
+            $script:linkToProtected = Join-Path $script:linkSandbox 'looks-harmless'
+            $script:linkToInnocent  = Join-Path $script:linkSandbox 'redirected-cache'
+            $script:linkToDrive     = Join-Path $script:linkSandbox 'volume-link'
+            New-Item -ItemType Junction -Path $script:linkToProtected -Target $env:ProgramFiles -ErrorAction SilentlyContinue | Out-Null
+            New-Item -ItemType Junction -Path $script:linkToInnocent -Target $script:innocentTarget -ErrorAction SilentlyContinue | Out-Null
+            New-Item -ItemType Junction -Path $script:linkToDrive -Target "$env:SystemDrive\" -ErrorAction SilentlyContinue | Out-Null
+        }
+
+        AfterAll {
+            # Deleting a junction removes the link and leaves the target alone (measured),
+            # but remove the links explicitly anyway before the sandbox
+            foreach ($l in $script:linkToProtected, $script:linkToInnocent, $script:linkToDrive) {
+                if ($l -and (Test-Path -LiteralPath $l)) {
+                    Remove-Item -LiteralPath $l -Force -Recurse -ErrorAction SilentlyContinue
+                }
+            }
+            Remove-Item -LiteralPath $script:linkSandbox -Recurse -Force -ErrorAction SilentlyContinue
+        }
+
+        It "Refuses a junction that points at a protected root" {
+            Test-Path -LiteralPath $script:linkToProtected | Should -BeTrue -Because 'without the junction this test proves nothing'
+            Test-PathProtected -Path $script:linkToProtected | Should -BeTrue
+        }
+
+        It "Still allows a junction that points somewhere harmless" {
+            Test-Path -LiteralPath $script:linkToInnocent | Should -BeTrue -Because 'without the junction this test proves nothing'
+            Test-PathProtected -Path $script:linkToInnocent | Should -BeFalse
+        }
+
+        It "Refuses a path whose ANCESTOR is a junction into a protected area" {
+            # The case the first version of this fix missed, found by review and measured:
+            # the leaf carries no reparse attribute, GetFullPath does not resolve the link
+            # above it, and 120 real C:\Windows children were visible through it.
+            $throughLink = Join-Path $script:linkToDrive 'Windows'
+            Test-Path -LiteralPath $throughLink | Should -BeTrue -Because 'the path must really resolve through the junction'
+            Test-PathProtected -Path $throughLink | Should -BeTrue
+        }
+
+        It "Does not refuse a deep path under a harmless junction" {
+            # The other half: refusing everything under any link would be trivially safe
+            # and would break anyone whose cache folder is redirected
+            $deep = Join-Path $script:linkToInnocent 'sub'
+            New-Item -ItemType Directory -Path $deep -Force | Out-Null
+            Test-PathProtected -Path $deep | Should -BeFalse
+        }
+
+        It "Refuses a path whose links could not be resolved at all" {
+            # Resolve-PathThroughLinks answers $null for "I could not work out where this
+            # really points" - an unreadable ancestor, or a chain deeper than the loop
+            # bound. Both used to return a partially resolved path instead, which was then
+            # judged on its text and came back "safe to empty".
+            Mock Resolve-PathThroughLinks { $null }
+            Test-PathProtected -Path $script:linkToInnocent | Should -BeTrue
+        }
+
+        It "Treats a drive that is not mounted as absent, not as unexaminable" {
+            # DriveNotFoundException is a not-found answer. Landing in the refuse arm made
+            # every cleanup target on an unmapped drive a "Protected path skipped" WARNING,
+            # which is noise in the channel this release uses as its failure alarm.
+            $free = 'QWXYZJ'.ToCharArray() | Where-Object { -not (Test-Path "${_}:\") } | Select-Object -First 1
+            $free | Should -Not -BeNullOrEmpty -Because 'the test needs a drive letter that is genuinely unmapped'
+            Test-PathProtected -Path "${free}:\SomeFolder" | Should -BeFalse
+        }
     }
 
     It "Handles trailing slashes correctly" {
@@ -698,24 +930,33 @@ Describe "Write-Log" -Tag "Unit", "Helper" {
         # Allow small delay for file write
         Start-Sleep -Milliseconds 100
 
-        if (Test-Path $script:LogPath) {
-            $logContent = Get-Content $script:LogPath -Raw
-            $logContent | Should -Match $uniqueMsg
-        }
+        # v2.20: the assertion used to sit inside `if (Test-Path $script:LogPath)`, so a
+        # missing log file made this test pass. A missing log file is exactly the defect
+        # it exists to catch (v2.14: the log was deleted by the script's own temp cleanup),
+        # which made it a test that could not fail for its own bug. Assert the
+        # precondition instead of hiding behind it.
+        Test-Path $script:LogPath | Should -BeTrue -Because 'Write-Log must create the log file'
+        (Get-Content $script:LogPath -Raw) | Should -Match $uniqueMsg
     }
 
     It "Respects -NoLog switch" {
         $noLogMsg = "NoLog message $(Get-Random)"
-        $sizeBefore = if (Test-Path $script:LogPath) { (Get-Item $script:LogPath).Length } else { 0 }
+
+        # Anchor write: without an existing log file "the message is absent from the log"
+        # is true for the boring reason that there is no log at all
+        Write-Log -Message "Anchor $(Get-Random)" -Level INFO
+        Start-Sleep -Milliseconds 100
+        Test-Path $script:LogPath | Should -BeTrue -Because 'the -NoLog check is meaningless without a real log file'
+        $sizeBefore = (Get-Item $script:LogPath).Length
 
         Write-Log -Message $noLogMsg -Level INFO -NoLog
-
         Start-Sleep -Milliseconds 100
 
-        if (Test-Path $script:LogPath) {
-            $logContent = Get-Content $script:LogPath -Raw
-            $logContent | Should -Not -Match $noLogMsg
-        }
+        # Two independent facts. The size comparison is what $sizeBefore was computed for
+        # since the test was written and never actually used until v2.20: it catches a
+        # -NoLog that writes something else to the file, which a text match would miss.
+        (Get-Content $script:LogPath -Raw) | Should -Not -Match $noLogMsg
+        (Get-Item $script:LogPath).Length | Should -Be $sizeBefore
     }
 }
 
@@ -918,6 +1159,214 @@ Describe "Measure-FreeSpaceGain" -Tag "Unit", "Helper", "V219" {
 Describe "Show-Banner" -Tag "Unit", "Helper", "V219" {
     It "renders without throwing" {
         { Show-Banner *> $null } | Should -Not -Throw
+    }
+}
+
+# The Storage Sense decision logic. Until v2.20 this branch was unreachable (it looked
+# the task up under a folder it does not live in), so the whole of it shipped for six
+# versions without a single test - and the first defect found in it after it came alive
+# was "exit code 0 counted as proof that a cleanup happened". These cover the rules that
+# decide whether all 23 cleanmgr handlers get skipped.
+
+Describe "Select-StorageSenseTask" -Tag "Unit", "Helper", "V220" {
+
+    It "returns the single task when exactly one was found" {
+        $one = [pscustomobject]@{ TaskName = 'StorageSense'; TaskPath = '\Microsoft\Windows\DiskFootprint\' }
+        $result = Select-StorageSenseTask -Tasks @($one)
+        $result.Reason | Should -Be 'ok'
+        $result.Task.TaskPath | Should -Be '\Microsoft\Windows\DiskFootprint\'
+    }
+
+    It "reports 'none' and no task when nothing was found" {
+        $result = Select-StorageSenseTask -Tasks @()
+        $result.Reason | Should -Be 'none'
+        $result.Task | Should -BeNullOrEmpty
+    }
+
+    It "refuses to guess when several tasks share the name" {
+        # Starting the first of several same-named tasks means starting something nobody
+        # identified. The rule is "take none", not "take one".
+        $tasks = @(
+            [pscustomobject]@{ TaskName = 'StorageSense'; TaskPath = '\Microsoft\Windows\DiskFootprint\' }
+            [pscustomobject]@{ TaskName = 'StorageSense'; TaskPath = '\Custom\' }
+        )
+        $result = Select-StorageSenseTask -Tasks $tasks
+        $result.Reason | Should -Be 'ambiguous'
+        $result.Task | Should -BeNullOrEmpty
+    }
+
+    It "ignores null entries in the lookup result" {
+        $one = [pscustomobject]@{ TaskName = 'StorageSense'; TaskPath = '\Microsoft\Windows\DiskFootprint\' }
+        $result = Select-StorageSenseTask -Tasks @($null, $one, $null)
+        $result.Reason | Should -Be 'ok'
+    }
+}
+
+Describe "Get-StorageSenseVerdict" -Tag "Unit", "Helper", "V220" {
+
+    It "does NOT accept a successful exit code as proof that anything was cleaned" {
+        # The defect this whole rule exists for: Storage Sense obeys its own settings, so
+        # when it is switched off in Settings the task starts, does nothing and exits 0.
+        # Treating that as done suppresses every cleanmgr handler and frees nothing.
+        $verdict = Get-StorageSenseVerdict -TaskResult 0 -FreedBytes 0
+        $verdict.Done | Should -BeFalse
+        $verdict.Reason | Should -Be 'nothing-freed'
+    }
+
+    It "accepts success only when free space actually grew" {
+        $verdict = Get-StorageSenseVerdict -TaskResult 0 -FreedBytes ([long]5MB)
+        $verdict.Done | Should -BeTrue
+        $verdict.Reason | Should -Be 'success'
+    }
+
+    It "is fail-closed on a non-zero task result IN THE TYPE WINDOWS ACTUALLY SUPPLIES" {
+        # LastTaskResult is a UInt32. Every HRESULT failure has the high bit set, so its
+        # unsigned value exceeds Int32.MaxValue: 0x80040154 arrives as 2147746132 and the
+        # old [int] cast THREW on it, taking down the whole DeepSystemCleanup phase.
+        #
+        # The first version of this test wrote the PowerShell literal 0x80040154, which the
+        # parser types as Int32 -2147221164. The cast succeeded, the test was green, and it
+        # was green BECAUSE of the defect. Passing the production type is the entire point.
+        $realValue = [uint32]2147746132
+        $realValue | Should -BeOfType [uint32]
+        $verdict = Get-StorageSenseVerdict -TaskResult $realValue -FreedBytes ([long]5MB)
+        $verdict.Done | Should -BeFalse
+        $verdict.Reason | Should -Be 'failed'
+    }
+
+    It "does not throw on the full UInt32 range" {
+        { Get-StorageSenseVerdict -TaskResult ([uint32]::MaxValue) -FreedBytes ([long]5MB) } | Should -Not -Throw
+    }
+
+    It "treats a result that is not a number as unreadable rather than throwing" {
+        $verdict = Get-StorageSenseVerdict -TaskResult 'not-a-number' -FreedBytes ([long]5MB)
+        $verdict.Done | Should -BeFalse
+        $verdict.Reason | Should -Be 'unreadable'
+    }
+
+    It "is fail-closed when the task result could not be read" {
+        $verdict = Get-StorageSenseVerdict -TaskResult $null -FreedBytes ([long]5MB)
+        $verdict.Done | Should -BeFalse
+        $verdict.Reason | Should -Be 'unreadable'
+    }
+
+    It "distinguishes 'could not measure' from 'freed nothing'" {
+        $verdict = Get-StorageSenseVerdict -TaskResult 0 -FreedBytes $null
+        $verdict.Done | Should -BeFalse
+        $verdict.Reason | Should -Be 'not-measured'
+    }
+
+    It "treats a shrinking drive as no cleanup rather than as success" {
+        $verdict = Get-StorageSenseVerdict -TaskResult 0 -FreedBytes ([long](-1MB))
+        $verdict.Done | Should -BeFalse
+        $verdict.Reason | Should -Be 'nothing-freed'
+    }
+}
+
+Describe "Wait-StorageSenseTask" -Tag "Unit", "Helper", "V220" {
+
+    # No real waiting: the wait itself is injected, which is the reason this loop was
+    # split out of Invoke-StorageSense at all.
+    BeforeEach {
+        $script:wssCalls = 0
+        $script:noWait = { }
+    }
+
+    It "reports 'finished' once a running task stops" {
+        $getTask = {
+            $script:wssCalls++
+            if ($script:wssCalls -lt 3) {
+                [pscustomobject]@{ State = 'Running' }
+            } else {
+                [pscustomobject]@{ State = 'Ready' }
+            }
+        }
+        $result = Wait-StorageSenseTask -GetTask $getTask -GetTaskInfo { param($t) $null } `
+            -LastRunBefore ([datetime]'2026-07-22 10:00') -TimeoutSeconds 60 -CheckInterval 5 -Wait $script:noWait
+        $result.Outcome | Should -Be 'finished'
+        $result.Elapsed | Should -Be 15
+    }
+
+    It "reports 'vanished' with the real elapsed time, not the full timeout" {
+        # The bug this covers: the loop used to break on a disappearing task while leaving
+        # its finished flag false, so the caller announced "did not finish within 120
+        # seconds" after ten - a number that never happened on that run.
+        $getTask = {
+            $script:wssCalls++
+            if ($script:wssCalls -eq 1) { [pscustomobject]@{ State = 'Running' } } else { $null }
+        }
+        $result = Wait-StorageSenseTask -GetTask $getTask -GetTaskInfo { param($t) $null } `
+            -LastRunBefore $null -TimeoutSeconds 120 -CheckInterval 5 -Wait $script:noWait
+        $result.Outcome | Should -Be 'vanished'
+        $result.Elapsed | Should -Be 10
+        $result.Task | Should -BeNullOrEmpty
+    }
+
+    It "reports 'timeout' when the task never stops running" {
+        $result = Wait-StorageSenseTask -GetTask { [pscustomobject]@{ State = 'Running' } } `
+            -GetTaskInfo { param($t) $null } -LastRunBefore $null `
+            -TimeoutSeconds 20 -CheckInterval 5 -Wait $script:noWait
+        $result.Outcome | Should -Be 'timeout'
+        $result.Elapsed | Should -Be 20
+    }
+
+    It "accepts a moved LastRunTime as evidence for a task too quick to be seen running" {
+        $result = Wait-StorageSenseTask -GetTask { [pscustomobject]@{ State = 'Ready' } } `
+            -GetTaskInfo { param($t) [pscustomobject]@{ LastRunTime = [datetime]'2026-07-22 11:00' } } `
+            -LastRunBefore ([datetime]'2026-07-22 10:00') -TimeoutSeconds 60 -CheckInterval 5 -Wait $script:noWait
+        $result.Outcome | Should -Be 'finished'
+        # Not before the 10-second mark: a task that was never seen running needs the
+        # evidence, and the first poll is too early to distinguish it from a slow start
+        $result.Elapsed | Should -Be 10
+    }
+
+    It "refuses to call a task finished when there is no baseline to compare against" {
+        # The fail-open this replaced: '-not $LastRunBefore' is TRUE when the pre-run read
+        # failed, so the disjunction short-circuited and ANY readable task info returned
+        # 'finished' for a task that may never have started. That false success went on to
+        # skip all 23 cleanmgr handlers.
+        $result = Wait-StorageSenseTask -GetTask { [pscustomobject]@{ State = 'Ready' } } `
+            -GetTaskInfo { param($t) [pscustomobject]@{ LastRunTime = [datetime]'2026-07-22 11:00' } } `
+            -LastRunBefore $null -TimeoutSeconds 60 -CheckInterval 5 -Wait $script:noWait
+        $result.Outcome | Should -Be 'unverifiable'
+        # The whole window is used to watch. The first repair returned at ten seconds,
+        # which gave a slow-starting task no chance to be seen and let Disk Cleanup start
+        # alongside it (raised in the next review round).
+        $result.Elapsed | Should -Be 60
+    }
+
+    It "still accepts being seen running as evidence when there is no baseline" {
+        # Direct observation needs no comparison: if the task was Running and then was not,
+        # it ran, whether or not its previous run time could be read.
+        $script:wssCalls = 0
+        $getTask = {
+            $script:wssCalls++
+            if ($script:wssCalls -lt 3) { [pscustomobject]@{ State = 'Running' } } else { [pscustomobject]@{ State = 'Ready' } }
+        }
+        $result = Wait-StorageSenseTask -GetTask $getTask -GetTaskInfo { param($t) $null } `
+            -LastRunBefore $null -TimeoutSeconds 60 -CheckInterval 5 -Wait $script:noWait
+        $result.Outcome | Should -Be 'finished'
+        $result.Elapsed | Should -Be 15
+    }
+
+    It "actually waits when no wait scriptblock is injected" {
+        # Every other test here injects a no-op wait, so the default was unpinned: changing
+        # it to an empty block left all of them green while production spun through its
+        # whole timeout in microseconds and fell back to Disk Cleanup on every run.
+        $sw = [System.Diagnostics.Stopwatch]::StartNew()
+        $result = Wait-StorageSenseTask -GetTask { $null } -GetTaskInfo { param($t) $null } `
+            -LastRunBefore $null -TimeoutSeconds 2 -CheckInterval 1
+        $sw.Stop()
+        $result.Outcome | Should -Be 'vanished'
+        $sw.Elapsed.TotalMilliseconds | Should -BeGreaterThan 800
+    }
+
+    It "does not call a task finished when LastRunTime never moved" {
+        $sameTime = [datetime]'2026-07-22 10:00'
+        $result = Wait-StorageSenseTask -GetTask { [pscustomobject]@{ State = 'Ready' } } `
+            -GetTaskInfo { param($t) [pscustomobject]@{ LastRunTime = $sameTime } } `
+            -LastRunBefore $sameTime -TimeoutSeconds 20 -CheckInterval 5 -Wait $script:noWait
+        $result.Outcome | Should -Be 'timeout'
     }
 }
 

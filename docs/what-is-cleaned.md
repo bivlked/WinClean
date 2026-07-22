@@ -103,7 +103,7 @@ As of v2.19 the rule requires a strictly newer version; a package of the same ve
 
 ## Disk Cleanup
 
-The normal path is **Storage Sense** (the built-in scheduled task), when it is present and enabled. Only if Storage Sense is missing or disabled does WinClean **fall back to `cleanmgr`**, arming StateFlags for up to 23 registry handler categories (system caches, error dumps, update leftovers, thumbnail cache, and similar). In the fallback, only categories that actually exist on the machine are armed; a run that could arm nothing is skipped and is not reported as a success. `DownloadsFolder` is deliberately excluded, because it holds user files.
+The normal path is **Storage Sense** (the built-in scheduled task), when it is present and enabled. WinClean **falls back to `cleanmgr`** whenever Storage Sense did not demonstrably do the work: it is missing, ambiguous, disabled, could not be started, failed with an error code, returned a result that could not be read, finished without freeing anything measurable, ran out of the two-minute wait, or disappeared while being watched. On a machine where the task exists but fails, that fallback is the normal outcome, so use `-SkipDiskCleanup` if the step is too slow there. The fallback arms StateFlags for up to 23 registry handler categories (system caches, error dumps, update leftovers, thumbnail cache, and similar). In the fallback, only categories that actually exist on the machine are armed; a run that could arm nothing is skipped and is not reported as a success. `DownloadsFolder` is deliberately excluded, because it holds user files.
 
 ## Windows.old
 

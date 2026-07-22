@@ -68,9 +68,23 @@ $version = if ($scriptText -match '(?m)^\$script:Version\s*=\s*"([\d.]+)"') { $M
 if (-not $version) {
     Add-Result -Name 'Version can be determined' -Passed $false -Detail 'no $script:Version assignment found'
 } else {
+    # v2.20: the two PSScriptInfo checks are scoped to the PSScriptInfo block instead of
+    # the whole file. Searching everywhere meant a stray copy of the release-note line
+    # elsewhere in the script satisfied the check on its own - which actually happened,
+    # pasted into Invoke-Phase's comment-based help by a version bump, and the gate would
+    # have stayed green with the real .RELEASENOTES entry deleted. A gate that an accident
+    # can satisfy is the same class of problem as a gate weaker than CI.
+    $psScriptInfo = if ($scriptText -match '(?s)<#PSScriptInfo(.*?)#>') { $Matches[1] } else { '' }
+
+    # Narrowed once more in review: scoping to the whole PSScriptInfo block still let a
+    # "vX.Y:" line sitting under some OTHER field satisfy the check while .RELEASENOTES
+    # itself was empty. Take the section, not the block.
+    $releaseNotes = if ($psScriptInfo -match '(?s)\.RELEASENOTES(.*?)(?=\r?\n\s*\.[A-Z]|$)') { $Matches[1] } else { '' }
+
     $versionSites = @(
-        @{ What = 'PSScriptInfo .VERSION'; Ok = $scriptText -match "(?m)^\.VERSION\s+$([regex]::Escape($version))\s*$" }
-        @{ What = '.RELEASENOTES first line'; Ok = $scriptText -match "(?m)^\s*v$([regex]::Escape($version)):" }
+        @{ What = 'PSScriptInfo block is present'; Ok = [bool]$psScriptInfo }
+        @{ What = 'PSScriptInfo .VERSION'; Ok = $psScriptInfo -match "(?m)^\.VERSION\s+$([regex]::Escape($version))\s*$" }
+        @{ What = '.RELEASENOTES first line'; Ok = $releaseNotes -match "(?m)^\s*v$([regex]::Escape($version)):" }
         @{ What = 'SYNOPSIS'; Ok = $scriptText -match "Maintenance Script v$([regex]::Escape($version))" }
         @{ What = 'NOTES Version'; Ok = $scriptText -match "(?m)^\s*Version:\s+$([regex]::Escape($version))\s*$" }
         @{ What = 'NOTES Changes in'; Ok = $scriptText -match "Changes in $([regex]::Escape($version)):" }
@@ -143,19 +157,33 @@ if (Get-Module -ListAvailable PSScriptAnalyzer) {
 
 # --- 6. Pester, and the count the docs claim ---------------------------------
 # Counting It blocks by hand is wrong here: -ForEach multiplies them.
+#
+# v2.20: runs through tools/Invoke-Tests.ps1, the same script CI runs, so the gate cannot
+# execute a different Pester version or a laxer rule than CI. It used to call Invoke-Pester
+# directly with no version bound while CI pinned an upper bound, and PowerShell loads the
+# highest installed version - so installing Pester 6 would silently split the two.
 $pesterCount = $null
-if (Get-Module -ListAvailable Pester) {
-    $pester = Invoke-Pester -Path (Join-Path $repoRoot 'tests') -PassThru -Output None
+$pester = $null
+try {
+    $pester = & (Join-Path $PSScriptRoot 'Invoke-Tests.ps1') -Quiet
+} catch {
+    Add-Result -Name 'Pester available in the supported range' -Passed $false -Detail "$_"
+}
+if ($pester) {
     $pesterCount = $pester.TotalCount
     # Skipped tests count as a failure of the gate. The integration suite - the only
     # layer that executes real cleanup code - skips itself without administrator rights,
     # and a release must never go out on "176 of 204 passed, the rest silently absent".
     $notRun = $pester.SkippedCount + $pester.NotRunCount
+    # v2.20: a test file that fails to LOAD contributes no tests, so the three counters
+    # above stay at zero while its whole coverage is gone (measured on Pester 5.7.1).
+    $failedContainers = $pester.FailedContainersCount
     Add-Result -Name "Pester: $($pester.PassedCount)/$($pester.TotalCount) passed, none skipped" `
-        -Passed ($pester.FailedCount -eq 0 -and $notRun -eq 0) `
+        -Passed ($pester.FailedCount -eq 0 -and $notRun -eq 0 -and $failedContainers -eq 0) `
         -Detail $(
             if ($pester.FailedCount) { ($pester.Failed | Select-Object -First 3 | ForEach-Object { $_.ExpandedPath }) -join '; ' }
             elseif ($notRun) { "$notRun тест(ов) не выполнено - нужны права администратора" }
+            elseif ($failedContainers) { "$failedContainers тест-файл(ов) не загрузились - их тесты не выполнялись" }
             else { '' })
 
     $countClaims = @(
@@ -168,8 +196,6 @@ if (Get-Module -ListAvailable Pester) {
     }
     Add-Result -Name "Docs agree that there are $pesterCount tests" -Passed (-not $wrongCounts) `
         -Detail $(if ($wrongCounts) { "устарел счётчик: $($wrongCounts -join ', ')" } else { '' })
-} else {
-    Add-Result -Name 'Pester available' -Passed $false -Detail 'module not installed'
 }
 
 # --- 7. Smoke run (ReportOnly) -----------------------------------------------
@@ -189,13 +215,42 @@ try {
     Add-Result -Name 'Working tree is clean' -Passed ($dirty.Count -eq 0) `
         -Detail $(if ($dirty) { "$($dirty.Count) файл(ов) не закоммичено" } else { '' })
 
-    $branchInfo = (& git status -sb | Select-Object -First 1)
-    # "## main" without "...origin/main" means there is no upstream at all - that is not
-    # "in sync", it is "nothing to sync with"
-    $hasUpstream = $branchInfo -match '\.\.\.'
-    $notPushed = $branchInfo -match '\[(ahead|behind)'
-    Add-Result -Name 'Branch is in sync with origin' -Passed ($hasUpstream -and -not $notPushed) `
-        -Detail $(if (-not $hasUpstream) { "нет upstream: $branchInfo" } elseif ($notPushed) { $branchInfo } else { '' })
+    # v2.20: this used to read `git status -sb`, which compares against the LOCAL
+    # remote-tracking ref. Without a fetch it confirms a state that may no longer exist:
+    # the gate would report "in sync with origin" while origin had already moved. Ask the
+    # remote, and fail closed when it cannot be asked - an unverifiable claim is not a
+    # passing check.
+    $fetchOut = & git fetch --prune 2>&1
+    $fetchOk = $LASTEXITCODE -eq 0
+
+    $upstream = & git rev-parse --abbrev-ref --symbolic-full-name '@{upstream}' 2>$null
+    # No upstream at all is not "in sync", it is "nothing to sync with"
+    $hasUpstream = ($LASTEXITCODE -eq 0) -and $upstream
+
+    # Counted, not assumed: if rev-list itself fails or answers something unparseable, the
+    # zeros it was initialised with would read as "in sync" - the same shape of lie this
+    # whole check was rewritten to remove (caught in review).
+    $ahead = $behind = 0
+    $countsOk = $false
+    if ($hasUpstream) {
+        $counts = @((& git rev-list --left-right --count 'HEAD...@{upstream}') -split '\s+' | Where-Object { $_ -ne '' })
+        if ($LASTEXITCODE -eq 0 -and $counts.Count -ge 2 -and
+            $counts[0] -match '^\d+$' -and $counts[1] -match '^\d+$') {
+            $ahead = [int]$counts[0]
+            $behind = [int]$counts[1]
+            $countsOk = $true
+        }
+    }
+
+    $syncDetail =
+        if (-not $fetchOk)      { "git fetch не удался - состояние origin неизвестно: $(($fetchOut | Select-Object -Last 1))" }
+        elseif (-not $upstream) { 'у ветки нет upstream' }
+        elseif (-not $countsOk) { 'git rev-list не дал сравнимого ответа - расхождение с origin не проверено' }
+        elseif ($ahead -or $behind) { "ahead $ahead, behind $behind (upstream: $upstream)" }
+        else { '' }
+
+    Add-Result -Name 'Branch is in sync with origin (verified against the remote)' `
+        -Passed ($fetchOk -and $hasUpstream -and $countsOk -and $ahead -eq 0 -and $behind -eq 0) -Detail $syncDetail
 } finally {
     Pop-Location
 }
@@ -203,7 +258,12 @@ try {
 # --- 9. Stand run (opt-in) ---------------------------------------------------
 if ($IncludeStand) {
     Write-Host "  ...running the stand VM, this takes a few minutes" -ForegroundColor DarkGray
-    $standOut = & pwsh -NoProfile -File (Join-Path $PSScriptRoot 'proxmox\Invoke-StandTest.ps1') -Mode Full -Source local 2>&1
+    # Join-Path per segment: a backslash inside the argument is a literal character on
+    # Linux/macOS, not a separator, so "proxmox\Invoke-StandTest.ps1" would be one odd
+    # filename there. This gate is not deployed to the Proxmox host today (only the four
+    # scripts in Deploy-StandRunner are), so this is hygiene rather than a live defect.
+    $standScript = Join-Path (Join-Path $PSScriptRoot 'proxmox') 'Invoke-StandTest.ps1'
+    $standOut = & pwsh -NoProfile -File $standScript -Mode Full -Source local 2>&1
     $standPassed = $LASTEXITCODE -eq 0
     Add-Result -Name 'Stand test (full run on a VM)' -Passed $standPassed `
         -Detail (($standOut | Where-Object { $_ -match 'STAND TEST|freed|warnings' } | Select-Object -Last 2) -join ' | ')

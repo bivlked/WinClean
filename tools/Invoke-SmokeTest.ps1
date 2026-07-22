@@ -23,7 +23,10 @@
 [CmdletBinding()]
 param(
     [string]$ScriptPath = (Join-Path $PSScriptRoot '..' 'WinClean.ps1'),
-    [string]$OutDir = (Join-Path $env:TEMP "WinCleanSmoke_$(Get-Date -Format 'yyyyMMdd_HHmmss')"),
+    # GetTempPath() instead of $env:TEMP: the variable is Windows-specific and an empty
+    # one would resolve the join to a drive root (see the empty-env-var trap this project
+    # already hit once). Same value on Windows, defined everywhere else.
+    [string]$OutDir = (Join-Path ([System.IO.Path]::GetTempPath()) "WinCleanSmoke_$(Get-Date -Format 'yyyyMMdd_HHmmss')"),
     [switch]$IncludeUpdates
 )
 
