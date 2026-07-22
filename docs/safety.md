@@ -30,6 +30,8 @@ C:\Users\<name>\
 
 Volume roots (for example `C:\`) are protected explicitly as well. Path protection is not a naive string match: it normalizes short (8.3) names such as `PROGRA~1` and resolves `..` traversal before comparing, so a path that only looks different on the surface cannot slip past the check.
 
+Since v2.20 the check also follows links. Path normalization works on text and does not resolve reparse points, so a junction whose visible path looked harmless while pointing at a protected root used to pass the guard, and enumerating that junction lists the target's contents. A cleanup root is now resolved to its final target before the rules are applied, and a link that cannot be resolved is refused rather than guessed at. Only the root needs this: a link found deeper inside a tree is already harmless, because the recursive walk does not descend into reparse points and deleting a junction removes the link and leaves its target intact.
+
 ## Preview mode (`-ReportOnly`)
 
 `-ReportOnly` performs a dry run: it walks the same logic a real run would and reports what would be cleaned and how much space it would free. It makes no maintenance changes - it installs nothing, deletes none of the caches or files it would clean, and creates no restore point. It does still write its own log file (and the result JSON if you passed `-ResultJsonPath`, removing any pre-existing one first on a best-effort basis), set the process TLS version, and perform the read-only update and connectivity checks unless you also pass `-SkipUpdates`.

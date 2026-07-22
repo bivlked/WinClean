@@ -221,6 +221,7 @@ cd WinClean
 | `-SkipDevCleanup` | Skip developer caches (npm, pip, etc.) | `false` |
 | `-SkipDockerCleanup` | Skip Docker/WSL cleanup | `false` |
 | `-SkipVSCleanup` | Skip Visual Studio cleanup | `false` |
+| `-SkipDiskCleanup` | Skip only the Storage Sense / Disk Cleanup step, the slowest one | `false` |
 | `-DisableTelemetry` | Disable Windows telemetry via Group Policy | `false` |
 | `-ReportOnly` | **Dry run** - show what would be done | `false` |
 | `-LogPath` | Custom log file path | Auto |
@@ -302,7 +303,7 @@ WinClean is built to be safe to run on a working machine. The short version:
 
 ```
 ┌────────────────────────────────────────────────────────────────┐
-│                     WinClean v2.19                             │
+│                     WinClean v2.20                             │
 ├────────────────────────────────────────────────────────────────┤
 │  PREPARATION                                                   │
 │  ├─ ✓ Check Administrator Rights                               │

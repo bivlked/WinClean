@@ -433,12 +433,30 @@ Describe "v2.15: positional binding hardening" -Tag "Fix", "V215" {
 #region Script Version Verification
 
 Describe "Script Version" -Tag "Version" {
-    It "Version is 2.13 or higher" {
-        $scriptContent | Should -Match '\$script:Version\s*=\s*[''"]2\.1[3-9]'
+    <#
+    v2.20: these used to be the regex '2\.1[3-9]', which stopped matching the moment the
+    version crossed 2.19 - the tests failed on the version bump itself rather than on any
+    defect. Compare versions as versions, and check the invariant that actually matters:
+    the two places agree with each other.
+    #>
+    BeforeAll {
+        $script:declaredVersion = if ($scriptContent -match '(?m)^\$script:Version\s*=\s*"([\d.]+)"') { $Matches[1] } else { $null }
+        $script:scriptInfoVersion = if ($scriptContent -match '(?m)^\.VERSION\s+([\d.]+)\s*$') { $Matches[1] } else { $null }
     }
 
-    It "PSScriptInfo version matches" {
-        $scriptContent | Should -Match '\.VERSION\s+2\.1[3-9]'
+    It "Declares a parseable version" {
+        $script:declaredVersion | Should -Not -BeNullOrEmpty
+        { [version]$script:declaredVersion } | Should -Not -Throw
+    }
+
+    It "Is 2.13 or higher" {
+        [version]$script:declaredVersion | Should -BeGreaterOrEqual ([version]'2.13')
+    }
+
+    It "PSScriptInfo carries the same version as `$script:Version" {
+        # PSGallery publishes from PSScriptInfo while the banner and the update check read
+        # $script:Version - a mismatch ships a package that lies about its own version
+        $script:scriptInfoVersion | Should -Be $script:declaredVersion
     }
 }
 

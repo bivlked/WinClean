@@ -14,6 +14,87 @@ Windows Update driver listing, run-to-run delta and HTML report. See CLAUDE.md.
 
 ---
 
+## [2.20] - 2026-07-22
+
+A correctness and honesty round driven by a full audit of the code base, a third-party
+review and an independent Codex pass. No new cleanup features. Several places reported
+success while doing nothing, one path check could be bypassed, and the fast disk-cleanup
+path turned out to have been unreachable since it was written.
+
+### Security
+
+- **A junction could be used to clean a protected root.** The protected-path check
+  compared text, and `GetFullPath` does not resolve reparse points, so a link whose
+  visible path looked harmless while pointing at `Program Files` passed the guard;
+  enumerating that link then listed the target's contents. The cleanup root is now
+  resolved to its final target before the rules are applied. Measured on a live
+  filesystem: links found deeper in a tree were already safe, so only the root needed it,
+  and a link pointing somewhere harmless is still cleaned normally
+
+### Fixed
+
+- **Storage Sense was unreachable, so every run used the slow path.** The scheduled task
+  was looked up under `\Microsoft\Windows\DiskCleanup\`, where it does not exist; the real
+  one lives under `\Microsoft\Windows\DiskFootprint\`. Every run therefore fell back to
+  `cleanmgr`, which took 901 seconds of an 1101-second run on a real workstation and did
+  not finish. The task is now found by name, and - just as important - a task that ran and
+  *failed* no longer counts as success, which would have skipped the fallback entirely
+- **Four operations reported success while doing nothing**: `npm cache clean` (its exit
+  code was never read, so a locked cache printed "cleaned"), event logs (a total
+  enumeration failure produced "cleared (0 logs)"), privacy traces (the success line was
+  appended without checking, because `Remove-Item -ErrorAction SilentlyContinue` cannot
+  throw), and the winget source update (only job completion was checked, not its result)
+- **A failed log write was invisible.** All writer errors were swallowed, so a run could
+  continue destroying files while the log silently stopped recording. The first failure is
+  now reported once and surfaces as `LoggingDegraded` in the result JSON
+- **A failed result-JSON write exited 0.** The code raised a warning while its own comment
+  said it must be loud, and the exit code is decided by the error count alone - so a run
+  that failed to produce the file the user asked for reported success
+- **Disk Cleanup left running past its timeout was reported as an aside.** It is now a
+  warning with `DiskCleanupPending` in the result JSON: the totals printed after it are
+  partial. Its registry configuration is also no longer swept while it is still running
+- **Delivery Optimization warned on healthy systems.** The measurement covered the whole
+  folder while the supported cmdlet only removes cached content, so leftover service logs
+  read as "nothing freed". Reproduced twice on the en-US stand
+- **Browser cleanup could invent freed bytes.** The after-measurement returned 0 both for
+  "empty" and for "could not read", so a folder that became unreadable counted as fully
+  freed
+- **The restore-point frequency override could stay applied forever.** It was only
+  repaired when the child process had been killed; a child that exited normally after its
+  own restore failed had its marker cleared anyway
+- **`-SkipCleanup` was ignored by three functions when they were called directly**, which
+  contradicted the documented contract for anyone dot-sourcing the script
+- Stand tooling: `Deploy-StandRunner` ignored ssh's exit code, and `New-StandVM` accepted
+  a PowerShell installation on file existence alone, ignoring msiexec's result
+
+### Added
+
+- **`-SkipDiskCleanup`** skips only the Storage Sense / Disk Cleanup step. Until now the
+  only way to avoid the slowest step was `-SkipCleanup`, which suppresses every category
+- Result JSON fields `LoggingDegraded` and `DiskCleanupPending`
+- `tools/Invoke-Tests.ps1`: one definition of the supported Pester range, the test path and
+  the "a skipped test fails the run" rule, used by both CI and the release gate
+
+### Changed
+
+- **The release gate no longer claims things it did not verify.** "In sync with origin" was
+  read from the local remote-tracking ref without ever fetching, and the Pester version was
+  unbounded while CI pinned an upper bound - with Pester 6 published, one `Install-Module`
+  would have split the two
+
+### Tests
+
+- 376 to 393 automated tests. New coverage: the junction guard (a link to a protected root
+  is refused, a harmless one is not), a fresh per-run statistics object, the registry value
+  counter, and a mocked event-log enumeration failure
+- Two logging tests could not fail: their only assertion sat inside `if (Test-Path $log)`,
+  so a missing log file - the very defect they exist to catch - made them pass. Both were
+  verified by mutation after the fix
+- The version tests compared against the regex `2\.1[3-9]`, which stopped matching at 2.20
+  and would have failed on the bump itself
+
+---
+
 ## [2.19] - 2026-07-22
 
 A contract-correctness and documentation round, following a second external review (this time

@@ -1,5 +1,5 @@
 <#PSScriptInfo
-.VERSION 2.19
+.VERSION 2.20
 .GUID 8f7c3b2a-1d4e-5f6a-9b8c-0d1e2f3a4b5c
 .AUTHOR bivlked
 .COMPANYNAME
@@ -12,6 +12,7 @@
 .REQUIREDSCRIPTS
 .EXTERNALSCRIPTDEPENDENCIES
 .RELEASENOTES
+    v2.20: Correctness and honesty round - a junction could bypass protected-path checks, four operations reported success while doing nothing, Storage Sense was unreachable so every run fell back to the slow Disk Cleanup, new -SkipDiskCleanup
     v2.19: Contract and documentation round - -SkipCleanup now skips ALL cleanup categories, result JSON gains a tri-state PhasesSkipped, AppUpdatesCount renamed to AppUpdatesOffered (offered, not installed), full docs overhaul
     v2.18: Correctness and hardening follow-up from external code review - diskpart failure detection, driver-store accounting, strict superseded-version rule, exact bootstrap host allowlist
     v2.17: Silent failure hardening - operations that quietly do nothing now say so instead of reporting success
@@ -28,7 +29,7 @@
 
 <#
 .SYNOPSIS
-    WinClean - Ultimate Windows 11 Maintenance Script v2.19
+    WinClean - Ultimate Windows 11 Maintenance Script v2.20
 .DESCRIPTION
     Комплексный скрипт для обновления и очистки Windows 11:
     - Обновление Windows (включая драйверы)
@@ -42,8 +43,17 @@
     - Подробный цветной вывод + лог-файл
 .NOTES
     Author: biv
-    Version: 2.19
+    Version: 2.20
     Requires: PowerShell 7.1+, Windows 11, Administrator rights
+    Changes in 2.20:
+    - SECURITY: a junction whose target is a protected root could be used as a cleanup
+      root - the path check compared text and never resolved the link
+    - Storage Sense was looked up at a path where it does not exist, so every run fell
+      back to Disk Cleanup (15 of 18 minutes on a real workstation)
+    - npm, event logs, privacy traces and winget source update no longer report success
+      when they did nothing
+    - Added -SkipDiskCleanup to skip only the slow Disk Cleanup step
+    - Result JSON gains LoggingDegraded and DiskCleanupPending
     Changes in 2.19:
     - -SkipCleanup now skips the ENTIRE cleanup group (system, deep, developer,
       Docker/WSL, Visual Studio), matching the documented "skip all cleanup" contract.
@@ -384,7 +394,7 @@ if (-not $LogPath) {
 }
 
 # Script version (single source of truth for version checking)
-$script:Version = "2.19"
+$script:Version = "2.20"
 
 # Protected paths that should never be deleted
 $script:ProtectedPaths = @(
@@ -1824,15 +1834,20 @@ function New-SystemRestorePoint {
             # is still in place - repair it here and now. Clearing the marker
             # unconditionally would throw away the record of exactly the damage this
             # mechanism exists for, so it survives whenever the repair did not.
-            if ($childKilled) {
-                if (Restore-RestorePointFrequency -PreviousValue $prevFreqOuter) {
-                    Clear-RunMarker
-                } else {
-                    Write-Log "Restore point child was killed and its registry override could not be undone - the next run will retry" -Level WARNING
-                    $script:Stats.WarningsCount++
-                }
-            } else {
+            #
+            # v2.20: this repair now runs on BOTH paths. A child that exits normally can
+            # still have failed its own finally (a transient registry error), and the
+            # parent then deleted the marker anyway - leaving the creation frequency
+            # pinned at 0 indefinitely with nothing left to make a later run retry.
+            # Restore-RestorePointFrequency is idempotent by design: it returns $true
+            # without touching anything when the value is no longer 0, so verifying on the
+            # normal path costs nothing and turns an assumption into a check.
+            if (Restore-RestorePointFrequency -PreviousValue $prevFreqOuter) {
                 Clear-RunMarker
+            } else {
+                $how = if ($childKilled) { 'was killed' } else { 'exited normally' }
+                Write-Log "Restore point child $how but its registry override could not be undone - the marker is kept so the next run retries" -Level WARNING
+                $script:Stats.WarningsCount++
             }
         }
 
@@ -4777,7 +4792,8 @@ function Invoke-Phase {
         Write-ResultJson exposes so an automated stand can tell "everything ran" from
         "phase 6 threw and phases 7-9 are simply missing".
 
-        v2.19: -Skip records a phase the user turned off with a skip flag in a third
+        v2.20: Correctness and honesty round - a junction could bypass protected-path checks, four operations reported success while doing nothing, Storage Sense was unreachable so every run fell back to the slow Disk Cleanup, new -SkipDiskCleanup
+    v2.19: -Skip records a phase the user turned off with a skip flag in a third
         bucket, PhasesSkipped, instead of running an empty body and marking it Completed
         (which conflated "ran and did nothing" with "was skipped"). This also carries the
         "... skipped (parameter)" log line that used to come from each phase's own inner

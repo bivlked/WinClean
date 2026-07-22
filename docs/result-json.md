@@ -26,6 +26,8 @@ This page documents every field, gives a full sample, and explains how to consum
 | `WarningsCount` | number | Count of warnings raised during the run. Warnings are the silent-failure alarm; treat a non-zero value as something to inspect. |
 | `ErrorsCount` | number | Count of errors raised during the run. A healthy run reports `0`. |
 | `RebootRequired` | bool | `true` when a change (a Windows update, an app update finishing on reboot) needs a restart to take effect. |
+| `LoggingDegraded` | bool | v2.20. `true` when writing the log file failed at some point during the run. The run itself still completed, but `LogPath` points at an incomplete file: do not read that log as the full record of what happened. |
+| `DiskCleanupPending` | bool | v2.20. `true` when Disk Cleanup outlived its timeout and was left running in the background. `TotalFreedBytes` is then a lower bound rather than the final figure, because deletion continued after this file was written. |
 | `ControlledFolderAccess` | string | Tri-state, see below. Reflects whether Defender's Controlled Folder Access may have silently blocked deletions. |
 | `Aborted` | string or null | `null` unless the run stopped early for a known reason (currently only a declined pending reboot, `"PendingRebootDeclined"`, sets it). When set, the phase arrays below are incomplete by design. Note `null` does not by itself prove every phase ran - see the invariant note below. |
 | `PhasesCompleted` | array of string | Phases whose action ran to completion without an uncaught exception. |
@@ -45,6 +47,7 @@ An object of booleans mirroring the run's switches:
 | `SkipDevCleanup` | bool |
 | `SkipDockerCleanup` | bool |
 | `SkipVSCleanup` | bool |
+| `SkipDiskCleanup` | bool |
 | `DisableTelemetry` | bool |
 
 `-ReportOnly`, `-LogPath` and `-ResultJsonPath` are not repeated here (`ReportOnly` and `LogPath` are top-level fields; the JSON path is the file you are reading).
@@ -101,6 +104,7 @@ VisualStudioCleanup, DeepSystemCleanup, DiskSpaceReport, Telemetry
     "SkipDevCleanup": false,
     "SkipDockerCleanup": false,
     "SkipVSCleanup": false,
+    "SkipDiskCleanup": false,
     "DisableTelemetry": false
   },
   "TotalFreedBytes": 3201171456,
