@@ -1371,3 +1371,1053 @@ Describe "Wait-StorageSenseTask" -Tag "Unit", "Helper", "V220" {
 }
 
 #endregion
+
+#region v2.21 self-update targeting
+
+Describe "Test-PathInsideRoot" -Tag "Unit", "Helper", "V221" {
+    It "accepts a file inside the root" {
+        Test-PathInsideRoot -Path 'C:\Program Files\WinClean\WinClean.ps1' -Root 'C:\Program Files\WinClean' |
+            Should -BeTrue
+    }
+
+    It "does not treat a sibling with a shared prefix as inside the root" {
+        # A plain StartsWith without the separator would call C:\Temp2 a child of C:\Temp,
+        # labelling a manual copy as the one-liner's temporary download and printing an
+        # instruction that does nothing for it
+        Test-PathInsideRoot -Path 'C:\Temp2\WinClean.ps1' -Root 'C:\Temp' | Should -BeFalse
+    }
+
+    It "ignores case, as the file system does" {
+        Test-PathInsideRoot -Path 'c:\program files\winclean\WinClean.ps1' -Root 'C:\Program Files\WinClean' |
+            Should -BeTrue
+    }
+
+    It "tolerates a trailing separator on the root" {
+        Test-PathInsideRoot -Path 'C:\Tools\WinClean\WinClean.ps1' -Root 'C:\Tools\WinClean\' | Should -BeTrue
+    }
+
+    It "answers false for <name> instead of throwing" -ForEach @(
+        @{ name = 'an empty path'; path = ''; root = 'C:\Temp' }
+        @{ name = 'a null path'; path = $null; root = 'C:\Temp' }
+        @{ name = 'an empty root'; path = 'C:\Temp\x.ps1'; root = '' }
+        @{ name = 'a null root'; path = 'C:\Temp\x.ps1'; root = $null }
+    ) {
+        Test-PathInsideRoot -Path $path -Root $root | Should -BeFalse
+    }
+}
+
+Describe "Get-ScriptUpdateChannel" -Tag "Unit", "Helper", "V221" {
+    It "calls the running file the gallery copy when it is the gallery copy" {
+        Get-ScriptUpdateChannel -ExecutingPath 'C:\Users\u\Documents\PowerShell\Scripts\WinClean.ps1' `
+            -GalleryLocation @('C:\Users\u\Documents\PowerShell\Scripts') | Should -Be 'gallery'
+    }
+
+    It "matches the gallery copy regardless of case" {
+        Get-ScriptUpdateChannel -ExecutingPath 'c:\users\u\documents\powershell\scripts\winclean.ps1' `
+            -GalleryLocation @('C:\Users\u\Documents\PowerShell\Scripts') | Should -Be 'gallery'
+    }
+
+    It "REGRESSION: a gallery copy elsewhere does not make the Program Files copy updatable" {
+        # The reported defect exactly: both installs exist, the shortcut starts the
+        # Program Files one, and the old code auto-updated the Documents one and told the
+        # user to run WinClean again for the new version - which kept starting the old file
+        Get-ScriptUpdateChannel -ExecutingPath 'C:\Program Files\WinClean\WinClean.ps1' `
+            -GalleryLocation @('C:\Users\u\Documents\PowerShell\Scripts') `
+            -ProgramFilesRoot 'C:\Program Files' | Should -Be 'installer'
+    }
+
+    It "refuses the automatic path when several gallery installations exist" {
+        # It IS the gallery copy, but Update-Script has no -Scope: with AllUsers and
+        # CurrentUser copies present, nothing aims the updater at this one. Modifying the
+        # unused copy and only then discovering the miss is worse than declining
+        Get-ScriptUpdateChannel -ExecutingPath 'C:\Program Files\WindowsPowerShell\Scripts\WinClean.ps1' `
+            -GalleryLocation @('C:\Users\u\Documents\PowerShell\Scripts', 'C:\Program Files\WindowsPowerShell\Scripts') `
+            -ProgramFilesRoot 'C:\NoSuchProgramFiles' | Should -Be 'gallery-ambiguous'
+    }
+
+    It "still allows the automatic path when both providers report the same single install" {
+        # Duplicates are not ambiguity: PowerShellGet and PSResourceGet each report the
+        # other's install, so the same path arriving twice must not disable self-update
+        Get-ScriptUpdateChannel -ExecutingPath 'C:\Users\u\Documents\PowerShell\Scripts\WinClean.ps1' `
+            -GalleryLocation @('C:\Users\u\Documents\PowerShell\Scripts', 'C:\Users\u\Documents\PowerShell\Scripts\') `
+            | Should -Be 'gallery'
+    }
+
+    It "collapses duplicates that differ only in case" {
+        # Select-Object -Unique is case-SENSITIVE (verified 22.07.2026), while the match
+        # below is case-insensitive. With the two mismatched, one install reported with
+        # different casing by the two providers looked like two and silently cost the
+        # machine its self-update
+        Get-ScriptUpdateChannel -ExecutingPath 'C:\Users\u\Documents\PowerShell\Scripts\WinClean.ps1' `
+            -GalleryLocation @('C:\Users\u\Documents\PowerShell\Scripts', 'c:\users\u\documents\powershell\scripts') `
+            | Should -Be 'gallery'
+    }
+
+    It "does not claim a differently named script sharing the gallery folder" {
+        # InstalledLocation is a shared Scripts folder; the provider owns WinClean.ps1
+        # inside it, not everything that happens to sit there
+        Get-ScriptUpdateChannel -ExecutingPath 'C:\Users\u\Documents\PowerShell\Scripts\WinClean-test.ps1' `
+            -GalleryLocation @('C:\Users\u\Documents\PowerShell\Scripts') `
+            -ProgramFilesRoot 'C:\Program Files' -TempRoot 'C:\Temp' | Should -Be 'manual'
+    }
+
+    It "recognises the temporary copy that get.ps1 downloads" {
+        Get-ScriptUpdateChannel -ExecutingPath 'C:\Temp\WinClean-0123abcd\WinClean.ps1' `
+            -GalleryLocation @() -ProgramFilesRoot 'C:\Program Files' -TempRoot 'C:\Temp' |
+            Should -Be 'oneliner'
+    }
+
+    It "returns unknown when the executing path is <name>" -ForEach @(
+        @{ name = 'empty'; path = '' }
+        @{ name = 'null'; path = $null }
+        @{ name = 'whitespace'; path = '   ' }
+    ) {
+        Get-ScriptUpdateChannel -ExecutingPath $path -GalleryLocation @('C:\Users\u\Documents\PowerShell\Scripts') |
+            Should -Be 'unknown'
+    }
+
+    It "falls back to manual with no gallery install at all" {
+        Get-ScriptUpdateChannel -ExecutingPath 'D:\Downloads\WinClean.ps1' -GalleryLocation @() `
+            -ProgramFilesRoot 'C:\Program Files' -TempRoot 'C:\Temp' | Should -Be 'manual'
+    }
+
+    It "survives a null location array and null roots" {
+        Get-ScriptUpdateChannel -ExecutingPath 'D:\Downloads\WinClean.ps1' -GalleryLocation $null `
+            -ProgramFilesRoot $null -TempRoot $null | Should -Be 'manual'
+    }
+
+    It "ignores empty entries among the locations" {
+        Get-ScriptUpdateChannel -ExecutingPath 'D:\Downloads\WinClean.ps1' -GalleryLocation @('', $null) `
+            -ProgramFilesRoot 'C:\Program Files' -TempRoot 'C:\Temp' | Should -Be 'manual'
+    }
+
+    It "uses real roots by default, since production never passes them" {
+        # Test-ScriptUpdate calls this with no roots at all, yet every other test here
+        # supplies them - so mutating either default survived the whole suite. The negative
+        # case matters most: a TempRoot collapsing to a drive root would classify every
+        # copy on C: as a one-liner download
+        $temp = [System.IO.Path]::GetTempPath()
+        $programFiles = [Environment]::GetFolderPath([Environment+SpecialFolder]::ProgramFiles)
+
+        Get-ScriptUpdateChannel -ExecutingPath (Join-Path $temp 'WinClean-abc\WinClean.ps1') `
+            -GalleryLocation @() | Should -Be 'oneliner'
+        Get-ScriptUpdateChannel -ExecutingPath (Join-Path $programFiles 'WinClean\WinClean.ps1') `
+            -GalleryLocation @() | Should -Be 'installer'
+        Get-ScriptUpdateChannel -ExecutingPath 'C:\Tools\WinClean\WinClean.ps1' `
+            -GalleryLocation @() | Should -Be 'manual'
+    }
+
+    It "matches a gallery copy reached over UNC" {
+        Get-ScriptUpdateChannel -ExecutingPath '\\fileserver\profiles\u\Documents\PowerShell\Scripts\WinClean.ps1' `
+            -GalleryLocation @('\\fileserver\profiles\u\Documents\PowerShell\Scripts') | Should -Be 'gallery'
+    }
+
+    It "does not confuse two UNC shares with a shared prefix" {
+        Get-ScriptUpdateChannel -ExecutingPath '\\fileserver\profiles2\WinClean.ps1' `
+            -GalleryLocation @('\\fileserver\profiles') `
+            -ProgramFilesRoot 'C:\Program Files' -TempRoot 'C:\Temp' | Should -Be 'manual'
+    }
+}
+
+Describe "Get-UpdateVerification" -Tag "Unit", "Helper", "V221" {
+    It "confirms an update when the file reports the expected version" {
+        $v = Get-UpdateVerification -ExpectedVersion '2.21' -ObservedVersion '2.21'
+        $v.Applied | Should -BeTrue
+        $v.Reason | Should -Be 'applied'
+    }
+
+    It "confirms an update when the file is newer than expected" {
+        (Get-UpdateVerification -ExpectedVersion '2.21' -ObservedVersion '2.22').Applied | Should -BeTrue
+    }
+
+    It "reports unchanged when the file kept the old version" {
+        $v = Get-UpdateVerification -ExpectedVersion '2.21' -ObservedVersion '2.19'
+        $v.Applied | Should -BeFalse
+        $v.Reason | Should -Be 'unchanged'
+    }
+
+    It "never reports applied when the observed version is <name>" -ForEach @(
+        @{ name = 'null'; observed = $null }
+        @{ name = 'empty'; observed = '' }
+        @{ name = 'unparsable'; observed = 'not-a-version' }
+    ) {
+        $v = Get-UpdateVerification -ExpectedVersion '2.21' -ObservedVersion $observed
+        $v.Applied | Should -BeFalse
+        $v.Reason | Should -Be 'unreadable'
+    }
+
+    It "never reports applied when the expected version is unusable" {
+        (Get-UpdateVerification -ExpectedVersion $null -ObservedVersion '2.21').Applied | Should -BeFalse
+    }
+
+    It "treats <observed> and <expected> as the same release" -ForEach @(
+        @{ observed = '2.21'; expected = '2.21.0' }
+        @{ observed = '2.21.0'; expected = '2.21' }
+        @{ observed = '2.21.0.0'; expected = '2.21' }
+    ) {
+        # [Version] fills missing components with -1, not 0, so plain -lt calls "2.21"
+        # OLDER than "2.21.0". The Gallery may report either form for the same release, and
+        # without normalisation a good update would be announced as not applied
+        $v = Get-UpdateVerification -ExpectedVersion $expected -ObservedVersion $observed
+        $v.Applied | Should -BeTrue
+        $v.Reason | Should -Be 'applied'
+    }
+
+    It "still reports unchanged across component-count differences when genuinely older" {
+        (Get-UpdateVerification -ExpectedVersion '2.21.0' -ObservedVersion '2.20').Reason | Should -Be 'unchanged'
+    }
+}
+
+Describe "Get-InstalledWinCleanLocation" -Tag "Unit", "Helper", "V221" {
+    It "keeps querying the second provider when the first one throws" {
+        # -ErrorAction SilentlyContinue only covers non-terminating errors. A broken
+        # PowerShellGet used to abort the whole lookup, so PSResourceGet was never asked
+        # and the answer became "no Gallery copy exists" - the wrong answer for a caller
+        # that decides whether the running file can update itself
+        Mock Get-InstalledScript { throw "provider is broken" }
+        Mock Get-PSResource { [pscustomobject]@{ Type = 'Script'; InstalledLocation = 'C:\Users\u\Documents\PowerShell\Scripts' } }
+
+        Get-InstalledWinCleanLocation | Should -Contain 'C:\Users\u\Documents\PowerShell\Scripts'
+    }
+
+    It "throws when nothing was found AND a provider failed" {
+        # "Could not read the machine" must not look like "no Gallery copy installed":
+        # the latter classifies the running file as 'manual' and prints an installer
+        # command, which would add a SECOND installation next to the unreadable one
+        Mock Get-InstalledScript { throw "broken" }
+        Mock Get-PSResource { throw "also broken" }
+
+        { Get-InstalledWinCleanLocation } | Should -Throw
+    }
+
+    It "stays silent when no provider exists at all, which is not a failure" {
+        # A machine with no package provider legitimately has no Gallery copy
+        Mock Get-Command { $null } -ParameterFilter { $Name -in 'Get-InstalledScript', 'Get-PSResource' }
+
+        @(Get-InstalledWinCleanLocation).Count | Should -Be 0
+    }
+
+    It "treats 'nothing installed' as an answer rather than a provider outage" {
+        # PowerShellGet is hidden so only PSResourceGet answers, and PSResourceGet is left
+        # UNMOCKED: it really raises its typed ResourceNotFoundException here. Without that
+        # classification this throws, and every machine with no Gallery copy would then be
+        # told its running copy is not Gallery-managed - and pointed at the installer
+        Mock Get-Command { $null } -ParameterFilter { $Name -eq 'Get-InstalledScript' }
+
+        { Get-InstalledWinCleanLocation } | Should -Not -Throw
+    }
+
+    It "reports a non-terminating PowerShellGet failure, not just a thrown one" {
+        # The other mocks use `throw`, which behaves the same under Stop and
+        # SilentlyContinue - so they would pass even if the query went back to suppressing
+        # errors. This is the shape that used to slip through as "no copy installed"
+        Mock Get-InstalledScript { Write-Error "provider is unwell" }
+        Mock Get-Command { $null } -ParameterFilter { $Name -eq 'Get-PSResource' }
+
+        { Get-InstalledWinCleanLocation } | Should -Throw
+    }
+
+    It "ignores other installed scripts now that the name is filtered locally" {
+        # The query no longer passes -Name, so the filter is ours to get right
+        Mock Get-InstalledScript {
+            @([pscustomobject]@{ Name = 'SomethingElse'; InstalledLocation = 'C:\Other' },
+              [pscustomobject]@{ Name = 'WinClean'; InstalledLocation = 'C:\Scripts' })
+        }
+        Mock Get-Command { $null } -ParameterFilter { $Name -eq 'Get-PSResource' }
+
+        $result = @(Get-InstalledWinCleanLocation)
+        $result | Should -Contain 'C:\Scripts'
+        $result | Should -Not -Contain 'C:\Other'
+    }
+
+    It "reports failure even when the readable scope did return a copy" {
+        # A partial list is not a smaller answer: a hidden AllUsers install turns
+        # 'gallery-ambiguous' back into 'gallery' and re-enables the very automatic update
+        # whose target cannot be resolved
+        Mock Get-Command { $null } -ParameterFilter { $Name -eq 'Get-InstalledScript' }
+        Mock Get-PSResource { throw "AllUsers unreadable" } -ParameterFilter { $Scope -eq 'AllUsers' }
+        Mock Get-PSResource { [pscustomobject]@{ Type = 'Script'; InstalledLocation = 'C:\Users\u\Documents\PowerShell\Scripts' } }
+
+        { Get-InstalledWinCleanLocation } | Should -Throw
+    }
+
+    It "reports failure when the AllUsers half specifically could not be read" {
+        # A single "somebody answered" flag let a successful CurrentUser query mask this,
+        # and AllUsers is the half the scope query exists to read
+        Mock Get-InstalledScript { throw "broken" }
+        Mock Get-PSResource { throw "AllUsers unreadable" } -ParameterFilter { $Scope -eq 'AllUsers' }
+        Mock Get-PSResource { }
+
+        { Get-InstalledWinCleanLocation } | Should -Throw
+    }
+
+    It "asks PSResourceGet for AllUsers as well as the default scope" {
+        # Get-PSResource's -Scope is not nullable, so an unbound call means CurrentUser and
+        # never sees an AllUsers install - the natural scope for an admin-only script
+        Mock Get-InstalledScript { }
+        Mock Get-PSResource { [pscustomobject]@{ Type = 'Script'; InstalledLocation = 'C:\Program Files\WindowsPowerShell\Scripts' } } `
+            -ParameterFilter { $Scope -eq 'AllUsers' }
+        Mock Get-PSResource { }
+
+        Get-InstalledWinCleanLocation | Should -Contain 'C:\Program Files\WindowsPowerShell\Scripts'
+    }
+
+    It "ignores a PSResourceGet module that shares the name" {
+        Mock Get-InstalledScript { }
+        Mock Get-PSResource {
+            @([pscustomobject]@{ Type = 'Module'; InstalledLocation = 'C:\Modules\WinClean\1.0' },
+              [pscustomobject]@{ Type = 'Script'; InstalledLocation = 'C:\Scripts' })
+        }
+
+        $result = @(Get-InstalledWinCleanLocation)
+        $result | Should -Contain 'C:\Scripts'
+        $result | Should -Not -Contain 'C:\Modules\WinClean\1.0'
+    }
+
+    It "drops duplicates reported by both providers" {
+        Mock Get-InstalledScript { [pscustomobject]@{ Name = 'WinClean'; InstalledLocation = 'C:\Scripts' } }
+        Mock Get-PSResource { [pscustomobject]@{ Type = 'Script'; InstalledLocation = 'C:\Scripts' } }
+
+        @(Get-InstalledWinCleanLocation).Count | Should -Be 1
+    }
+
+    It "drops duplicates that the two providers spell with different casing" {
+        Mock Get-InstalledScript { [pscustomobject]@{ Name = 'WinClean'; InstalledLocation = 'C:\Scripts' } }
+        Mock Get-PSResource { [pscustomobject]@{ Type = 'Script'; InstalledLocation = 'c:\scripts' } }
+
+        @(Get-InstalledWinCleanLocation).Count | Should -Be 1
+    }
+
+    It "keeps querying the first provider's result when the second one throws" {
+        # The mirror of the case above: isolation has to hold in both directions
+        Mock Get-InstalledScript { [pscustomobject]@{ Name = 'WinClean'; InstalledLocation = 'C:\Scripts' } }
+        Mock Get-PSResource { throw "provider is broken" }
+
+        Get-InstalledWinCleanLocation | Should -Contain 'C:\Scripts'
+    }
+
+    It "collapses locations that differ only by a trailing separator" {
+        Mock Get-InstalledScript { [pscustomobject]@{ Name = 'WinClean'; InstalledLocation = 'C:\Scripts' } }
+        Mock Get-PSResource { [pscustomobject]@{ Type = 'Script'; InstalledLocation = 'C:\Scripts\' } }
+
+        @(Get-InstalledWinCleanLocation).Count | Should -Be 1
+    }
+
+    It "keeps two genuinely different locations" {
+        Mock Get-InstalledScript { [pscustomobject]@{ Name = 'WinClean'; InstalledLocation = 'C:\Users\u\Documents\PowerShell\Scripts' } }
+        Mock Get-PSResource { [pscustomobject]@{ Type = 'Script'; InstalledLocation = 'C:\Program Files\WindowsPowerShell\Scripts' } }
+
+        @(Get-InstalledWinCleanLocation).Count | Should -Be 2
+    }
+}
+
+Describe "Get-ScriptFileVersion" -Tag "Unit", "Helper", "V221" {
+    It "reads the version out of the real WinClean.ps1" {
+        # Ties verification to the product: if the PSScriptInfo layout ever changes, this
+        # fails instead of silently returning $null forever, which would quietly turn
+        # every future update into "could not be verified"
+        Get-ScriptFileVersion -Path $script:WinCleanPath | Should -Be $script:Version
+    }
+
+    It "returns null for a file that does not exist" {
+        Get-ScriptFileVersion -Path (Join-Path ([System.IO.Path]::GetTempPath()) "no-such-$(Get-Random).ps1") |
+            Should -BeNullOrEmpty
+    }
+
+    It "returns null for a file without a .VERSION line" {
+        $tmp = Join-Path ([System.IO.Path]::GetTempPath()) "WinCleanVer_$(Get-Random).ps1"
+        try {
+            Set-Content -LiteralPath $tmp -Value @('# nothing here', 'Write-Host "hi"') -Encoding UTF8
+            Get-ScriptFileVersion -Path $tmp | Should -BeNullOrEmpty
+        } finally { Remove-Item $tmp -Force -ErrorAction SilentlyContinue }
+    }
+
+    It "reads a version from a synthetic PSScriptInfo block" {
+        $tmp = Join-Path ([System.IO.Path]::GetTempPath()) "WinCleanVer_$(Get-Random).ps1"
+        try {
+            Set-Content -LiteralPath $tmp -Value @('<#PSScriptInfo', '.VERSION 9.9', '.GUID x', '#>') -Encoding UTF8
+            Get-ScriptFileVersion -Path $tmp | Should -Be '9.9'
+        } finally { Remove-Item $tmp -Force -ErrorAction SilentlyContinue }
+    }
+
+    It "returns null for <name> instead of throwing" -ForEach @(
+        @{ name = 'a null path'; path = $null }
+        @{ name = 'an empty path'; path = '' }
+    ) {
+        Get-ScriptFileVersion -Path $path | Should -BeNullOrEmpty
+    }
+}
+
+Describe "Get-UpdateInstruction" -Tag "Unit", "Helper", "V221" {
+    It "tells the gallery copy to use Update-Script" {
+        ((Get-UpdateInstruction -Channel 'gallery') -join "`n").Contains('Update-Script') | Should -BeTrue
+    }
+
+    It "names Update-PSResource instead on a machine without PowerShellGet" {
+        # Advice that cannot be run is not advice
+        Mock Get-Command { $null } -ParameterFilter { $Name -eq 'Update-Script' }
+
+        $text = (Get-UpdateInstruction -Channel 'gallery') -join "`n"
+        $text.Contains('Update-PSResource') | Should -BeTrue
+        $text.Contains('Update-Script') | Should -BeFalse
+    }
+
+    It "honours the answering provider even when both updaters are installed" {
+        # The realistic broken-PowerShellGet machine: both commands exist, so presence
+        # alone cannot choose. Ignoring Provider here would advise the command that just
+        # failed, and no other test would notice
+        $text = (Get-UpdateInstruction -Channel 'gallery' -Provider 'PSResourceGet') -join "`n"
+        $text.Contains('Update-PSResource') | Should -BeTrue
+        $text.Contains('Update-Script') | Should -BeFalse
+    }
+
+    It "names no updater at all when neither provider is installed" {
+        # Naming a command that does not exist is the same mistake as naming the wrong one
+        Mock Get-Command { $null } -ParameterFilter { $Name -in 'Update-Script', 'Update-PSResource' }
+
+        $text = (Get-UpdateInstruction -Channel 'gallery') -join "`n"
+        $text.Contains('Update-Script') | Should -BeFalse
+        $text.Contains('Update-PSResource') | Should -BeFalse
+        $text.Contains('releases/latest') | Should -BeTrue
+    }
+
+    It "REGRESSION: never advises Install-Script for <channel>, which would add a second copy" -ForEach @(
+        @{ channel = 'installer' }
+        @{ channel = 'oneliner' }
+        @{ channel = 'manual' }
+        @{ channel = 'unknown' }
+        @{ channel = 'gallery-unverified' }
+    ) {
+        # The old code showed "Install-Script -Name WinClean" to every non-gallery copy.
+        # Following it builds the two-install state that made the update silently target
+        # the wrong file: the advice created the very configuration it could not handle.
+        ((Get-UpdateInstruction -Channel $channel) -join "`n").Contains('Install-Script') | Should -BeFalse
+    }
+
+    It "points <channel> at <expected>" -ForEach @(
+        @{ channel = 'installer'; expected = 'install.ps1' }
+        @{ channel = 'oneliner'; expected = 'get.ps1' }
+        @{ channel = 'manual'; expected = 'install.ps1' }
+    ) {
+        ((Get-UpdateInstruction -Channel $channel) -join "`n").Contains($expected) | Should -BeTrue
+    }
+
+    It "says the location is unknown only for the unknown channel" {
+        ((Get-UpdateInstruction -Channel 'unknown') -join "`n").Contains('could not be determined') | Should -BeTrue
+        ((Get-UpdateInstruction -Channel 'manual') -join "`n").Contains('could not be determined') | Should -BeFalse
+    }
+
+    It "returns usable advice for an unforeseen channel value" {
+        $text = Get-UpdateInstruction -Channel 'something-new'
+        $text | Should -Not -BeNullOrEmpty
+        ($text -join "`n").Contains('install.ps1') | Should -BeTrue
+    }
+
+    It "REGRESSION: does not tell a Gallery copy it came from somewhere else" {
+        # Shown when an update reported success but the running file did not change. This
+        # branch used to print the 'manual' text, which denies the copy's own provenance
+        # and points at install.ps1 - adding a second installation, the state that caused
+        # the wrong-target defect to begin with
+        $text = (Get-UpdateInstruction -Channel 'gallery-unverified') -join "`n"
+        # Positive invariants, not the absence of one phrasing: an assertion that hunts a
+        # string the product no longer contains can never fail, and looks like protection
+        $text.Contains('does not match') | Should -BeFalse    # provenance is not denied
+        $text.Contains('install.ps1') | Should -BeFalse       # no second installation
+        $text.Contains('Get-InstalledScript') | Should -BeTrue
+        $text.Contains('Get-PSResource') | Should -BeTrue
+    }
+}
+
+Describe "Find-GalleryWinClean" -Tag "Unit", "Helper", "V221" {
+    It "asks PSResourceGet when PowerShellGet's Find-Script is not installed" {
+        # REGRESSION: discovery called Find-Script unconditionally. On a PSResourceGet-only
+        # machine it does not exist, discovery threw, the caller's catch turned that into
+        # "no update available", and the updater fallback below it could never be reached -
+        # the whole update path was dead while every surrounding test stayed green
+        Mock Get-Command { $null } -ParameterFilter { $Name -eq 'Find-Script' }
+        Mock Find-PSResource { [pscustomobject]@{ Type = 'Script'; Version = '9.9'; ReleaseNotes = 'notes' } }
+
+        $found = Find-GalleryWinClean
+        $found.Version | Should -Be '9.9'
+        $found.ReleaseNotes | Should -Be 'notes'
+    }
+
+    It "ignores a module of the same name when asking PSResourceGet" {
+        Mock Get-Command { $null } -ParameterFilter { $Name -eq 'Find-Script' }
+        Mock Find-PSResource {
+            @([pscustomobject]@{ Type = 'Module'; Version = '99.0' },
+              [pscustomobject]@{ Type = 'Script'; Version = '9.9' })
+        }
+
+        (Find-GalleryWinClean).Version | Should -Be '9.9'
+    }
+
+    It "returns null when neither provider can be asked" {
+        Mock Get-Command { $null } -ParameterFilter { $Name -in 'Find-Script', 'Find-PSResource' }
+
+        Find-GalleryWinClean | Should -BeNullOrEmpty
+    }
+
+    It "returns null when the Gallery knows nothing about WinClean" {
+        # Both must be silenced: an empty answer from one provider is not an answer for
+        # the other, so discovery goes on to ask it
+        Mock Find-Script { }
+        Mock Find-PSResource { }
+
+        Find-GalleryWinClean | Should -BeNullOrEmpty
+    }
+
+    It "asks PSResourceGet when Find-Script answers with nothing" {
+        # Pinned with -Invoke: an empty answer from one provider is not authoritative for
+        # the other, and a test where both are empty would pass either way
+        Mock Find-Script { }
+        Mock Find-PSResource { [pscustomobject]@{ Type = 'Script'; Version = '9.9'; ReleaseNotes = 'n' } }
+
+        (Find-GalleryWinClean).Version | Should -Be '9.9'
+        Should -Invoke Find-PSResource -Times 1
+    }
+
+    It "reports which provider answered" {
+        Mock Find-Script { throw "broken" }
+        Mock Find-PSResource { [pscustomobject]@{ Type = 'Script'; Version = '9.9'; ReleaseNotes = 'n' } }
+
+        (Find-GalleryWinClean).Provider | Should -Be 'PSResourceGet'
+    }
+
+    It "tries PSResourceGet when Find-Script exists but fails" {
+        # Falling back only on ABSENCE let a present-but-broken PowerShellGet (an
+        # unregistered PSGallery, say) mask a PSResourceGet that would have answered.
+        # Each provider keeps its own repository registration
+        Mock Find-Script { throw "PSGallery is not registered for PowerShellGet" }
+        Mock Find-PSResource { [pscustomobject]@{ Type = 'Script'; Version = '9.9'; ReleaseNotes = 'n' } }
+
+        (Find-GalleryWinClean).Version | Should -Be '9.9'
+    }
+
+    It "REGRESSION: throws when both providers failed, instead of resembling 'up to date'" {
+        # The per-provider catches introduced for fallback swallowed the last error too, so
+        # an unregistered PSGallery, a TLS or proxy failure and an unpublished script all
+        # returned $null - which the caller reads as "asked, nothing newer" and prints
+        # nothing at all. Before those catches, the exception reached the caller and was
+        # logged. Failing to ask is not an answer
+        Mock Find-Script { throw "broken" }
+        Mock Find-PSResource { throw "also broken" }
+
+        { Find-GalleryWinClean } | Should -Throw
+    }
+
+    It "returns null when PSResourceGet only knows a module of that name" {
+        Mock Get-Command { $null } -ParameterFilter { $Name -eq 'Find-Script' }
+        Mock Find-PSResource { [pscustomobject]@{ Type = 'Module'; Version = '99.0' } }
+
+        Find-GalleryWinClean | Should -BeNullOrEmpty
+    }
+}
+
+Describe "Select-UpdateCommand" -Tag "Unit", "Helper", "V221" {
+    It "prefers PowerShellGet when discovery answered through it" {
+        Select-UpdateCommand -Provider 'PowerShellGet' | Should -Be 'Update-Script'
+    }
+
+    It "prefers PSResourceGet when discovery answered through it, even with both installed" {
+        # The point of carrying the provider: on a machine where PowerShellGet exists but
+        # is broken, discovery succeeds through PSResourceGet and the updater must not go
+        # straight back to the provider that just failed
+        Select-UpdateCommand -Provider 'PSResourceGet' | Should -Be 'Update-PSResource'
+    }
+
+    It "falls back to the other provider when the preferred one has no updater" {
+        Mock Get-Command { $null } -ParameterFilter { $Name -eq 'Update-PSResource' }
+
+        Select-UpdateCommand -Provider 'PSResourceGet' | Should -Be 'Update-Script'
+    }
+
+    It "defaults to PowerShellGet when the provider is <name>" -ForEach @(
+        @{ name = 'unknown'; provider = $null }
+        @{ name = 'empty'; provider = '' }
+        @{ name = 'unrecognised'; provider = 'SomethingElse' }
+    ) {
+        Select-UpdateCommand -Provider $provider | Should -Be 'Update-Script'
+    }
+
+    It "returns null when neither updater exists" {
+        Mock Get-Command { $null } -ParameterFilter { $Name -in 'Update-Script', 'Update-PSResource' }
+
+        Select-UpdateCommand -Provider 'PowerShellGet' | Should -BeNullOrEmpty
+    }
+}
+
+Describe "Test-ScriptUpdate" -Tag "Unit", "Helper", "V221" {
+    It "reports an update with the channel of the running copy" {
+        Mock Test-PSGalleryConnection { $true }
+        Mock Find-GalleryWinClean { @{ Version = '99.9'; ReleaseNotes = 'notes' } }
+
+        $info = Test-ScriptUpdate
+        $info | Should -Not -BeNullOrEmpty
+        $info.LatestVersion | Should -Be '99.9'
+        $info.CurrentVersion | Should -Be ([Version]$script:Version).ToString()
+        # dot-sourced from the repository, so the running file is not a Gallery install
+        $info.Channel | Should -BeIn @('manual', 'installer', 'oneliner', 'gallery', 'gallery-ambiguous')
+    }
+
+    It "classifies the channel from the installations actually found" {
+        # A positive control (raised in review): the -BeIn assertion above accepts five of
+        # six values, so replacing the real lookup with an empty list survived it. That
+        # mutation kills self-update outright and sends every user the installer advice,
+        # which is the exact "second installation" outcome this release removes
+        Mock Test-PSGalleryConnection { $true }
+        Mock Find-GalleryWinClean { @{ Version = '99.9'; ReleaseNotes = 'n'; Provider = 'PowerShellGet' } }
+        Mock Get-InstalledWinCleanLocation { @((Split-Path -Parent $script:WinCleanPath)) }
+
+        (Test-ScriptUpdate).Channel | Should -Be 'gallery'
+    }
+
+    It "carries the answering provider through to the caller" {
+        # Without this, dropping Provider here would silently send every machine back to
+        # PowerShellGet-first selection - including the ones where it is broken
+        Mock Test-PSGalleryConnection { $true }
+        Mock Find-GalleryWinClean { @{ Version = '99.9'; ReleaseNotes = 'n'; Provider = 'PSResourceGet' } }
+
+        (Test-ScriptUpdate).Provider | Should -Be 'PSResourceGet'
+    }
+
+    It "reports nothing when the Gallery is not newer" {
+        Mock Test-PSGalleryConnection { $true }
+        Mock Find-GalleryWinClean { @{ Version = '0.1'; ReleaseNotes = '' } }
+
+        Test-ScriptUpdate | Should -BeNullOrEmpty
+    }
+
+    It "reports nothing when no provider can answer" {
+        Mock Test-PSGalleryConnection { $true }
+        Mock Find-GalleryWinClean { $null }
+
+        Test-ScriptUpdate | Should -BeNullOrEmpty
+    }
+
+    It "turns a <name> failure into a counted warning rather than silence" -ForEach @(
+        @{ name = 'discovery'; target = 'Find-GalleryWinClean' }
+        @{ name = 'installed-copy lookup'; target = 'Get-InstalledWinCleanLocation' }
+    ) {
+        # Both helpers now throw when they could not ask at all. That is only useful if the
+        # caller converts it into something a human or a log reader can see
+        Mock Test-PSGalleryConnection { $true }
+        Mock Find-GalleryWinClean { @{ Version = '99.9'; ReleaseNotes = 'n'; Provider = 'PowerShellGet' } }
+        Mock $target { throw "provider unavailable" }
+        $script:Stats.WarningsCount = 0
+
+        Test-ScriptUpdate | Should -BeNullOrEmpty
+        [int]$script:Stats.WarningsCount | Should -Be 1
+    }
+}
+
+Describe "Invoke-ScriptUpdate branches" -Tag "Unit", "Helper", "V221" {
+    # These branches were unreachable by the helper tests, which only proved that the
+    # instruction TEXT exists - not that Invoke-ScriptUpdate ever prints it (raised in
+    # review). Every branch here returns instead of reaching `exit 0`, so the suite is safe.
+
+    BeforeEach {
+        $script:Stats.WarningsCount = 0
+        $script:Stats.ErrorsCount = 0
+        $script:Stats.Aborted = $null
+        $script:printed = [System.Collections.Generic.List[string]]::new()
+        Mock Write-Host { if ($Object) { $script:printed.Add([string]$Object) } }
+        # Without this the interactive branches block on a real console waiting for a
+        # keypress, which hung the whole suite until the process was killed
+        Mock Wait-ForKeyPress { }
+        # Pester 5 runs a Describe body during discovery only, so a variable declared there
+        # is gone by the time the tests run - it must be built per test
+        $script:info = @{ CurrentVersion = '2.20'; LatestVersion = '2.21'; Channel = 'installer' }
+    }
+
+    It "prints the applicable instruction in ReportOnly mode instead of staying silent" {
+        $ReportOnly = $true
+        Invoke-ScriptUpdate -UpdateInfo $script:info
+
+        ($script:printed -join "`n").Contains('install.ps1') | Should -BeTrue
+    }
+
+    It "forwards the provider into the <mode> instruction" -ForEach @(
+        @{ mode = 'ReportOnly'; reportOnly = $true; interactive = $true }
+        @{ mode = 'non-interactive'; reportOnly = $false; interactive = $false }
+    ) {
+        # These two call sites pass -Provider; dropping it from either would advise
+        # Update-Script on a machine that just proved PowerShellGet does not work, and
+        # the direct Get-UpdateInstruction test would not notice
+        $ReportOnly = $reportOnly
+        Mock Test-InteractiveConsole { $interactive }
+        # Not optional (raised in review): this case is Channel='gallery' and interactive,
+        # so if the ReportOnly early return is ever lost, an unmocked run would call the
+        # real Update-Script on whatever machine executes the suite
+        Mock Read-Host { 'n' }
+        Mock Update-Script { }
+        Mock Update-PSResource { }
+
+        Invoke-ScriptUpdate -UpdateInfo @{ CurrentVersion = '2.20'; LatestVersion = '2.21'
+                                           Channel = 'gallery'; Provider = 'PSResourceGet' }
+
+        Should -Invoke Update-Script -Times 0
+        Should -Invoke Update-PSResource -Times 0
+        $text = $script:printed -join "`n"
+        $text.Contains('Update-PSResource') | Should -BeTrue
+        $text.Contains('Update-Script') | Should -BeFalse
+    }
+
+    It "prints the running path in the <channel> instruction" -ForEach @(
+        @{ channel = 'gallery-ambiguous'; interactive = $true }
+        @{ channel = 'installer'; interactive = $false }
+    ) {
+        # -ExecutingPath was pinned at one call site only, so dropping it from the other
+        # three survived every test - including the ambiguous branch, where the printed
+        # path is the only way a reader can tell the installations apart
+        Mock Test-InteractiveConsole { $interactive }
+        Mock Read-Host { 'n' }
+        Mock Update-Script { }
+
+        Invoke-ScriptUpdate -UpdateInfo @{ CurrentVersion = '2.20'; LatestVersion = '2.21'
+                                           Channel = $channel; Provider = 'PowerShellGet' }
+
+        if ($channel -eq 'gallery-ambiguous') {
+            ($script:printed -join "`n").Contains($script:WinCleanPath) | Should -BeTrue
+        } else {
+            # 'installer' does not print the path, and the docs must not claim it does
+            ($script:printed -join "`n").Contains('install.ps1') | Should -BeTrue
+        }
+    }
+
+    It "verifies the update against the file that is running" {
+        # Dropping -Path $PSCommandPath survived every test, because they all mock
+        # Get-ScriptFileVersion and none checks what it was asked about. The effect would be
+        # a false "could not be read back" on every genuinely successful update
+        # Captured directly rather than via -ParameterFilter: the filter form passed even
+        # with the path mutated to a nonsense value, so it was proving nothing
+        $script:askedPath = 'never set'
+        Mock Test-InteractiveConsole { $true }
+        Mock Read-Host { 'y' }
+        Mock Update-Script { }
+        Mock Get-ScriptFileVersion { $script:askedPath = $Path; '2.20' }
+
+        Invoke-ScriptUpdate -UpdateInfo @{ CurrentVersion = '2.20'; LatestVersion = '2.21'
+                                           Channel = 'gallery'; Provider = 'PowerShellGet' }
+
+        $script:askedPath | Should -Be $script:WinCleanPath
+    }
+
+    It "writes the result JSON before exiting on a verified update" {
+        # The success path ends in `exit 0`, which bypasses the finally in Start-WinClean -
+        # and Start-WinClean has already deleted any previous result file by then, so
+        # without this a consumer saw exit code 0 and no artefact, indistinguishable from a
+        # crash. Wait-ForKeyPress is the last statement before the exit, so throwing from it
+        # proves the end of the path was reached without letting the suite exit
+        Mock Test-InteractiveConsole { $true }
+        Mock Read-Host { 'y' }
+        Mock Update-Script { }
+        Mock Get-ScriptFileVersion { '2.21' }
+        Mock Write-ResultJson { }
+        Mock Wait-ForKeyPress { throw 'REACHED_EXIT' }
+
+        { Invoke-ScriptUpdate -UpdateInfo @{ CurrentVersion = '2.20'; LatestVersion = '2.21'
+                                             Channel = 'gallery'; Provider = 'PowerShellGet' } } |
+            Should -Throw -ExpectedMessage 'REACHED_EXIT'
+
+        Should -Invoke Write-ResultJson -Times 1
+        $script:Stats.Aborted | Should -Be 'UpdatedAndExited'
+        ($script:printed -join "`n").Contains('Update complete') | Should -BeTrue
+    }
+
+    It "never calls an updater for a copy that is not Gallery-managed" {
+        Mock Test-InteractiveConsole { $false }
+        Mock Update-Script { }
+        Mock Update-PSResource { }
+
+        Invoke-ScriptUpdate -UpdateInfo $script:info
+
+        Should -Invoke Update-Script -Times 0
+        Should -Invoke Update-PSResource -Times 0
+        ($script:printed -join "`n").Contains('install.ps1') | Should -BeTrue
+    }
+
+    It "declines to update when several Gallery installations exist, in an interactive session" {
+        # Interactive on purpose: with a non-interactive console the function returns
+        # earlier, so a regression treating 'gallery-ambiguous' as updatable would only
+        # show up here. Read-Host would say yes if it were ever asked
+        Mock Test-InteractiveConsole { $true }
+        Mock Read-Host { 'y' }
+        Mock Update-Script { }
+        Mock Update-PSResource { }
+
+        Invoke-ScriptUpdate -UpdateInfo @{ CurrentVersion = '2.20'; LatestVersion = '2.21'
+                                           Channel = 'gallery-ambiguous' }
+
+        Should -Invoke Update-Script -Times 0
+        Should -Invoke Update-PSResource -Times 0
+        $text = $script:printed -join "`n"
+        $text.Contains('cannot tell which one an automatic update would change') | Should -BeTrue
+        # this copy IS Gallery-managed; saying otherwise contradicts the reason it is here
+        $text.Contains('does not match a Gallery installation') | Should -BeFalse
+        # and the advice must end somewhere the reader can actually act
+        $text.Contains('releases/latest') | Should -BeTrue
+    }
+
+    It "prints the path of the running copy so the installations can be told apart" {
+        # Every production call passes -ExecutingPath; without this assertion, dropping it
+        # from all four call sites would leave the suite green
+        Mock Test-InteractiveConsole { $false }
+
+        Invoke-ScriptUpdate -UpdateInfo @{ CurrentVersion = '2.20'; LatestVersion = '2.21'
+                                           Channel = 'gallery-ambiguous' }
+
+        ($script:printed -join "`n").Contains($script:WinCleanPath) | Should -BeTrue
+    }
+
+    It "counts a failed update as a warning, so the run does not exit non-zero for it" {
+        Mock Test-InteractiveConsole { $true }
+        Mock Read-Host { 'y' }
+        Mock Update-Script { throw "gallery unreachable" }
+
+        Invoke-ScriptUpdate -UpdateInfo @{ CurrentVersion = '2.20'; LatestVersion = '2.21'
+                                           Channel = 'gallery' }
+
+        [int]$script:Stats.ErrorsCount   | Should -Be 0
+        [int]$script:Stats.WarningsCount | Should -Be 1
+    }
+
+    It "REGRESSION: an update that changed nothing is reported, not announced as complete" {
+        Mock Test-InteractiveConsole { $true }
+        Mock Read-Host { 'y' }
+        Mock Update-Script { }                       # reports success, changes nothing
+        Mock Get-ScriptFileVersion { '2.20' }        # the running file stayed old
+
+        Invoke-ScriptUpdate -UpdateInfo @{ CurrentVersion = '2.20'; LatestVersion = '2.21'
+                                           Channel = 'gallery' }
+
+        [int]$script:Stats.WarningsCount | Should -Be 1
+        $text = $script:printed -join "`n"
+        $text.Contains('Update complete') | Should -BeFalse
+        $text.Contains('still reports v2.20') | Should -BeTrue
+        # and it must not deny this copy's provenance or advise a second installation
+        $text.Contains('does not match a PowerShell Gallery installation') | Should -BeFalse
+        $text.Contains('install.ps1') | Should -BeFalse
+    }
+
+    It "names the version actually read back, not the one the process started with" {
+        Mock Test-InteractiveConsole { $true }
+        Mock Read-Host { 'y' }
+        Mock Update-Script { }
+        Mock Get-ScriptFileVersion { '2.13' }        # a third copy, older than either
+
+        Invoke-ScriptUpdate -UpdateInfo @{ CurrentVersion = '2.20'; LatestVersion = '2.21'
+                                           Channel = 'gallery' }
+
+        ($script:printed -join "`n").Contains('still reports v2.13') | Should -BeTrue
+    }
+
+    It "does not update when the user declines" {
+        Mock Test-InteractiveConsole { $true }
+        Mock Read-Host { 'n' }
+        Mock Update-Script { }
+
+        Invoke-ScriptUpdate -UpdateInfo @{ CurrentVersion = '2.20'; LatestVersion = '2.21'
+                                           Channel = 'gallery' }
+
+        Should -Invoke Update-Script -Times 0
+    }
+
+    It "treats an empty answer as yes, as the Y/n prompt promises" {
+        Mock Test-InteractiveConsole { $true }
+        Mock Read-Host { '' }
+        Mock Update-Script { }
+        Mock Get-ScriptFileVersion { '2.20' }   # keeps the test out of the exit 0 path
+
+        Invoke-ScriptUpdate -UpdateInfo @{ CurrentVersion = '2.20'; LatestVersion = '2.21'
+                                           Channel = 'gallery' }
+
+        Should -Invoke Update-Script -Times 1
+    }
+
+    It "uses Update-PSResource when Update-Script is unavailable" {
+        # Named for what it proves: the updater layer alone. Reaching this on a real
+        # PSResourceGet-only machine also needs discovery to work there, which is pinned
+        # separately by the Find-GalleryWinClean tests
+        Mock Test-InteractiveConsole { $true }
+        Mock Read-Host { 'y' }
+        Mock Get-Command { $null } -ParameterFilter { $Name -eq 'Update-Script' }
+        Mock Update-PSResource { }
+        Mock Get-ScriptFileVersion { '2.20' }
+
+        Invoke-ScriptUpdate -UpdateInfo @{ CurrentVersion = '2.20'; LatestVersion = '2.21'
+                                           Channel = 'gallery' }
+
+        Should -Invoke Update-PSResource -Times 1
+    }
+
+    It "updates through the provider that answered discovery, not the one that failed" {
+        # End to end for the broken-PowerShellGet machine: discovery fell back to
+        # PSResourceGet, so the update must use it too even though Update-Script exists
+        Mock Test-InteractiveConsole { $true }
+        Mock Read-Host { 'y' }
+        Mock Update-Script { }
+        Mock Update-PSResource { }
+        Mock Get-ScriptFileVersion { '2.20' }
+
+        Invoke-ScriptUpdate -UpdateInfo @{ CurrentVersion = '2.20'; LatestVersion = '2.21'
+                                           Channel = 'gallery'; Provider = 'PSResourceGet' }
+
+        Should -Invoke Update-PSResource -Times 1
+        Should -Invoke Update-Script -Times 0
+    }
+
+    It "reports a counted warning when no update provider exists at all" {
+        Mock Test-InteractiveConsole { $true }
+        Mock Read-Host { 'y' }
+        Mock Get-Command { $null } -ParameterFilter { $Name -in 'Update-Script', 'Update-PSResource' }
+
+        Invoke-ScriptUpdate -UpdateInfo @{ CurrentVersion = '2.20'; LatestVersion = '2.21'
+                                           Channel = 'gallery' }
+
+        [int]$script:Stats.ErrorsCount   | Should -Be 0
+        [int]$script:Stats.WarningsCount | Should -Be 1
+    }
+
+    It "says the version could not be read back rather than claiming success" {
+        Mock Test-InteractiveConsole { $true }
+        Mock Read-Host { 'y' }
+        Mock Update-Script { }
+        Mock Get-ScriptFileVersion { $null }     # the file cannot be read after the update
+
+        Invoke-ScriptUpdate -UpdateInfo @{ CurrentVersion = '2.20'; LatestVersion = '2.21'
+                                           Channel = 'gallery' }
+
+        [int]$script:Stats.WarningsCount | Should -Be 1
+        $text = $script:printed -join "`n"
+        $text.Contains('could not be read back') | Should -BeTrue
+        $text.Contains('Update complete') | Should -BeFalse
+    }
+}
+
+Describe "Update-Applications when winget is absent" -Tag "Unit", "Helper", "V221" {
+
+    BeforeEach {
+        $script:Stats.ErrorsCount = 0
+        $script:Stats.WarningsCount = 0
+    }
+
+    It "counts a machine without winget as a warning, so the run can still exit 0" {
+        # The exit code is computed from ErrorsCount alone. Counting a missing optional
+        # tool as an error made every run on such a machine exit 1 with all nine phases
+        # completed, which any scheduler or CI job reads as a failed run.
+        # ReportOnly as a safety net (raised in review): this is the only test that calls a
+        # top-level phase function rather than a pure helper, and its safety otherwise rests
+        # entirely on two -ParameterFilter mocks continuing to match. If either stops
+        # matching after a refactor, the unguarded version would run `winget upgrade --all`
+        # for real on whatever machine runs the suite - including the workstation where the
+        # release gate runs Pester. The winget-not-found branch is reached identically.
+        $ReportOnly = $true
+        Mock Test-InternetConnection { $true }
+        Mock Update-Progress { }
+        Mock Get-Command { $null } -ParameterFilter { $Name -eq 'winget.exe' }
+        Mock Test-Path { $false } -ParameterFilter { "$Path".Contains('winget.exe') }
+
+        Update-Applications
+
+        [int]$script:Stats.ErrorsCount   | Should -Be 0
+        [int]$script:Stats.WarningsCount | Should -Be 1
+        # The count alone is ambiguous now that this no longer fails the run: 0 offered
+        # means "nothing to upgrade" only when the check actually happened
+        $script:Stats.AppUpdatesStatus | Should -Be 'skipped-no-winget'
+    }
+
+    It "records the parameter skip distinctly from a missing winget" {
+        $SkipUpdates = $true
+        Mock Update-Progress { }
+
+        Update-Applications
+
+        $script:Stats.AppUpdatesStatus | Should -Be 'skipped-parameter'
+    }
+
+    It "sets the parameter skip where production can reach it, not only inside the function" {
+        # Structural, because the behavioural test above enters Update-Applications
+        # directly while production never does when -SkipUpdates is passed: Invoke-Phase
+        # -Skip stops the dispatch, so the in-function branch is unreachable there and the
+        # status would stay 'not-run'. This pins the assignment that Start-WinClean makes
+        # before the phase, which no behavioural test in this suite can reach.
+        $source = Get-Content $script:WinCleanPath -Raw
+        $dispatch = $source.IndexOf("Invoke-Phase -Name 'Updates'")
+        $dispatch | Should -BeGreaterThan 0
+        $preamble = $source.Substring([math]::Max(0, $dispatch - 400), [math]::Min(400, $dispatch))
+        $preamble.Contains("AppUpdatesStatus = 'skipped-parameter'") | Should -BeTrue
+    }
+
+    It "keeps a present-but-failing winget an ERROR, and does not call that check 'checked'" {
+        # Two things the docs promise and nothing pinned: the upgrade check exiting non-zero
+        # stays an error (unlike a MISSING winget), and the status must not read 'checked'
+        # for a check that produced no list - which is the ambiguity the field exists to end.
+        # ReportOnly keeps the source-update branch out of it; every external call is mocked.
+        $ReportOnly = $true
+        Mock Update-Progress { }
+        Mock Test-InternetConnection { $true }
+        Mock Get-Command { [pscustomobject]@{ Source = 'C:\fake\winget.exe' } } -ParameterFilter { $Name -eq 'winget.exe' }
+        Mock Start-Process {
+            $proc = [pscustomobject]@{ ExitCode = 1 }
+            $proc | Add-Member -MemberType ScriptMethod -Name WaitForExit -Value { param($ms) $true }
+            $proc | Add-Member -MemberType ScriptMethod -Name Kill -Value { param($tree) }
+            $proc
+        }
+        Mock Get-Content { '' }
+        Mock Remove-Item { }
+
+        Update-Applications
+
+        [int]$script:Stats.ErrorsCount | Should -Be 1
+        $script:Stats.AppUpdatesStatus | Should -Be 'check-failed'
+    }
+
+    It "counts an offline machine as a warning too, so the run can still exit 0" {
+        # v2.21 extends the missing-winget reasoning to connectivity: an offline laptop
+        # used to end every run with code 1 no matter how completely the cleanup worked.
+        # The state stays visible through the status field rather than the exit code
+        Mock Update-Progress { }
+        Mock Test-InternetConnection { $false }
+
+        Update-Applications
+
+        $script:Stats.AppUpdatesStatus | Should -Be 'skipped-offline'
+        [int]$script:Stats.ErrorsCount   | Should -Be 0
+        [int]$script:Stats.WarningsCount | Should -Be 1
+    }
+
+    It "counts the Windows half of an offline run as a warning as well" {
+        # Both update functions read the same memoised connectivity check, so leaving one
+        # of them an error would keep the exit code at 1 and make the change pointless
+        Mock Update-Progress { }
+        Mock Test-InternetConnection { $false }
+
+        Update-WindowsSystem
+
+        [int]$script:Stats.ErrorsCount   | Should -Be 0
+        [int]$script:Stats.WarningsCount | Should -Be 1
+    }
+
+    It "runs both halves offline through the real shared cache and still exits clean" {
+        # The premise that lets one status field describe both halves is the SHARED cache,
+        # which the two tests above bypass by mocking the check itself. Here the cache is
+        # primed directly and both functions are called in the order Start-WinClean uses,
+        # so a regression in the caching or in status propagation shows up. It does NOT
+        # exercise the dispatcher itself: reordering the two calls inside Start-WinClean
+        # would still pass, and running the real phase would run real maintenance
+        $previousCache = $script:InternetConnectionCache
+        $script:InternetConnectionCache = $false
+        Mock Update-Progress { }
+        try {
+            Update-WindowsSystem
+            Update-Applications
+        } finally { $script:InternetConnectionCache = $previousCache }
+
+        $script:Stats.AppUpdatesStatus   | Should -Be 'skipped-offline'
+        [int]$script:Stats.ErrorsCount   | Should -Be 0
+        [int]$script:Stats.WarningsCount | Should -Be 2
+    }
+}
+
+#endregion

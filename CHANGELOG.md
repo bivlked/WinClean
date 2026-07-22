@@ -14,6 +14,105 @@ Windows Update driver listing, run-to-run delta and HTML report. See CLAUDE.md.
 
 ---
 
+## [2.21] - 2026-07-23
+
+A release about telling the truth on the way out. The self-update could change a file
+other than the one being run and still print "Update complete", and the exit code called
+a perfectly good maintenance run a failure whenever the machine simply lacked an optional
+tool or a network. Both are the same underlying habit: reporting a state the run did not
+actually verify.
+
+### Fixed
+
+- **The self-update updated a file that was not being run, and reported success.** The
+  check asked whether a PowerShell Gallery copy existed *anywhere on the machine*, and the
+  answer was acted on as if it had been *"is the file I am running that copy"*. Both are
+  routinely true at once: `install.ps1` (2.15) installs into `%ProgramFiles%\WinClean`,
+  which is what the desktop shortcut starts, while an older `Install-Script` copy can
+  still sit in `Documents\PowerShell\Scripts`. `Update-Script` then updated the copy in
+  Documents, printed "Update complete! Please run WinClean again to use the new version",
+  and exited 0 - and the shortcut kept starting the untouched old file, run after run,
+  with no error anywhere. The running file is now compared against the Gallery install
+  location, and a self-update is offered only when they are the same file. Every other
+  copy is told the method that actually applies to it. Not a 2.20 regression: the branch
+  dates from 2.10, and two parallel installations became an ordinary state in 2.15
+- **The advice shown to non-Gallery copies created the very problem above.** It read
+  `Install-Script -Name WinClean -Scope CurrentUser -Force`, which installs a *second*
+  copy in Documents and leaves the running one untouched - building the two-installation
+  state that the update logic then misread
+- **An update that reported success is now verified against the file on disk.** "The
+  cmdlet did not throw" is not "the running file is now the new version"; the version is
+  read back from the executing script afterwards, and anything short of the expected
+  version is reported as a warning instead of being announced as complete. The check
+  states the final version of that file, which is what the next run will use; it does not
+  attempt to prove which actor put it there. Measured on 2026-07-22 with each provider in
+  turn: either reports the other's install, so detection does not depend on which one
+  performed it
+- **The self-update now works on a machine that has only PSResourceGet.** Every step used
+  to be PowerShellGet: `Find-Script` for discovery and `Update-Script` for the update.
+  Where PowerShellGet is absent, discovery threw and the surrounding catch turned that into
+  "no update available" - it logged a warning, but no update was ever offered, and the
+  manual instruction named a command that machine cannot run. Discovery, the update and the
+  printed advice now each use whichever provider is present, and a discovery failure is
+  reported as a counted warning instead of resembling "you are up to date"
+- **Several Gallery installations now disable the automatic update instead of guessing.**
+  `AllUsers` and `CurrentUser` copies can coexist; `Update-Script` has no `-Scope` at all,
+  and while `Update-PSResource` does have one, WinClean does not map a matched install
+  location back to a scope, so nothing currently directs the update at the copy being
+  executed. Verifying afterwards would report the miss honestly, but only after the unused
+  copy had already been modified. WinClean now says several installations exist, prints the
+  path it is running from, and leaves them alone - the same rule the Storage Sense lookup
+  follows: an ambiguous target is not acted on and the reason is stated
+- **An `AllUsers` copy is now visible to PSResourceGet detection.** `Get-PSResource`
+  defaults to `CurrentUser` and searches only the Documents paths, so on a machine with
+  PSResourceGet but no PowerShellGet an `AllUsers` install - the natural scope for a script
+  that requires administrator - was invisible, and the running copy was told it did not
+  come from the Gallery and pointed at the installer, adding a second installation
+
+### Changed
+
+- **A failed self-update is a warning, not an error.** It was logged at `ERROR` without
+  incrementing the error counter, so the run printed "Update failed" and still exited 0 -
+  a contradiction in the one place that has to be believable. Failing to update the script
+  is not a failure of the maintenance that was actually requested, so it is now a counted
+  warning and the exit code agrees with the log
+- **No internet connection is a warning, not an error.** Same rule as the missing `winget`
+  below, and for the same measurable reason: the exit code comes from the error count
+  alone, so a machine with no connectivity ended **every** run with code 1 no matter how
+  completely the cleanup succeeded - a laptop that runs maintenance away from the network
+  reported failure forever. Both update functions read the same connectivity check, so
+  both are warnings now, and the state stays visible where it belongs: in the log and in
+  `AppUpdatesStatus: "skipped-offline"`, which covers the Windows half too
+- **A missing `winget` is a warning, not an error.** The exit code is computed from the
+  error count alone, so every run on a machine without App Installer ended with code 1
+  while all nine phases completed - which any scheduler, CI job or test harness reads as a
+  failed run. The absence of an optional third-party tool is a property of the machine,
+  not a failure of the run, by the same rule that makes a machine without Docker a normal
+  machine here. A `winget` that is present and then fails is still reported, at a severity
+  that follows whether the run can carry on: the upgrade check failing outright and an
+  unhandled error remain errors, while a stale source, a timeout or a partly failed batch
+  are warnings. Behaviour unchanged since 1.2; found by a full end-to-end run of the
+  published release, because ordinary stand runs pass `-SkipUpdates` and never reach it
+
+### Documentation
+
+- README (EN and RU) gained an **Updating an existing installation** table: update the
+  copy you actually run, with the method you installed it with
+- `docs/troubleshooting.md` explains the "update complete but the version never changes"
+  symptom, how to inspect and clean up a two-installation machine, and states plainly that
+  a missing `winget` no longer makes the run exit non-zero
+- `docs/result-json.md` documents `AppUpdatesStatus`, the new `UpdatedAndExited` value of
+  `Aborted`, and what each status means for reading `AppUpdatesOffered`
+
+### Tests
+
+- 452 to 573. New coverage for update-channel classification, provider discovery and
+  selection across both package providers, on-disk verification of an applied update, and
+  the severity of every skip in the Updates phase. Twenty-one mutations were run against
+  the new guards and each one failed a test
+
+---
+
 ## [2.20] - 2026-07-22
 
 A correctness and honesty round driven by a full audit of the code base, a third-party

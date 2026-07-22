@@ -102,6 +102,24 @@ cd WinClean
 .\WinClean.ps1
 ```
 
+### 🔄 Updating an existing installation
+
+Update the copy you actually run, with the method you installed it with:
+
+| Installed with | Update with |
+|----------------|-------------|
+| `install.ps1` (desktop shortcut) | re-run `irm https://raw.githubusercontent.com/bivlked/WinClean/main/install.ps1 \| iex` from an elevated terminal |
+| `get.ps1` one-liner | nothing to do - every run downloads the latest release |
+| PowerShell Gallery (`Install-Script`) | `Update-Script -Name WinClean` |
+| PowerShell Gallery (`Install-PSResource`) | `Update-PSResource -Name WinClean` |
+| Manual download or clone | download the latest release again |
+
+When a newer version exists, WinClean names the option that applies to the copy you
+launched (the check runs at startup unless `-SkipUpdates` is passed, and says nothing when
+you are already up to date). Only a copy installed from the Gallery can update itself; the others cannot,
+and are told what to do instead rather than being offered an update that would leave the
+running file untouched.
+
 </details>
 
 ---
@@ -303,7 +321,7 @@ WinClean is built to be safe to run on a working machine. The short version:
 
 ```
 ┌────────────────────────────────────────────────────────────────┐
-│                     WinClean v2.20                             │
+│                     WinClean v2.21                             │
 ├────────────────────────────────────────────────────────────────┤
 │  PREPARATION                                                   │
 │  ├─ ✓ Check Administrator Rights                               │
