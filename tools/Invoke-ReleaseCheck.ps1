@@ -209,20 +209,30 @@ try {
     # No upstream at all is not "in sync", it is "nothing to sync with"
     $hasUpstream = ($LASTEXITCODE -eq 0) -and $upstream
 
+    # Counted, not assumed: if rev-list itself fails or answers something unparseable, the
+    # zeros it was initialised with would read as "in sync" - the same shape of lie this
+    # whole check was rewritten to remove (caught in review).
     $ahead = $behind = 0
+    $countsOk = $false
     if ($hasUpstream) {
-        $counts = (& git rev-list --left-right --count 'HEAD...@{upstream}') -split '\s+'
-        if ($counts.Count -ge 2) { $ahead = [int]$counts[0]; $behind = [int]$counts[1] }
+        $counts = @((& git rev-list --left-right --count 'HEAD...@{upstream}') -split '\s+' | Where-Object { $_ -ne '' })
+        if ($LASTEXITCODE -eq 0 -and $counts.Count -ge 2 -and
+            $counts[0] -match '^\d+$' -and $counts[1] -match '^\d+$') {
+            $ahead = [int]$counts[0]
+            $behind = [int]$counts[1]
+            $countsOk = $true
+        }
     }
 
     $syncDetail =
         if (-not $fetchOk)      { "git fetch не удался - состояние origin неизвестно: $(($fetchOut | Select-Object -Last 1))" }
         elseif (-not $upstream) { 'у ветки нет upstream' }
+        elseif (-not $countsOk) { 'git rev-list не дал сравнимого ответа - расхождение с origin не проверено' }
         elseif ($ahead -or $behind) { "ahead $ahead, behind $behind (upstream: $upstream)" }
         else { '' }
 
     Add-Result -Name 'Branch is in sync with origin (verified against the remote)' `
-        -Passed ($fetchOk -and $hasUpstream -and $ahead -eq 0 -and $behind -eq 0) -Detail $syncDetail
+        -Passed ($fetchOk -and $hasUpstream -and $countsOk -and $ahead -eq 0 -and $behind -eq 0) -Detail $syncDetail
 } finally {
     Pop-Location
 }

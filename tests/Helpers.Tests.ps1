@@ -650,6 +650,16 @@ Describe "Get-RegistryValueCount" -Tag "Unit", "Helper" {
     It "Returns 0 for a key that does not exist" {
         Get-RegistryValueCount -Key "HKCU:\Software\WinCleanTest_NoSuchKey_$(Get-Random)" | Should -Be 0
     }
+
+    It "Returns null - not 0 - for a key that exists but cannot be read" {
+        # The distinction is the whole point. The first draft of this helper returned 0
+        # for an unreadable key, which recreated the bug it was written to fix: a delete
+        # that failed followed by an unreadable check would have counted as "cleared".
+        # Mocked rather than ACL-denied: creating a genuinely unreadable HKCU key on the
+        # developer's own machine is a side effect a unit test has no business leaving.
+        Mock Get-ItemProperty { throw [System.UnauthorizedAccessException]::new('denied') }
+        Get-RegistryValueCount -Key $script:probeKey | Should -BeNullOrEmpty
+    }
 }
 
 #endregion

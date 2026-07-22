@@ -1357,12 +1357,24 @@ function Get-RegistryValueCount {
         PSParentPath, PSChildName, PSDrive and PSProvider - counting those would make an
         emptied key look like it still holds five entries.
 
-        Returns 0 for a missing or unreadable key: the caller only ever asks "is anything
-        still there", and an unreadable key is reported by the caller's own comparison.
+        Tri-state on purpose (corrected in review before release): 0 for a key that is
+        absent or genuinely empty, the count for a readable key, and $null when the key is
+        there but cannot be read. The first draft returned 0 for unreadable too, which
+        recreated the very bug it was written to fix: a delete that failed, followed by an
+        unreadable after-read, would have counted as 0 and been reported as cleared.
+    .OUTPUTS
+        [int] the number of values, or $null when the key exists but cannot be read
     #>
     param([Parameter(Mandatory)][string]$Key)
 
-    $props = Get-ItemProperty -LiteralPath $Key -ErrorAction SilentlyContinue
+    try {
+        $props = Get-ItemProperty -LiteralPath $Key -ErrorAction Stop
+    } catch [System.Management.Automation.ItemNotFoundException] {
+        return 0        # not there at all - nothing to clear, and nothing to worry about
+    } catch {
+        return $null    # there, but unreadable: refuse to answer rather than answer 0
+    }
+
     if (-not $props) { return 0 }
 
     return @($props.PSObject.Properties | Where-Object {
@@ -2854,7 +2866,13 @@ function Clear-SystemCaches {
                 #
                 # A genuine failure still surfaces: the cmdlet runs with -ErrorAction Stop,
                 # so an actual error lands in the catch below as a warning.
-                Write-Log "Delivery Optimization: cache cleared, $(Format-FileSize $doSizeBefore) of non-cache data (service logs and state) left in place" -Level DETAIL
+                # Deliberately does NOT claim the cache was cleared: an unchanged folder
+                # size cannot prove that every remaining byte is non-cache. It states what
+                # is actually known - the cmdlet reported success and this much is still
+                # on disk - and leaves the reader to judge (tightened in review; the first
+                # wording asserted "cache cleared", which is the opposite failure of the
+                # warning it replaced).
+                Write-Log "Delivery Optimization: cmdlet reported success, $(Format-FileSize $doSizeBefore) still on disk (the folder also holds service logs and state, which it does not remove)" -Level DETAIL
             } else {
                 Write-Log "Delivery Optimization cache was already empty" -Level DETAIL
             }
@@ -2991,32 +3009,16 @@ function Clear-PrivacyTraces {
 
     $clearedItems = @()
 
-    # Clear Run dialog history (RunMRU)
-    $runMruKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\RunMRU"
-    if (Test-Path $runMruKey) {
-        try {
-            # Get current values before clearing
-            $mruValues = Get-ItemProperty -Path $runMruKey -ErrorAction SilentlyContinue
-            $valueCount = ($mruValues.PSObject.Properties | Where-Object { $_.Name -match '^[a-z]$' }).Count
-
-            # Remove the key and recreate it empty
-            Remove-Item -Path $runMruKey -Force -ErrorAction SilentlyContinue
-            New-Item -Path $runMruKey -Force -ErrorAction SilentlyContinue | Out-Null
-
-            if ($valueCount -gt 0) {
-                $clearedItems += "Run history ($valueCount entries)"
-            }
-        } catch {
-            Write-Log "Could not clear Run history: $_" -Level WARNING
-        }
-    }
-
     # v2.20: success is now confirmed by looking, not by the absence of an exception.
     # Remove-Item with -ErrorAction SilentlyContinue cannot throw, so the catch blocks
     # here were dead code and "$clearedItems += ..." ran unconditionally: the log said
     # "Privacy traces cleared: Explorer typed paths" even when policy or permissions had
     # rejected the deletion and the key was still sitting there, fully populated.
+    # RunMRU joins this list rather than keeping its own copy of the same logic: it used
+    # the pre-count as proof of success in exactly the way the others did (caught in
+    # review before release, when the first version of this fix left it behind).
     $historyKeys = @(
+        @{ Path = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\RunMRU";         Label = 'Run history' }
         @{ Path = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\TypedPaths";     Label = 'Explorer typed paths' }
         @{ Path = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\WordWheelQuery"; Label = 'Explorer search history' }
     )
@@ -3024,6 +3026,13 @@ function Clear-PrivacyTraces {
         if (-not (Test-Path $entry.Path)) { continue }
 
         $before = Get-RegistryValueCount -Key $entry.Path
+        if ($null -eq $before) {
+            # Present but unreadable: we cannot tell whether there is anything to clear,
+            # and silently moving on would look identical to "there was nothing"
+            Write-Log "$($entry.Label): key could not be read - left untouched" -Level WARNING
+            $script:Stats.WarningsCount++
+            continue
+        }
         # An empty key is not a trace that was cleared - it is a trace that was not there
         if ($before -eq 0) { continue }
 
@@ -3031,7 +3040,10 @@ function Clear-PrivacyTraces {
         New-Item -Path $entry.Path -Force -ErrorAction SilentlyContinue | Out-Null
 
         $after = Get-RegistryValueCount -Key $entry.Path
-        if ($after -eq 0) {
+        if ($null -eq $after) {
+            Write-Log "$($entry.Label): result could not be verified - not counted as cleared" -Level WARNING
+            $script:Stats.WarningsCount++
+        } elseif ($after -eq 0) {
             $clearedItems += $entry.Label
         } else {
             Write-Log "$($entry.Label): $after of $before entries remain - not cleared" -Level WARNING
@@ -4235,6 +4247,20 @@ function Invoke-StorageSense {
         return
     }
 
+    # cleanmgr's saved selection lives under this sageset. Both are needed up front: the
+    # sweep below runs on EVERY path, not only when cleanmgr is reached.
+    $sageset = 9999
+    $regPath = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\VolumeCaches"
+
+    # Sweep leftovers from a previous run before doing anything else. The cleanmgr branch
+    # deliberately skips its own sweep while cleanmgr is still running (it would pull the
+    # configuration out from under it), and Storage Sense returns before that branch is
+    # reached - so a timed-out run followed only by successful Storage Sense runs would
+    # otherwise leave these flags in the registry forever. Caught in review before release.
+    Get-ChildItem -Path $regPath -ErrorAction SilentlyContinue | ForEach-Object {
+        Remove-ItemProperty -Path $_.PSPath -Name "StateFlags$sageset" -Force -ErrorAction SilentlyContinue
+    }
+
     # Try Storage Sense first (Windows 11)
     #
     # v2.20: the task was looked up at "\Microsoft\Windows\DiskCleanup\", where it does not
@@ -4245,7 +4271,16 @@ function Invoke-StorageSense {
     # finish). Searching by name instead of by a hardcoded path also survives the folder
     # moving again.
     $ssTaskName = "StorageSense"
-    $task = @(Get-ScheduledTask -TaskName $ssTaskName -ErrorAction SilentlyContinue) | Select-Object -First 1
+    $ssTasks = @(Get-ScheduledTask -TaskName $ssTaskName -ErrorAction SilentlyContinue)
+    # Windows ships exactly one. If a machine somehow has more, say so and take none:
+    # silently picking the first of several tasks with the same name means starting
+    # something nobody identified (raised in review).
+    if ($ssTasks.Count -gt 1) {
+        Write-Log "Storage Sense: $($ssTasks.Count) tasks with that name ($(($ssTasks | ForEach-Object { $_.TaskPath }) -join ', ')) - not guessing, using Disk Cleanup" -Level INFO
+        $task = $null
+    } else {
+        $task = $ssTasks | Select-Object -First 1
+    }
 
     # Verified below; only a task that demonstrably ran successfully skips cleanmgr
     $storageSenseDone = $false
@@ -4347,9 +4382,8 @@ function Invoke-StorageSense {
             Write-Log "Storage Sense task is disabled, using Disk Cleanup..." -Level INFO
         }
 
-        # Configure cleanup categories
-        $sageset = 9999
-        $regPath = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\VolumeCaches"
+        # Configure cleanup categories ($sageset / $regPath are set at the top of the
+        # function, because the leftover sweep needs them on every path)
 
         # Note (v2.14): "Previous Installations" removed - Windows.old deletion must go
         # through Clear-WindowsOld which asks for user confirmation.
@@ -4386,6 +4420,8 @@ function Invoke-StorageSense {
             "Windows Upgrade Log Files"
         )
 
+        # Defined before the try so the finally can always ask whether it exists
+        $cleanmgr = $null
         try {
             # Set StateFlags for cleanup categories.
             # v2.16: count what was actually armed. Previously a failed write was
