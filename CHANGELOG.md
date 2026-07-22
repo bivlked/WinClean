@@ -63,6 +63,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a contradiction in the one place that has to be believable. Failing to update the script
   is not a failure of the maintenance that was actually requested, so it is now a counted
   warning and the exit code agrees with the log
+- **No internet connection is a warning, not an error.** Same rule as the missing `winget`
+  below, and for the same measurable reason: the exit code comes from the error count
+  alone, so a machine with no connectivity ended **every** run with code 1 no matter how
+  completely the cleanup succeeded - a laptop that runs maintenance away from the network
+  reported failure forever. Both update functions read the same connectivity check, so
+  both are warnings now, and the state stays visible where it belongs: in the log and in
+  `AppUpdatesStatus: "skipped-offline"`, which covers the Windows half too
 - **A missing `winget` is a warning, not an error.** The exit code is computed from the
   error count alone, so every run on a machine without App Installer ended with code 1
   while all nine phases completed - which any scheduler, CI job or test harness reads as a

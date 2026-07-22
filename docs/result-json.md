@@ -72,7 +72,7 @@ Consequently:
 | `checked` | winget was found, asked, and returned a list. `AppUpdatesOffered` is a real answer. |
 | `check-failed` | winget was found but the check did not produce a list - it timed out, exited non-zero, or could not be completed at all. The count is meaningless. |
 | `skipped-no-winget` | winget is not installed on this machine. The run continues; a warning is logged. |
-| `skipped-offline` | No connectivity, so the update phases stopped before winget. This branch is still an **error**. |
+| `skipped-offline` | No connectivity. Both halves of the Updates phase (Windows and apps) read the same connectivity check, so this value describes the whole phase, not just winget. A warning, not an error, since v2.21. |
 | `skipped-parameter` | `-SkipUpdates` was passed. |
 | `not-run` | The phase never executed (for example the run aborted earlier). |
 

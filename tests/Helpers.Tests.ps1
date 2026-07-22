@@ -2373,16 +2373,50 @@ Describe "Update-Applications when winget is absent" -Tag "Unit", "Helper", "V22
         $script:Stats.AppUpdatesStatus | Should -Be 'check-failed'
     }
 
-    It "records an offline machine distinctly, and that branch is still an error" {
-        # docs/troubleshooting.md promises this boundary explicitly: a missing winget is a
-        # warning, but no connectivity remains an error and still fails the run
+    It "counts an offline machine as a warning too, so the run can still exit 0" {
+        # v2.21 extends the missing-winget reasoning to connectivity: an offline laptop
+        # used to end every run with code 1 no matter how completely the cleanup worked.
+        # The state stays visible through the status field rather than the exit code
         Mock Update-Progress { }
         Mock Test-InternetConnection { $false }
 
         Update-Applications
 
         $script:Stats.AppUpdatesStatus | Should -Be 'skipped-offline'
-        [int]$script:Stats.ErrorsCount | Should -Be 1
+        [int]$script:Stats.ErrorsCount   | Should -Be 0
+        [int]$script:Stats.WarningsCount | Should -Be 1
+    }
+
+    It "counts the Windows half of an offline run as a warning as well" {
+        # Both update functions read the same memoised connectivity check, so leaving one
+        # of them an error would keep the exit code at 1 and make the change pointless
+        Mock Update-Progress { }
+        Mock Test-InternetConnection { $false }
+
+        Update-WindowsSystem
+
+        [int]$script:Stats.ErrorsCount   | Should -Be 0
+        [int]$script:Stats.WarningsCount | Should -Be 1
+    }
+
+    It "runs both halves offline through the real shared cache and still exits clean" {
+        # The premise that lets one status field describe both halves is the SHARED cache,
+        # which the two tests above bypass by mocking the check itself. Here the cache is
+        # primed directly and both functions are called in the order Start-WinClean uses,
+        # so a regression in the caching or in status propagation shows up. It does NOT
+        # exercise the dispatcher itself: reordering the two calls inside Start-WinClean
+        # would still pass, and running the real phase would run real maintenance
+        $previousCache = $script:InternetConnectionCache
+        $script:InternetConnectionCache = $false
+        Mock Update-Progress { }
+        try {
+            Update-WindowsSystem
+            Update-Applications
+        } finally { $script:InternetConnectionCache = $previousCache }
+
+        $script:Stats.AppUpdatesStatus   | Should -Be 'skipped-offline'
+        [int]$script:Stats.ErrorsCount   | Should -Be 0
+        [int]$script:Stats.WarningsCount | Should -Be 2
     }
 }
 

@@ -340,7 +340,7 @@ function New-RunStats {
     # apps actually installed (it silently skips pinned/manifest-less/UAC-cancelled ones),
     # so we only ever know how many it OFFERED. Naming it "installed" was a false claim.
     AppUpdatesOffered    = 0
-    # v2.21: why the app-update phase produced the count it did. Added because demoting a
+    # v2.21: why the app half of the Updates phase produced the count it did. Added because demoting a
     # missing winget from error to warning removed the only machine-readable way to tell
     # "checked, nothing to upgrade" from "could not check at all" - both are
     # AppUpdatesOffered = 0 with WarningsCount incremented by one of many possible causes.
@@ -383,7 +383,7 @@ $script:Stats = New-RunStats
 $script:ProgressActivities = @()
 
 # Memoized Test-InternetConnection result for the whole run (v2.17, p.5 of the audit):
-# the check costs up to ~15s offline and is called from two separate update phases
+# the check costs up to ~15s offline and is called from both halves of the Updates phase
 $script:InternetConnectionCache = $null
 
 # Latched by Write-Log when the log file cannot be written, so the failure is reported
@@ -762,8 +762,8 @@ function Test-InternetConnection {
     .DESCRIPTION
         Использует TcpClient с явным таймаутом (3 сек) вместо Test-NetConnection,
         который может зависать на 20-30 секунд при VPN или нестабильном соединении.
-        Результат кэшируется на весь прогон (v2.17): вызывается из двух фаз
-        (Windows Update, Applications Update), до 15 сек на офлайн-машине каждый раз.
+        Результат кэшируется на весь прогон (v2.17): вызывается из обеих половин фазы
+        Updates (Windows Update, Applications Update), до 15 сек на офлайн-машине каждый раз.
         Сетевая связность внутри одного прогона скрипта не меняется настолько часто,
         чтобы повторная проверка была оправдана. -Force сбрасывает кэш.
     #>
@@ -2717,8 +2717,15 @@ function Update-WindowsSystem {
     }
 
     if (-not (Test-InternetConnection)) {
-        Write-Log "No internet connection - skipping Windows Update" -Level ERROR
-        $script:Stats.ErrorsCount++
+        # v2.21: a warning, not an error, for the same reason a missing winget is one - the
+        # exit code is computed from ErrorsCount alone, so an offline machine ended every
+        # run with code 1 no matter how completely the cleanup succeeded, and a laptop that
+        # runs maintenance away from the network reported failure forever. Having no
+        # connectivity is a state of the environment, not a failure of this run. It stays
+        # visible: the warning is logged and counted, and the result JSON carries
+        # AppUpdatesStatus = 'skipped-offline' for the whole Updates phase.
+        Write-Log "No internet connection - skipping Windows Update" -Level WARNING
+        $script:Stats.WarningsCount++
         return
     }
 
@@ -2937,9 +2944,12 @@ function Update-Applications {
     }
 
     if (-not (Test-InternetConnection)) {
-        Write-Log "No internet connection - skipping app updates" -Level ERROR
+        # v2.21: warning, matching Update-WindowsSystem above - see the reasoning there.
+        # Both halves read the same memoised connectivity check, so this status describes
+        # the whole Updates phase, not only the winget half.
+        Write-Log "No internet connection - skipping app updates" -Level WARNING
         $script:Stats.AppUpdatesStatus = 'skipped-offline'
-        $script:Stats.ErrorsCount++
+        $script:Stats.WarningsCount++
         return
     }
 

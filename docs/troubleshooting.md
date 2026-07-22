@@ -21,11 +21,11 @@ If the check itself cannot run (third-party antivirus, stripped image, broken WM
 
 ## App updates are skipped (winget not found)
 
-If `winget` is not installed, the application-update phase is skipped and the run continues. Windows updates (via PSWindowsUpdate) are unaffected.
+If `winget` is not installed, the app half of the Updates phase is skipped and the run continues. Windows updates (via PSWindowsUpdate) are unaffected.
 
 This is reported as a **warning**, and the run can still finish with **exit code 0**. Before v2.21 it was an error, and since the exit code is derived from the error count alone, every run on a machine without App Installer ended with code 1 even though all nine phases completed - which any scheduler or CI job reads as a failed run. A missing optional third-party tool is a property of the machine, not a failure of the run, the same way a machine without Docker is a normal machine here. A `winget` that **is** present and then fails is still reported, at a severity that follows whether the run can safely carry on: the upgrade check failing outright or an unhandled error is an error, while a stale package source, a timeout or a partly failed upgrade batch is a warning.
 
-Note that a machine with **no internet connection** never reaches the winget check: the update phases stop earlier, and that earlier branch is still an error. So "a missing winget no longer fails the run" holds for an online machine without App Installer, not for an offline one.
+A machine with **no internet connection** never reaches the winget check at all: both halves of the Updates phase stop earlier, on the same connectivity check. Since v2.21 that branch is also a warning rather than an error, for the same reason - a laptop running maintenance away from the network otherwise reported failure on every run, however completely the cleanup succeeded. The result JSON records `AppUpdatesStatus: "skipped-offline"`, which covers the Windows half too.
 
 **Fix:** install **App Installer** from the Microsoft Store, or bootstrap winget, then re-run. Note that the app-update count in the summary is what winget **offered**, not a confirmed install count (see [FAQ](faq.md) and [result-json.md](result-json.md)).
 
@@ -124,7 +124,11 @@ Either way the summary line stays truthful: it counts updates **offered**, not i
 
 ## Windows updates are skipped (PowerShell Gallery unreachable)
 
-WinClean installs the `PSWindowsUpdate` module from the PowerShell Gallery. If the Gallery is unreachable (offline, proxy, TLS), the module cannot install and the Windows-update phase is skipped. The rest of the run continues normally.
+WinClean installs the `PSWindowsUpdate` module from the PowerShell Gallery. If the Gallery is unreachable while general connectivity works (a proxy, a TLS-inspecting appliance, a blocked host), the module cannot install and the Windows half of the Updates phase is skipped. The rest of the run continues normally.
+
+This is **not** the offline case. A machine with no connectivity at all returns earlier, at the shared connectivity check described [above](#app-updates-are-skipped-winget-not-found), and never attempts the module install - so if you are simply offline, that section applies, not this one.
+
+Unlike the offline branch, this one is still an **error** and the run exits non-zero: connectivity was proven to work, and then a dependency WinClean needs could not be fetched - an attempted operation that failed rather than a precondition that was absent.
 
 This path is guarded by timeouts, so a stuck Gallery cannot hang the whole run. You will see a clear message with manual-install instructions.
 

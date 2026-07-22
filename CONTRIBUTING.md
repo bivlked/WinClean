@@ -128,7 +128,7 @@ Invoke-Pester ./tests/Integration.Tests.ps1
 All PRs automatically run:
 - PSScriptAnalyzer (linting)
 - Syntax check
-- Pester tests (571 tests)
+- Pester tests (573 tests)
 
 ### Release-impacting changes
 
@@ -251,7 +251,7 @@ Invoke-Pester ./tests/Integration.Tests.ps1
 Все PR автоматически проходят:
 - PSScriptAnalyzer (линтинг)
 - Проверка синтаксиса
-- Pester тесты (571 тестов)
+- Pester тесты (573 тестов)
 
 ### Изменения, влияющие на релиз
 
