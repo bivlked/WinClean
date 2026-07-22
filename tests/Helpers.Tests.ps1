@@ -572,6 +572,52 @@ Describe "Get-FolderSizeChecked" -Tag "Unit", "Helper" {
 
 #endregion
 
+#region New-RunStats Tests (v2.20)
+
+Describe "New-RunStats" -Tag "Unit", "Helper", "V220" {
+    <#
+    v2.19 reset only the phase buckets and the step counter while claiming to handle
+    "dot-source and call Start-WinClean twice". Everything else survived into the second
+    run's summary and JSON. These tests pin the whole object, not just the three arrays.
+    #>
+    It "Returns a fresh object rather than the live one" {
+        $saved = $script:Stats
+        try {
+            $script:Stats.TotalFreedBytes = 123456
+            $script:Stats.WarningsCount = 7
+            $script:Stats.ErrorsCount = 3
+            $script:Stats.Aborted = 'PendingRebootDeclined'
+            $script:Stats.PhasesCompleted = @('Preparation')
+
+            $fresh = New-RunStats
+
+            $fresh.TotalFreedBytes | Should -Be 0
+            $fresh.WarningsCount | Should -Be 0
+            $fresh.ErrorsCount | Should -Be 0
+            $fresh.Aborted | Should -BeNullOrEmpty
+            @($fresh.PhasesCompleted).Count | Should -Be 0
+            @($fresh.FreedByCategory.Keys).Count | Should -Be 0
+        } finally {
+            $script:Stats = $saved
+        }
+    }
+
+    It "Starts the clock at creation, not at dot-source time" {
+        # DurationSeconds in the result JSON is computed from StartTime; a stale value
+        # made the second run in a session look hours long
+        $before = Get-Date
+        Start-Sleep -Milliseconds 20
+        (New-RunStats).StartTime | Should -BeGreaterThan $before
+    }
+
+    It "Is still a synchronized hashtable" {
+        # Parallel cleanup blocks rely on this
+        (New-RunStats).GetType().Name | Should -Be 'SyncHashtable'
+    }
+}
+
+#endregion
+
 #region Get-RegistryValueCount Tests (v2.20)
 
 Describe "Get-RegistryValueCount" -Tag "Unit", "Helper" {

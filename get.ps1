@@ -75,7 +75,8 @@ if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administra
 # 3. Parse arguments BEFORE touching the network, and validate them against
 #    WinClean's actual parameter set - a typo should not cost a download.
 $switchParams = @('SkipUpdates', 'SkipCleanup', 'SkipRestore', 'SkipDevCleanup',
-                  'SkipDockerCleanup', 'SkipVSCleanup', 'DisableTelemetry', 'ReportOnly')
+                  'SkipDockerCleanup', 'SkipVSCleanup', 'SkipDiskCleanup',
+                  'DisableTelemetry', 'ReportOnly')
 $valueParams  = @('LogPath', 'ResultJsonPath')
 
 $splat = @{}

@@ -788,9 +788,12 @@ Describe "v2.16: silent failures are reported" -Tag "Fix", "V216", "SilentFailur
         $scriptContent | Should -Match '(?s)Winget source update timed out[^\r\n]*\r?\n\s*\$script:Stats\.WarningsCount\+\+'
     }
 
-    It "Result JSON write failure counts as a warning" {
-        # An automated stand would otherwise read the previous run's file as fresh
-        $scriptContent | Should -Match '(?s)Failed to write result JSON[^\r\n]*\r?\n\s*\$script:Stats\.WarningsCount\+\+'
+    It "Result JSON write failure counts as an error, not a warning (v2.20)" {
+        # An automated stand would otherwise read the previous run's file as fresh.
+        # Changed deliberately in v2.20: the exit code is decided by ErrorsCount alone,
+        # so as a warning this failure still exited 0 - the run reported success while
+        # the artefact the user explicitly requested was missing.
+        $scriptContent | Should -Match '(?s)Failed to write result JSON[^\r\n]*\r?\n\s*\$script:Stats\.ErrorsCount\+\+'
     }
 
     It "Downloaded updates are not counted as installed" {
@@ -1114,6 +1117,28 @@ Describe "v2.20: an operation that did nothing does not report success" -Tag "Fi
         It "Reads the source-update exit code, not just job completion" {
             $body = Get-FunctionBody -Name 'Update-Applications'
             $body | Should -Match 'Winget source update failed'
+        }
+    }
+
+    Context "Per-run state" {
+        It "Start-WinClean builds a fresh stats object instead of patching three fields" {
+            $body = Get-FunctionBody -Name 'Start-WinClean'
+            $body | Should -Match '\$script:Stats\s*=\s*New-RunStats'
+            $body | Should -Match '\$script:InternetConnectionCache\s*=\s*\$null'
+        }
+    }
+
+    Context "Logging failure is visible" {
+        It "Latches the first log write failure instead of swallowing every one" {
+            $body = Get-FunctionBody -Name 'Write-Log'
+            $body | Should -Match '\$script:LogWriteFailed'
+            # Write-Log must not report its own failure through Write-Log
+            $body | Should -Match 'Write-Host'
+        }
+
+        It "Surfaces it in the result JSON so a consumer knows the log is incomplete" {
+            $body = Get-FunctionBody -Name 'Write-ResultJson'
+            $body | Should -Match 'LoggingDegraded'
         }
     }
 

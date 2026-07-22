@@ -257,6 +257,12 @@
     Пропустить очистку Docker/WSL
 .PARAMETER SkipVSCleanup
     Пропустить очистку Visual Studio
+.PARAMETER SkipDiskCleanup
+    Пропустить только шаг Storage Sense / Disk Cleanup (штатная утилита Windows).
+    Это самый долгий шаг прогона: на реальной рабочей станции cleanmgr занял 15 минут
+    из 18 и не успел завершиться, потому что его время уходит на СКАНИРОВАНИЕ категорий
+    и не зависит от того, сколько мусора реально есть. Остальная очистка при этом
+    выполняется - в отличие от -SkipCleanup, который гасит её целиком
 .PARAMETER DisableTelemetry
     Отключить телеметрию Windows (через групповую политику)
 .PARAMETER ReportOnly
@@ -282,6 +288,7 @@ param(
     [switch]$SkipDevCleanup,
     [switch]$SkipDockerCleanup,
     [switch]$SkipVSCleanup,
+    [switch]$SkipDiskCleanup,
     [switch]$DisableTelemetry,
     [switch]$ReportOnly,
     [string]$LogPath,
@@ -298,7 +305,22 @@ $OutputEncoding = [System.Text.Encoding]::UTF8
 $PSDefaultParameterValues['*:Encoding'] = 'utf8'
 
 # Statistics storage (synchronized hashtable for safe concurrent access)
-$script:Stats = [hashtable]::Synchronized(@{
+function New-RunStats {
+    <#
+    .SYNOPSIS
+        Builds a fresh per-run statistics object
+    .DESCRIPTION
+        v2.20: this was a literal assigned once when the script loaded, and Start-WinClean
+        reset only the phase buckets and the step counter - while the comment there
+        described "dot-source and call Start-WinClean twice" as the case being handled.
+        Everything else survived: freed bytes, per-category totals, update counts, warning
+        and error counts, RebootRequired, Aborted and StartTime. A second run in the same
+        session therefore reported the first run's bytes and errors, and computed its
+        duration from the moment the script was dot-sourced.
+
+        One definition, used both at load time and at the start of every run.
+    #>
+    return [hashtable]::Synchronized(@{
     TotalFreedBytes      = [long]0
     FreedByCategory      = @{}
     WindowsUpdatesCount  = 0
@@ -330,7 +352,10 @@ $script:Stats = [hashtable]::Synchronized(@{
     PhasesCompleted      = @()
     PhasesFailed         = @()
     PhasesSkipped        = @()
-})
+    })
+}
+
+$script:Stats = New-RunStats
 
 # Progress activities seen so far, so all of them can be closed at the end (v2.16)
 $script:ProgressActivities = @()
@@ -338,6 +363,10 @@ $script:ProgressActivities = @()
 # Memoized Test-InternetConnection result for the whole run (v2.17, p.5 of the audit):
 # the check costs up to ~15s offline and is called from two separate update phases
 $script:InternetConnectionCache = $null
+
+# Latched by Write-Log when the log file cannot be written, so the failure is reported
+# once instead of on every call - and surfaces in the result JSON as LoggingDegraded
+$script:LogWriteFailed = $false
 
 # Initialize log path (script scope for access in functions)
 if (-not $LogPath) {
@@ -415,7 +444,21 @@ function Write-Log {
                 $script:LogWriterPath = $script:LogPath
             }
             $script:LogWriter.WriteLine($logMessage)
-        } catch { }
+        } catch {
+            # v2.20: this used to be an empty catch, so a log that stopped being written
+            # (full volume, revoked permissions, the v2.14 case where cleanup deleted the
+            # log out from under us) was invisible: destructive work carried on, the final
+            # JSON said ErrorsCount=0, and LogPath pointed at a truncated file.
+            #
+            # Latched: one console line, not one per call - Write-Log fires hundreds of
+            # times per run. Deliberately Write-Host and not Write-Log, which would
+            # recurse straight back into this catch.
+            if (-not $script:LogWriteFailed) {
+                $script:LogWriteFailed = $true
+                $script:Stats.WarningsCount++
+                Write-Host "  [WARN]  Log file could not be written ($($_.Exception.Message)) - the run continues, but $($script:LogPath) is incomplete" -ForegroundColor Yellow
+            }
+        }
     }
 
     # Console output with colors
@@ -4135,74 +4178,129 @@ function Invoke-StorageSense {
     #>
     Write-Log "Storage Sense" -Level SECTION
 
+    # v2.20: the one step users asked to be able to switch off on its own. Until now the
+    # only way was -SkipCleanup, which also suppresses temp files, browsers, dev caches,
+    # Docker/WSL, Visual Studio and the driver store - everything, to avoid one step.
+    if ($SkipDiskCleanup) {
+        Write-Log "Storage Sense / Disk Cleanup skipped (parameter)" -Level INFO
+        return
+    }
+
     if ($ReportOnly) {
         Write-Log "Would run: Storage Sense" -Level DETAIL
         return
     }
 
     # Try Storage Sense first (Windows 11)
-    # Use Get-ScheduledTask for language-independent status checking
-    $ssTaskPath = "\Microsoft\Windows\DiskCleanup\"
+    #
+    # v2.20: the task was looked up at "\Microsoft\Windows\DiskCleanup\", where it does not
+    # exist - that folder holds SilentCleanup. The real one lives under
+    # "\Microsoft\Windows\DiskFootprint\". So this branch was UNREACHABLE on every machine
+    # and every run fell through to the legacy cleanmgr path: 10 seconds on a fresh VM,
+    # 15 minutes on a real workstation (measured: 901s of a 1101s run, and it did not even
+    # finish). Searching by name instead of by a hardcoded path also survives the folder
+    # moving again.
     $ssTaskName = "StorageSense"
-    $task = Get-ScheduledTask -TaskPath $ssTaskPath -TaskName $ssTaskName -ErrorAction SilentlyContinue
+    $task = @(Get-ScheduledTask -TaskName $ssTaskName -ErrorAction SilentlyContinue) | Select-Object -First 1
+
+    # Verified below; only a task that demonstrably ran successfully skips cleanmgr
+    $storageSenseDone = $false
 
     # A disabled task cannot be started - fall back to cleanmgr instead of
     # waiting the full timeout for a task that never runs (v2.14)
     if ($task -and $task.State -ne 'Disabled') {
         Write-Log "Running Storage Sense..." -Level INFO
 
-        # Record time before running to compare with LastRunTime
-        $startTime = Get-Date
-        Start-ScheduledTask -TaskPath $ssTaskPath -TaskName $ssTaskName -ErrorAction SilentlyContinue
+        # v2.20: compare against the task's OWN previous run time, not wall-clock. The old
+        # code compared LastRunTime with $startTime taken in this process, which is a
+        # different clock granularity and rounds the wrong way.
+        $infoBefore = $task | Get-ScheduledTaskInfo -ErrorAction SilentlyContinue
+        $lastRunBefore = if ($infoBefore) { $infoBefore.LastRunTime } else { $null }
 
-        # Wait for task to complete with timeout
-        $timeout = 120  # 2 minutes max
-        $elapsed = 0
-        $checkInterval = 5
-        $wasRunning = $false
+        $started = $false
+        try {
+            $task | Start-ScheduledTask -ErrorAction Stop
+            $started = $true
+        } catch {
+            # v2.20: the start used to be -ErrorAction SilentlyContinue with the result
+            # ignored, so a task that never started still cost the full 120s wait before
+            # anything was reported
+            Write-Log "Storage Sense could not be started ($($_.Exception.Message)) - using Disk Cleanup" -Level INFO
+        }
 
-        while ($elapsed -lt $timeout) {
-            Start-Sleep -Seconds $checkInterval
-            $elapsed += $checkInterval
+        if ($started) {
+            # Wait for task to complete with timeout
+            $timeout = 120  # 2 minutes max
+            $elapsed = 0
+            $checkInterval = 5
+            $wasRunning = $false
+            $finished = $false
 
-            # Get current task state (language-independent: Ready, Running, Disabled)
-            $task = Get-ScheduledTask -TaskPath $ssTaskPath -TaskName $ssTaskName -ErrorAction SilentlyContinue
-            if ($task) {
-                $state = $task.State
+            while ($elapsed -lt $timeout) {
+                Start-Sleep -Seconds $checkInterval
+                $elapsed += $checkInterval
 
-                if ($state -eq 'Running') {
+                # Get current task state (language-independent: Ready, Running, Disabled)
+                $task = @(Get-ScheduledTask -TaskName $ssTaskName -ErrorAction SilentlyContinue) | Select-Object -First 1
+                if (-not $task) { break }
+
+                if ($task.State -eq 'Running') {
                     $wasRunning = $true
-                } elseif ($wasRunning -and $state -eq 'Ready') {
-                    # Task was running and now finished
-                    Write-Log "Storage Sense completed" -Level SUCCESS
+                    continue
+                }
+
+                if ($wasRunning) {
+                    # Was running and is not any more
+                    $finished = $true
                     break
-                } elseif (-not $wasRunning -and $elapsed -ge 10) {
-                    # Task didn't start running within 10 seconds - check LastRunTime
-                    $taskInfo = Get-ScheduledTaskInfo -TaskPath $ssTaskPath -TaskName $ssTaskName -ErrorAction SilentlyContinue
-                    if ($taskInfo -and $taskInfo.LastRunTime -gt $startTime) {
-                        Write-Log "Storage Sense completed" -Level SUCCESS
+                }
+
+                if ($elapsed -ge 10) {
+                    # Never observed as Running - it may simply have been quicker than the
+                    # poll interval. The task's own LastRunTime moving is the evidence.
+                    $infoNow = $task | Get-ScheduledTaskInfo -ErrorAction SilentlyContinue
+                    if ($infoNow -and (-not $lastRunBefore -or $infoNow.LastRunTime -ne $lastRunBefore)) {
+                        $finished = $true
                         break
                     }
                 }
             }
-        }
 
-        if ($elapsed -ge $timeout) {
-            Write-Log "Storage Sense timed out after $timeout seconds" -Level WARNING
-            # Force stop the task if still running
-            $task = Get-ScheduledTask -TaskPath $ssTaskPath -TaskName $ssTaskName -ErrorAction SilentlyContinue
-            if ($task -and $task.State -eq 'Running') {
-                Stop-ScheduledTask -TaskPath $ssTaskPath -TaskName $ssTaskName -ErrorAction SilentlyContinue
-                Write-Log "Storage Sense task stopped" -Level INFO
+            if ($finished) {
+                # v2.20 fail-closed: a task that ran and FAILED used to be logged as
+                # "Storage Sense completed" and cleanmgr was skipped - a silent failure that
+                # would have left the machine uncleaned while the run reported success.
+                # Verified on a live machine where this task returns 0x80040154.
+                $infoAfter = $task | Get-ScheduledTaskInfo -ErrorAction SilentlyContinue
+                $taskResult = if ($infoAfter) { $infoAfter.LastTaskResult } else { $null }
+
+                if ($null -eq $taskResult) {
+                    Write-Log "Storage Sense ran but its result could not be read - using Disk Cleanup as well" -Level INFO
+                } elseif ($taskResult -eq 0) {
+                    Write-Log "Storage Sense completed" -Level SUCCESS
+                    $storageSenseDone = $true
+                } else {
+                    Write-Log ("Storage Sense failed (task result 0x{0:X8}) - using Disk Cleanup instead" -f $taskResult) -Level INFO
+                }
+            } else {
+                Write-Log "Storage Sense did not finish within $timeout seconds - using Disk Cleanup instead" -Level INFO
+                $task = @(Get-ScheduledTask -TaskName $ssTaskName -ErrorAction SilentlyContinue) | Select-Object -First 1
+                if ($task -and $task.State -eq 'Running') {
+                    $task | Stop-ScheduledTask -ErrorAction SilentlyContinue
+                    Write-Log "Storage Sense task stopped" -Level INFO
+                }
             }
-            $script:Stats.WarningsCount++
         }
-    } else {
-        # Fallback to cleanmgr
-        if ($task) {
-            Write-Log "Storage Sense task is disabled, using Disk Cleanup..." -Level INFO
-        } else {
+    }
+
+    if (-not $storageSenseDone) {
+        # Fallback to cleanmgr. Every other reason for landing here (start failed, task
+        # failed, timed out) has already said so in its own words, so only the two states
+        # that produce no message of their own are reported here.
+        if (-not $task) {
             Write-Log "Storage Sense task not found, using Disk Cleanup..." -Level INFO
+        } elseif ($task.State -eq 'Disabled') {
+            Write-Log "Storage Sense task is disabled, using Disk Cleanup..." -Level INFO
         }
 
         # Configure cleanup categories
@@ -4567,6 +4665,7 @@ function Write-ResultJson {
                 SkipDevCleanup    = [bool]$SkipDevCleanup
                 SkipDockerCleanup = [bool]$SkipDockerCleanup
                 SkipVSCleanup     = [bool]$SkipVSCleanup
+                SkipDiskCleanup   = [bool]$SkipDiskCleanup
                 DisableTelemetry  = [bool]$DisableTelemetry
             }
             TotalFreedBytes     = [long]$script:Stats.TotalFreedBytes
@@ -4579,6 +4678,10 @@ function Write-ResultJson {
             WarningsCount       = $script:Stats.WarningsCount
             ErrorsCount         = $script:Stats.ErrorsCount
             RebootRequired      = [bool]$script:Stats.RebootRequired
+            # v2.20: true when writing the log file failed at some point. The run still
+            # completed, but LogPath below points at an incomplete file - an automated
+            # consumer must not treat that log as the full record of what happened.
+            LoggingDegraded     = [bool]$script:LogWriteFailed
             # 'enabled' means cleanup figures are understated (Defender blocked some
             # deletions without reporting an error); 'unknown' means the check itself
             # failed, so the figures are unverified rather than confirmed good
@@ -4604,10 +4707,13 @@ function Write-ResultJson {
         $result | ConvertTo-Json -Depth 4 | Out-File -FilePath $Path -Encoding utf8
         Write-Log "Result JSON written: $Path" -Level INFO
     } catch {
-        # Must be loud: an automated stand reads this file, and a stale copy from the
-        # previous run would be reported as a successful fresh run
-        Write-Log "Failed to write result JSON: $_" -Level WARNING
-        $script:Stats.WarningsCount++
+        # v2.20: this comment said "must be loud" while the code raised a warning, and the
+        # exit code is decided by ErrorsCount alone - so a run that failed to produce the
+        # artefact the user explicitly asked for still exited 0 and printed "completed with
+        # warnings". The stand then reads a stale file from the previous run as a fresh
+        # result. The user asked for this file: not producing it is a failure of the run.
+        Write-Log "Failed to write result JSON: $_" -Level ERROR
+        $script:Stats.ErrorsCount++
     }
 }
 
@@ -4660,14 +4766,14 @@ function Start-WinClean {
         Remove-Item -LiteralPath $ResultJsonPath -Force -ErrorAction SilentlyContinue
     }
 
-    # v2.19: reset the per-run phase buckets and step counter. The script normally runs
-    # once per process (entry-point guarded), but dot-sourcing it and calling Start-WinClean
-    # twice in one session would otherwise accumulate phase names across runs and leave the
-    # progress counter where the last run stopped.
-    $script:Stats.PhasesCompleted = @()
-    $script:Stats.PhasesFailed    = @()
-    $script:Stats.PhasesSkipped   = @()
-    $script:Stats.CurrentStep     = 0
+    # v2.19 reset the phase buckets and the step counter here; v2.20 makes the run
+    # genuinely fresh. The partial version left freed bytes, warning/error counts,
+    # Aborted and StartTime from a previous call in the same session, so the second
+    # run's summary and JSON described both runs at once. See New-RunStats.
+    $script:Stats = New-RunStats
+    $script:ProgressActivities = @()
+    $script:InternetConnectionCache = $null
+    $script:LogWriteFailed = $false
 
     # Initialize log
     "WinClean v$($script:Version) - Started at $(Get-Date)" | Out-File -FilePath $script:LogPath -Encoding utf8
