@@ -1290,10 +1290,35 @@ function ConvertFrom-HumanReadableSize {
     }
 }
 
+function Get-RegistryValueCount {
+    <#
+    .SYNOPSIS
+        Counts the real values under a registry key, ignoring PowerShell's own metadata
+    .DESCRIPTION
+        v2.20. Privacy cleanup used to announce "cleared" without looking, because
+        Remove-Item with -ErrorAction SilentlyContinue never throws. Confirming the result
+        needs a before/after count, and Get-ItemProperty decorates every key with PSPath,
+        PSParentPath, PSChildName, PSDrive and PSProvider - counting those would make an
+        emptied key look like it still holds five entries.
+
+        Returns 0 for a missing or unreadable key: the caller only ever asks "is anything
+        still there", and an unreadable key is reported by the caller's own comparison.
+    #>
+    param([Parameter(Mandatory)][string]$Key)
+
+    $props = Get-ItemProperty -LiteralPath $Key -ErrorAction SilentlyContinue
+    if (-not $props) { return 0 }
+
+    return @($props.PSObject.Properties | Where-Object {
+        $_.Name -notin 'PSPath', 'PSParentPath', 'PSChildName', 'PSDrive', 'PSProvider'
+    }).Count
+}
+
 function Test-PathProtected {
     <#
     .SYNOPSIS
-        Checks whether a path is a protected root itself (v2.17: normalized)
+        Checks whether a path must be refused as a bulk-cleanup root (v2.17: normalized,
+        v2.20: link-aware)
     .DESCRIPTION
         Guards the roots listed in $script:ProtectedPaths against being emptied.
         Paths are resolved with GetFullPath first, otherwise the check is trivially
@@ -1303,8 +1328,25 @@ function Test-PathProtected {
         Only the roots themselves are protected, not everything below them: the script
         legitimately cleans %SystemRoot%\Temp and other subfolders. Callers that must
         never touch a subtree pass explicit paths instead.
+
+        v2.20: the checks above compare TEXT, and GetFullPath does not resolve reparse
+        points (measured, not assumed). A junction whose visible path looks innocent can
+        therefore point at a protected root, and enumerating that junction lists the
+        TARGET's children - deleting them deletes the real files. So an existing link is
+        resolved to its final target and the same rules are applied to that.
+
+        Only the cleanup ROOT needs this. Links found deeper in the tree are already
+        harmless: Get-ChildItem -Recurse does not descend into a reparse point, and
+        Remove-Item on a junction removes the link and leaves the target intact (both
+        measured on a live filesystem).
+    .PARAMETER SkipLinkResolution
+        Internal. Set when re-checking an already-resolved target so a pathological link
+        chain cannot recurse.
     #>
-    param([string]$Path)
+    param(
+        [string]$Path,
+        [switch]$SkipLinkResolution
+    )
 
     if ([string]::IsNullOrWhiteSpace($Path)) { return $true }   # nothing sane to clean
 
@@ -1337,6 +1379,29 @@ function Test-PathProtected {
             return $true
         }
     }
+
+    # v2.20: resolve a link root and re-check the real target (see .DESCRIPTION).
+    # A path that does not exist, or cannot be inspected, keeps the previous answer:
+    # there is nothing to delete through it, and treating it as protected would change
+    # the meaning of the function for every caller that probes optional locations.
+    if (-not $SkipLinkResolution) {
+        $linkItem = $null
+        try { $linkItem = Get-Item -LiteralPath $fullPath -Force -ErrorAction Stop } catch { $linkItem = $null }
+
+        if ($linkItem -and ($linkItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint)) {
+            $finalTarget = $null
+            try { $finalTarget = $linkItem.ResolveLinkTarget($true) } catch { $finalTarget = $null }
+
+            if (-not $finalTarget) {
+                # Broken link, or a runtime without ResolveLinkTarget (it needs .NET 6 /
+                # PowerShell 7.2, and this script supports 7.1). The real target is
+                # unknown, so protection cannot be verified - refuse rather than guess.
+                return $true
+            }
+            return (Test-PathProtected -Path $finalTarget.FullName -SkipLinkResolution)
+        }
+    }
+
     return $false
 }
 
@@ -2014,12 +2079,27 @@ function Update-Applications {
         if (-not $ReportOnly) {
             Write-Log "Updating winget sources..." -Level INFO
             # Run with timeout to prevent hanging
-            $job = Start-Job -ScriptBlock { param($path) & $path source update 2>&1 } -ArgumentList $wingetPath
+            # v2.20: the job's own exit code is returned as well. Only completion was
+            # checked before, and a completed job is not a successful winget: a corrupt
+            # source fails, the job still reaches Completed, and the upgrade list below
+            # was then built from stale data without a word in the log.
+            $job = Start-Job -ScriptBlock {
+                param($path)
+                & $path source update 2>&1 | Out-String
+                $LASTEXITCODE
+            } -ArgumentList $wingetPath
             $completed = $job | Wait-Job -Timeout 120  # 2 minutes timeout
             if (-not $completed) {
                 $job | Stop-Job
                 Write-Log "Winget source update timed out - package list may be stale" -Level WARNING
                 $script:Stats.WarningsCount++
+            } else {
+                $jobOutput = @($job | Receive-Job -ErrorAction SilentlyContinue)
+                $sourceExit = if ($jobOutput.Count -gt 0) { $jobOutput[-1] } else { $null }
+                if ($null -ne $sourceExit -and 0 -ne [int]$sourceExit) {
+                    Write-Log "Winget source update failed (exit code $sourceExit) - package list may be stale" -Level WARNING
+                    $script:Stats.WarningsCount++
+                }
             }
             $job | Remove-Job -Force -ErrorAction SilentlyContinue
         }
@@ -2732,7 +2812,11 @@ function Clear-EventLogs {
         # Enumerate only logs worth clearing: enabled, non-empty, Administrative/Operational.
         # This skips ~1000 Analytic/Debug/empty channels - much faster and avoids
         # chronic partial-failure warnings (v2.14; was: wevtutil el over all channels)
-        $logs = Get-WinEvent -ListLog * -ErrorAction SilentlyContinue | Where-Object {
+        # v2.20: keep the enumeration errors. A wholesale failure (Event Log service down,
+        # WMI broken) produced an empty list, zero failed clears and therefore the success
+        # branch: "Event logs cleared (0 logs)" while nothing was touched.
+        $enumErrors = $null
+        $logs = Get-WinEvent -ListLog * -ErrorAction SilentlyContinue -ErrorVariable enumErrors | Where-Object {
             $_.RecordCount -gt 0 -and
             $_.IsEnabled -and
             $_.LogName -ne 'Security' -and  # Keep the main Security log (exact match)
@@ -2750,9 +2834,16 @@ function Clear-EventLogs {
             }
         }
 
-        if ($failedCount -gt 0) {
+        if (-not $logs -and $enumErrors) {
+            # Individual unreadable channels are normal on a healthy system, so only a
+            # total failure counts: no usable channel at all AND errors while listing.
+            Write-Log "Event logs: channels could not be enumerated ($($enumErrors.Count) error(s)) - nothing was cleared" -Level WARNING
+            $script:Stats.WarningsCount++
+        } elseif ($failedCount -gt 0) {
             Write-Log "Event logs cleared: $clearedCount, failed: $failedCount" -Level WARNING
             $script:Stats.WarningsCount++
+        } elseif ($clearedCount -eq 0) {
+            Write-Log "Event logs: no channel needed clearing" -Level DETAIL
         } else {
             Write-Log "Event logs cleared ($clearedCount logs)" -Level SUCCESS
         }
@@ -2839,38 +2930,53 @@ function Clear-PrivacyTraces {
         }
     }
 
-    # Clear TypedPaths (Explorer address bar history)
-    $typedPathsKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\TypedPaths"
-    if (Test-Path $typedPathsKey) {
-        try {
-            Remove-Item -Path $typedPathsKey -Force -ErrorAction SilentlyContinue
-            New-Item -Path $typedPathsKey -Force -ErrorAction SilentlyContinue | Out-Null
-            $clearedItems += "Explorer typed paths"
-        } catch { }
-    }
+    # v2.20: success is now confirmed by looking, not by the absence of an exception.
+    # Remove-Item with -ErrorAction SilentlyContinue cannot throw, so the catch blocks
+    # here were dead code and "$clearedItems += ..." ran unconditionally: the log said
+    # "Privacy traces cleared: Explorer typed paths" even when policy or permissions had
+    # rejected the deletion and the key was still sitting there, fully populated.
+    $historyKeys = @(
+        @{ Path = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\TypedPaths";     Label = 'Explorer typed paths' }
+        @{ Path = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\WordWheelQuery"; Label = 'Explorer search history' }
+    )
+    foreach ($entry in $historyKeys) {
+        if (-not (Test-Path $entry.Path)) { continue }
 
-    # Clear WordWheelQuery (Explorer search history)
-    $searchKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\WordWheelQuery"
-    if (Test-Path $searchKey) {
-        try {
-            Remove-Item -Path $searchKey -Force -ErrorAction SilentlyContinue
-            New-Item -Path $searchKey -Force -ErrorAction SilentlyContinue | Out-Null
-            $clearedItems += "Explorer search history"
-        } catch { }
+        $before = Get-RegistryValueCount -Key $entry.Path
+        # An empty key is not a trace that was cleared - it is a trace that was not there
+        if ($before -eq 0) { continue }
+
+        Remove-Item -Path $entry.Path -Force -ErrorAction SilentlyContinue
+        New-Item -Path $entry.Path -Force -ErrorAction SilentlyContinue | Out-Null
+
+        $after = Get-RegistryValueCount -Key $entry.Path
+        if ($after -eq 0) {
+            $clearedItems += $entry.Label
+        } else {
+            Write-Log "$($entry.Label): $after of $before entries remain - not cleared" -Level WARNING
+            $script:Stats.WarningsCount++
+        }
     }
 
     # Clear Recent documents folder
     $recentFolder = [Environment]::GetFolderPath('Recent')
-    if (Test-Path $recentFolder) {
-        try {
-            $recentCount = (Get-ChildItem -Path $recentFolder -Force -ErrorAction SilentlyContinue).Count
-            Get-ChildItem -Path $recentFolder -Force -ErrorAction SilentlyContinue | ForEach-Object {
+    if (-not [string]::IsNullOrWhiteSpace($recentFolder) -and (Test-Path $recentFolder)) {
+        $recentBefore = @(Get-ChildItem -LiteralPath $recentFolder -Force -ErrorAction SilentlyContinue).Count
+        if ($recentBefore -gt 0) {
+            Get-ChildItem -LiteralPath $recentFolder -Force -ErrorAction SilentlyContinue | ForEach-Object {
                 Remove-Item -LiteralPath $_.FullName -Recurse -Force -ErrorAction SilentlyContinue
             }
-            if ($recentCount -gt 0) {
-                $clearedItems += "Recent documents ($recentCount items)"
+            # Report what actually went, not what was there before the attempt
+            $recentAfter = @(Get-ChildItem -LiteralPath $recentFolder -Force -ErrorAction SilentlyContinue).Count
+            $removed = $recentBefore - $recentAfter
+            if ($removed -gt 0) {
+                $clearedItems += "Recent documents ($removed items)"
             }
-        } catch { }
+            if ($recentAfter -gt 0) {
+                Write-Log "Recent documents: $recentAfter of $recentBefore items could not be removed (in use?)" -Level WARNING
+                $script:Stats.WarningsCount++
+            }
+        }
     }
 
     if ($clearedItems.Count -gt 0) {
@@ -3093,6 +3199,11 @@ function Clear-DeveloperCaches {
                 try {
                     $sizeBefore = Get-FolderSize $npmCache
                     & npm cache clean --force 2>&1 | Out-Null
+                    # v2.20: npm fails without throwing (EPERM on a locked cache is the
+                    # common case). The exit code was never read, so a failed clean that
+                    # freed nothing landed in the "else" branch below and was logged as
+                    # SUCCESS - the same lie fixed for browser caches in v2.16.
+                    $npmExit = $LASTEXITCODE
                     $sizeAfter = Get-FolderSize $npmCache
                     $freed = $sizeBefore - $sizeAfter
 
@@ -3103,8 +3214,14 @@ function Clear-DeveloperCaches {
                         }
                         $script:Stats.FreedByCategory["Developer"] += $freed
                         Write-Log "npm cache cleaned - $(Format-FileSize $freed)" -Level SUCCESS
+                    } elseif ($npmExit -ne 0) {
+                        Write-Log "npm cache clean failed (exit code $npmExit) - removing the cache directly" -Level WARNING
+                        $script:Stats.WarningsCount++
+                        Remove-FolderContent -Path $npmCache -Category "Developer" -Description "npm cache"
                     } else {
-                        Write-Log "npm cache cleaned (via npm)" -Level SUCCESS
+                        # npm succeeded and there was nothing to reclaim. Not a cleanup
+                        # success worth announcing, and definitely not freed bytes.
+                        Write-Log "npm cache was already empty" -Level DETAIL
                     }
                 } catch {
                     Remove-FolderContent -Path $npmCache -Category "Developer" -Description "npm cache"

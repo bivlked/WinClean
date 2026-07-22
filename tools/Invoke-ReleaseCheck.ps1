@@ -143,9 +143,19 @@ if (Get-Module -ListAvailable PSScriptAnalyzer) {
 
 # --- 6. Pester, and the count the docs claim ---------------------------------
 # Counting It blocks by hand is wrong here: -ForEach multiplies them.
+#
+# v2.20: runs through tools/Invoke-Tests.ps1, the same script CI runs, so the gate cannot
+# execute a different Pester version or a laxer rule than CI. It used to call Invoke-Pester
+# directly with no version bound while CI pinned an upper bound, and PowerShell loads the
+# highest installed version - so installing Pester 6 would silently split the two.
 $pesterCount = $null
-if (Get-Module -ListAvailable Pester) {
-    $pester = Invoke-Pester -Path (Join-Path $repoRoot 'tests') -PassThru -Output None
+$pester = $null
+try {
+    $pester = & (Join-Path $PSScriptRoot 'Invoke-Tests.ps1') -Quiet
+} catch {
+    Add-Result -Name 'Pester available in the supported range' -Passed $false -Detail "$_"
+}
+if ($pester) {
     $pesterCount = $pester.TotalCount
     # Skipped tests count as a failure of the gate. The integration suite - the only
     # layer that executes real cleanup code - skips itself without administrator rights,
@@ -168,8 +178,6 @@ if (Get-Module -ListAvailable Pester) {
     }
     Add-Result -Name "Docs agree that there are $pesterCount tests" -Passed (-not $wrongCounts) `
         -Detail $(if ($wrongCounts) { "устарел счётчик: $($wrongCounts -join ', ')" } else { '' })
-} else {
-    Add-Result -Name 'Pester available' -Passed $false -Detail 'module not installed'
 }
 
 # --- 7. Smoke run (ReportOnly) -----------------------------------------------
@@ -189,13 +197,32 @@ try {
     Add-Result -Name 'Working tree is clean' -Passed ($dirty.Count -eq 0) `
         -Detail $(if ($dirty) { "$($dirty.Count) файл(ов) не закоммичено" } else { '' })
 
-    $branchInfo = (& git status -sb | Select-Object -First 1)
-    # "## main" without "...origin/main" means there is no upstream at all - that is not
-    # "in sync", it is "nothing to sync with"
-    $hasUpstream = $branchInfo -match '\.\.\.'
-    $notPushed = $branchInfo -match '\[(ahead|behind)'
-    Add-Result -Name 'Branch is in sync with origin' -Passed ($hasUpstream -and -not $notPushed) `
-        -Detail $(if (-not $hasUpstream) { "нет upstream: $branchInfo" } elseif ($notPushed) { $branchInfo } else { '' })
+    # v2.20: this used to read `git status -sb`, which compares against the LOCAL
+    # remote-tracking ref. Without a fetch it confirms a state that may no longer exist:
+    # the gate would report "in sync with origin" while origin had already moved. Ask the
+    # remote, and fail closed when it cannot be asked - an unverifiable claim is not a
+    # passing check.
+    $fetchOut = & git fetch --prune 2>&1
+    $fetchOk = $LASTEXITCODE -eq 0
+
+    $upstream = & git rev-parse --abbrev-ref --symbolic-full-name '@{upstream}' 2>$null
+    # No upstream at all is not "in sync", it is "nothing to sync with"
+    $hasUpstream = ($LASTEXITCODE -eq 0) -and $upstream
+
+    $ahead = $behind = 0
+    if ($hasUpstream) {
+        $counts = (& git rev-list --left-right --count 'HEAD...@{upstream}') -split '\s+'
+        if ($counts.Count -ge 2) { $ahead = [int]$counts[0]; $behind = [int]$counts[1] }
+    }
+
+    $syncDetail =
+        if (-not $fetchOk)      { "git fetch не удался - состояние origin неизвестно: $(($fetchOut | Select-Object -Last 1))" }
+        elseif (-not $upstream) { 'у ветки нет upstream' }
+        elseif ($ahead -or $behind) { "ahead $ahead, behind $behind (upstream: $upstream)" }
+        else { '' }
+
+    Add-Result -Name 'Branch is in sync with origin (verified against the remote)' `
+        -Passed ($fetchOk -and $hasUpstream -and $ahead -eq 0 -and $behind -eq 0) -Detail $syncDetail
 } finally {
     Pop-Location
 }

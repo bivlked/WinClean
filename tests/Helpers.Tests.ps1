@@ -572,6 +572,42 @@ Describe "Get-FolderSizeChecked" -Tag "Unit", "Helper" {
 
 #endregion
 
+#region Get-RegistryValueCount Tests (v2.20)
+
+Describe "Get-RegistryValueCount" -Tag "Unit", "Helper" {
+    <#
+    Extracted in v2.20 so privacy cleanup can confirm a deletion instead of announcing it.
+    Tested against a key this suite creates itself - never against the user's real Explorer
+    history, which the product function does touch.
+    #>
+    BeforeAll {
+        $script:probeKey = "HKCU:\Software\WinCleanTest_$(Get-Random)"
+        New-Item -Path $script:probeKey -Force | Out-Null
+    }
+
+    AfterAll {
+        Remove-Item -LiteralPath $script:probeKey -Recurse -Force -ErrorAction SilentlyContinue
+    }
+
+    It "Counts nothing for a key that holds no values" {
+        # The PowerShell metadata (PSPath, PSProvider and friends) must not be counted,
+        # or an emptied key would look like it still holds five entries
+        Get-RegistryValueCount -Key $script:probeKey | Should -Be 0
+    }
+
+    It "Counts the real values" {
+        Set-ItemProperty -Path $script:probeKey -Name 'url1' -Value 'a'
+        Set-ItemProperty -Path $script:probeKey -Name 'url2' -Value 'b'
+        Get-RegistryValueCount -Key $script:probeKey | Should -Be 2
+    }
+
+    It "Returns 0 for a key that does not exist" {
+        Get-RegistryValueCount -Key "HKCU:\Software\WinCleanTest_NoSuchKey_$(Get-Random)" | Should -Be 0
+    }
+}
+
+#endregion
+
 #region Test-PathProtected Tests
 
 Describe "Test-PathProtected" -Tag "Unit", "Helper", "Security" {
@@ -593,6 +629,47 @@ Describe "Test-PathProtected" -Tag "Unit", "Helper", "Security" {
     It "Returns false for arbitrary paths" {
         Test-PathProtected -Path "C:\SomeRandomFolder" | Should -BeFalse
         Test-PathProtected -Path "D:\Projects\Test" | Should -BeFalse
+    }
+
+    Context "Reparse points (v2.20)" {
+        <#
+        Measured, not assumed: [System.IO.Path]::GetFullPath does NOT resolve a junction,
+        so every textual check above passes for a link whose target is protected, while
+        Get-ChildItem on that link lists the TARGET's children. The guard must resolve the
+        link. The second test is the one that keeps the fix honest - refusing every link
+        would be trivially "safe" and would break anyone who redirected a cache folder.
+        #>
+        BeforeAll {
+            $script:linkSandbox = Join-Path ([System.IO.Path]::GetTempPath()) "WinCleanLinkTest_$(Get-Random)"
+            $script:innocentTarget = Join-Path $script:linkSandbox 'innocent-target'
+            New-Item -ItemType Directory -Path $script:innocentTarget -Force | Out-Null
+
+            $script:linkToProtected = Join-Path $script:linkSandbox 'looks-harmless'
+            $script:linkToInnocent  = Join-Path $script:linkSandbox 'redirected-cache'
+            New-Item -ItemType Junction -Path $script:linkToProtected -Target $env:ProgramFiles -ErrorAction SilentlyContinue | Out-Null
+            New-Item -ItemType Junction -Path $script:linkToInnocent -Target $script:innocentTarget -ErrorAction SilentlyContinue | Out-Null
+        }
+
+        AfterAll {
+            # Deleting a junction removes the link and leaves the target alone (measured),
+            # but remove the links explicitly anyway before the sandbox
+            foreach ($l in $script:linkToProtected, $script:linkToInnocent) {
+                if ($l -and (Test-Path -LiteralPath $l)) {
+                    Remove-Item -LiteralPath $l -Force -Recurse -ErrorAction SilentlyContinue
+                }
+            }
+            Remove-Item -LiteralPath $script:linkSandbox -Recurse -Force -ErrorAction SilentlyContinue
+        }
+
+        It "Refuses a junction that points at a protected root" {
+            Test-Path -LiteralPath $script:linkToProtected | Should -BeTrue -Because 'without the junction this test proves nothing'
+            Test-PathProtected -Path $script:linkToProtected | Should -BeTrue
+        }
+
+        It "Still allows a junction that points somewhere harmless" {
+            Test-Path -LiteralPath $script:linkToInnocent | Should -BeTrue -Because 'without the junction this test proves nothing'
+            Test-PathProtected -Path $script:linkToInnocent | Should -BeFalse
+        }
     }
 
     It "Handles trailing slashes correctly" {
@@ -698,24 +775,33 @@ Describe "Write-Log" -Tag "Unit", "Helper" {
         # Allow small delay for file write
         Start-Sleep -Milliseconds 100
 
-        if (Test-Path $script:LogPath) {
-            $logContent = Get-Content $script:LogPath -Raw
-            $logContent | Should -Match $uniqueMsg
-        }
+        # v2.20: the assertion used to sit inside `if (Test-Path $script:LogPath)`, so a
+        # missing log file made this test pass. A missing log file is exactly the defect
+        # it exists to catch (v2.14: the log was deleted by the script's own temp cleanup),
+        # which made it a test that could not fail for its own bug. Assert the
+        # precondition instead of hiding behind it.
+        Test-Path $script:LogPath | Should -BeTrue -Because 'Write-Log must create the log file'
+        (Get-Content $script:LogPath -Raw) | Should -Match $uniqueMsg
     }
 
     It "Respects -NoLog switch" {
         $noLogMsg = "NoLog message $(Get-Random)"
-        $sizeBefore = if (Test-Path $script:LogPath) { (Get-Item $script:LogPath).Length } else { 0 }
+
+        # Anchor write: without an existing log file "the message is absent from the log"
+        # is true for the boring reason that there is no log at all
+        Write-Log -Message "Anchor $(Get-Random)" -Level INFO
+        Start-Sleep -Milliseconds 100
+        Test-Path $script:LogPath | Should -BeTrue -Because 'the -NoLog check is meaningless without a real log file'
+        $sizeBefore = (Get-Item $script:LogPath).Length
 
         Write-Log -Message $noLogMsg -Level INFO -NoLog
-
         Start-Sleep -Milliseconds 100
 
-        if (Test-Path $script:LogPath) {
-            $logContent = Get-Content $script:LogPath -Raw
-            $logContent | Should -Not -Match $noLogMsg
-        }
+        # Two independent facts. The size comparison is what $sizeBefore was computed for
+        # since the test was written and never actually used until v2.20: it catches a
+        # -NoLog that writes something else to the file, which a text match would miss.
+        (Get-Content $script:LogPath -Raw) | Should -Not -Match $noLogMsg
+        (Get-Item $script:LogPath).Length | Should -Be $sizeBefore
     }
 }
 

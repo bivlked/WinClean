@@ -1070,3 +1070,61 @@ Describe "v2.19: get.ps1 forwards exactly WinClean's parameter set" -Tag "Fix", 
 }
 
 #endregion
+
+#region V220: silent failures that reported success
+
+Describe "v2.20: an operation that did nothing does not report success" -Tag "Fix", "V220" {
+
+    Context "Event log enumeration failure" {
+        <#
+        Behavioural, not a grep: Get-WinEvent is mocked to fail the way a stopped Event Log
+        service fails. The old code then had an empty list, zero failed clears, and took the
+        success branch - "Event logs cleared (0 logs)" while nothing was touched. Nothing is
+        actually cleared here either, because the loop never has a channel to run on.
+        #>
+        It "Warns instead of claiming success when no channel can be listed" {
+            Mock Get-WinEvent {
+                Write-Error 'The Event Log service is unavailable' -ErrorAction SilentlyContinue
+                @()
+            }
+
+            $warningsBefore = $script:Stats.WarningsCount
+            Clear-EventLogs
+            $script:Stats.WarningsCount | Should -BeGreaterThan $warningsBefore
+        }
+    }
+
+    Context "npm exit code" {
+        # npm fails without throwing (EPERM on a locked cache), so the native exit code is
+        # the only signal. Scoped to the function body: a match anywhere in the file would
+        # stay green if this handling were deleted.
+        It "Captures the npm exit code and uses it" {
+            $body = Get-FunctionBody -Name 'Clear-DeveloperCaches'
+            $body | Should -Match '\$npmExit\s*=\s*\$LASTEXITCODE'
+            $body | Should -Match '\$npmExit\s*-ne\s*0'
+        }
+
+        It "No longer reports a bare success when nothing was freed" {
+            $body = Get-FunctionBody -Name 'Clear-DeveloperCaches'
+            $body | Should -Not -Match 'npm cache cleaned \(via npm\)'
+        }
+    }
+
+    Context "winget source update exit code" {
+        It "Reads the source-update exit code, not just job completion" {
+            $body = Get-FunctionBody -Name 'Update-Applications'
+            $body | Should -Match 'Winget source update failed'
+        }
+    }
+
+    Context "Privacy traces are confirmed, not assumed" {
+        It "Compares the value count before and after instead of appending unconditionally" {
+            $body = Get-FunctionBody -Name 'Clear-PrivacyTraces'
+            $body | Should -Match 'Get-RegistryValueCount'
+            # The old shape: success text appended right after a SilentlyContinue delete
+            $body | Should -Match '\$after\s*-eq\s*0'
+        }
+    }
+}
+
+#endregion
