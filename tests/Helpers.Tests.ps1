@@ -223,6 +223,17 @@ Describe "ConvertFrom-HumanReadableSize" -Tag "Unit", "Helper" {
                 Should -Be $Expected
         }
 
+        It "Falls back to the invariant reading when the culture uses the mark for neither purpose" {
+            # ru-RU: decimal is ',' and thousands are grouped with a no-break space, so a
+            # lone '.' matches neither rule. Without the fallback the code would treat it
+            # as grouping and read "1.234 KB" as 1234 KB - a thousandfold over-read on the
+            # maintainer's own default locale, and no other test reaches this branch.
+            $ruRU = [cultureinfo]::GetCultureInfo('ru-RU')
+            $ruRU.NumberFormat.NumberDecimalSeparator | Should -Be ','
+            $ruRU.NumberFormat.NumberGroupSeparator | Should -Not -Be '.'
+            ConvertFrom-HumanReadableSize -SizeString "1.234 KB" -Culture $ruRU | Should -Be 1264
+        }
+
         It "Leaves an unambiguous two-separator string alone whatever the culture" {
             # Both marks present means the last one is the decimal point, and no culture
             # can make that ambiguous
@@ -705,7 +716,11 @@ Describe "Get-RegistryValueCount" -Tag "Unit", "Helper" {
         # Mocked rather than ACL-denied: creating a genuinely unreadable HKCU key on the
         # developer's own machine is a side effect a unit test has no business leaving.
         Mock Get-ItemProperty { throw [System.UnauthorizedAccessException]::new('denied') }
-        Get-RegistryValueCount -Key $script:probeKey | Should -BeNullOrEmpty
+        # Strictly $null, not "null or empty": the caller decides with `$null -eq $before`,
+        # and an empty array satisfies BeNullOrEmpty while failing that test, so the
+        # unreadable key would have fallen through and been reported as cleared.
+        $count = Get-RegistryValueCount -Key $script:probeKey
+        ($null -eq $count) | Should -BeTrue
     }
 }
 
@@ -791,6 +806,24 @@ Describe "Test-PathProtected" -Tag "Unit", "Helper", "Security" {
             $deep = Join-Path $script:linkToInnocent 'sub'
             New-Item -ItemType Directory -Path $deep -Force | Out-Null
             Test-PathProtected -Path $deep | Should -BeFalse
+        }
+
+        It "Refuses a path whose links could not be resolved at all" {
+            # Resolve-PathThroughLinks answers $null for "I could not work out where this
+            # really points" - an unreadable ancestor, or a chain deeper than the loop
+            # bound. Both used to return a partially resolved path instead, which was then
+            # judged on its text and came back "safe to empty".
+            Mock Resolve-PathThroughLinks { $null }
+            Test-PathProtected -Path $script:linkToInnocent | Should -BeTrue
+        }
+
+        It "Treats a drive that is not mounted as absent, not as unexaminable" {
+            # DriveNotFoundException is a not-found answer. Landing in the refuse arm made
+            # every cleanup target on an unmapped drive a "Protected path skipped" WARNING,
+            # which is noise in the channel this release uses as its failure alarm.
+            $free = 'QWXYZJ'.ToCharArray() | Where-Object { -not (Test-Path "${_}:\") } | Select-Object -First 1
+            $free | Should -Not -BeNullOrEmpty -Because 'the test needs a drive letter that is genuinely unmapped'
+            Test-PathProtected -Path "${free}:\SomeFolder" | Should -BeFalse
         }
     }
 
@@ -1186,11 +1219,29 @@ Describe "Get-StorageSenseVerdict" -Tag "Unit", "Helper", "V220" {
         $verdict.Reason | Should -Be 'success'
     }
 
-    It "is fail-closed on a non-zero task result" {
-        # 0x80040154 is what this task actually returns on the maintainer's workstation
-        $verdict = Get-StorageSenseVerdict -TaskResult 0x80040154 -FreedBytes ([long]5MB)
+    It "is fail-closed on a non-zero task result IN THE TYPE WINDOWS ACTUALLY SUPPLIES" {
+        # LastTaskResult is a UInt32. Every HRESULT failure has the high bit set, so its
+        # unsigned value exceeds Int32.MaxValue: 0x80040154 arrives as 2147746132 and the
+        # old [int] cast THREW on it, taking down the whole DeepSystemCleanup phase.
+        #
+        # The first version of this test wrote the PowerShell literal 0x80040154, which the
+        # parser types as Int32 -2147221164. The cast succeeded, the test was green, and it
+        # was green BECAUSE of the defect. Passing the production type is the entire point.
+        $realValue = [uint32]2147746132
+        $realValue | Should -BeOfType [uint32]
+        $verdict = Get-StorageSenseVerdict -TaskResult $realValue -FreedBytes ([long]5MB)
         $verdict.Done | Should -BeFalse
         $verdict.Reason | Should -Be 'failed'
+    }
+
+    It "does not throw on the full UInt32 range" {
+        { Get-StorageSenseVerdict -TaskResult ([uint32]::MaxValue) -FreedBytes ([long]5MB) } | Should -Not -Throw
+    }
+
+    It "treats a result that is not a number as unreadable rather than throwing" {
+        $verdict = Get-StorageSenseVerdict -TaskResult 'not-a-number' -FreedBytes ([long]5MB)
+        $verdict.Done | Should -BeFalse
+        $verdict.Reason | Should -Be 'unreadable'
     }
 
     It "is fail-closed when the task result could not be read" {
@@ -1267,6 +1318,29 @@ Describe "Wait-StorageSenseTask" -Tag "Unit", "Helper", "V220" {
         # Not before the 10-second mark: a task that was never seen running needs the
         # evidence, and the first poll is too early to distinguish it from a slow start
         $result.Elapsed | Should -Be 10
+    }
+
+    It "refuses to call a task finished when there is no baseline to compare against" {
+        # The fail-open this replaced: '-not $LastRunBefore' is TRUE when the pre-run read
+        # failed, so the disjunction short-circuited and ANY readable task info returned
+        # 'finished' for a task that may never have started. That false success went on to
+        # skip all 23 cleanmgr handlers.
+        $result = Wait-StorageSenseTask -GetTask { [pscustomobject]@{ State = 'Ready' } } `
+            -GetTaskInfo { param($t) [pscustomobject]@{ LastRunTime = [datetime]'2026-07-22 11:00' } } `
+            -LastRunBefore $null -TimeoutSeconds 60 -CheckInterval 5 -Wait $script:noWait
+        $result.Outcome | Should -Be 'unverifiable'
+    }
+
+    It "actually waits when no wait scriptblock is injected" {
+        # Every other test here injects a no-op wait, so the default was unpinned: changing
+        # it to an empty block left all of them green while production spun through its
+        # whole timeout in microseconds and fell back to Disk Cleanup on every run.
+        $sw = [System.Diagnostics.Stopwatch]::StartNew()
+        $result = Wait-StorageSenseTask -GetTask { $null } -GetTaskInfo { param($t) $null } `
+            -LastRunBefore $null -TimeoutSeconds 2 -CheckInterval 1
+        $sw.Stop()
+        $result.Outcome | Should -Be 'vanished'
+        $sw.Elapsed.TotalMilliseconds | Should -BeGreaterThan 800
     }
 
     It "does not call a task finished when LastRunTime never moved" {

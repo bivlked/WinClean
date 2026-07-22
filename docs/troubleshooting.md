@@ -39,7 +39,7 @@ WinClean requires administrator rights, and `winget` refuses to manage **user-sc
 The package installed for user scope cannot be uninstalled when running with administrator privileges.
 ```
 
-An upgrade replaces the installed package, so it hits the same wall. Such packages will be offered, fail, and be offered again on the next run, forever. WinClean reports the failure honestly (a warning with winget's exit code), but it cannot fix it: a run cannot drop its own privileges half way through.
+An upgrade replaces the installed package, so it hits the same wall. Such packages will be offered, fail, and be offered again on the next run, forever. WinClean reports the failure honestly, but only as a warning that some upgrades failed: `winget upgrade --all` runs as one batch and returns a single exit code, so the message cannot name the package. It cannot fix it either, because a run cannot drop its own privileges half way through.
 
 **Fix:** upgrade those packages yourself from a **normal, non-elevated** PowerShell window:
 
@@ -56,7 +56,8 @@ winget upgrade --id <PackageId>
 ```powershell
 # what winget reads
 Get-ChildItem 'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall',
-              'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall' |
+              'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall',
+              'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall' |
     ForEach-Object { Get-ItemProperty $_.PSPath } |
     Where-Object DisplayName -like '*<AppName>*' |
     Select-Object DisplayName, DisplayVersion, InstallLocation

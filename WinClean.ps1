@@ -12,7 +12,7 @@
 .REQUIREDSCRIPTS
 .EXTERNALSCRIPTDEPENDENCIES
 .RELEASENOTES
-    v2.20: Correctness and honesty round - a junction could bypass protected-path checks, four operations reported success while doing nothing, Storage Sense was unreachable so every run fell back to the slow Disk Cleanup, new -SkipDiskCleanup
+    v2.20: Correctness and honesty round - a junction could bypass protected-path checks, four operations reported success while doing nothing, Storage Sense was unreachable so on machines where it works the slow Disk Cleanup no longer runs; where it fails, the new -SkipDiskCleanup is what removes the wait
     v2.19: Contract and documentation round - -SkipCleanup now skips ALL cleanup categories, result JSON gains a tri-state PhasesSkipped, AppUpdatesCount renamed to AppUpdatesOffered (offered, not installed), full docs overhaul
     v2.18: Correctness and hardening follow-up from external code review - diskpart failure detection, driver-store accounting, strict superseded-version rule, exact bootstrap host allowlist
     v2.17: Silent failure hardening - operations that quietly do nothing now say so instead of reporting success
@@ -49,7 +49,8 @@
     - SECURITY: a junction whose target is a protected root could be used as a cleanup
       root - the path check compared text and never resolved the link
     - Storage Sense was looked up at a path where it does not exist, so every run fell
-      back to Disk Cleanup (15 of 18 minutes on a real workstation)
+      back to Disk Cleanup (15 of 18 minutes on a real workstation). Where Storage Sense
+      itself fails, the fallback still runs - use -SkipDiskCleanup there
     - npm, event logs, privacy traces and winget source update no longer report success
       when they did nothing
     - Added -SkipDiskCleanup to skip only the slow Disk Cleanup step
@@ -269,10 +270,11 @@
     Пропустить очистку Visual Studio
 .PARAMETER SkipDiskCleanup
     Пропустить только шаг Storage Sense / Disk Cleanup (штатная утилита Windows).
-    Это самый долгий шаг прогона: на реальной рабочей станции cleanmgr занял 15 минут
-    из 18 и не успел завершиться, потому что его время уходит на СКАНИРОВАНИЕ категорий
-    и не зависит от того, сколько мусора реально есть. Остальная очистка при этом
-    выполняется - в отличие от -SkipCleanup, который гасит её целиком
+    Этот шаг бывает самым долгим: на реальной рабочей станции cleanmgr занял 15 минут
+    из 18 и не успел завершиться, тогда как на чистой виртуальной машине те же
+    23 категории отрабатывают за 10 секунд. Причина разницы НЕ установлена: измерение
+    показывает лишь, что стоимость зависит от накопленного состояния машины. Остальная
+    очистка при этом выполняется - в отличие от -SkipCleanup, который гасит её целиком
 .PARAMETER DisableTelemetry
     Отключить телеметрию Windows (через групповую политику)
 .PARAMETER ReportOnly
@@ -1303,9 +1305,22 @@ function ConvertFrom-HumanReadableSize {
         an unhandled exception instead of returning 0), the word form of bytes, and
         "MiB"/"GiB"/etc binary-unit spelling (this script's own *B literals are already
         1024-based, so the multiplier is identical to KB/MB/GB/TB).
+        v2.20: a lone separator is no longer assumed to be the decimal point. The grouping
+        SHAPE decides first, and only a string that could honestly be read either way is
+        settled by the culture - so the result for such a string is culture-dependent.
+    .PARAMETER SizeString
+        The text to convert, e.g. "2.5 GB", "1,234 KB", "816 КБ".
+    .PARAMETER Culture
+        Consulted only for an ambiguous grouping such as "1,234", where en-US means 1234
+        and ru-RU means 1.234. Defaults to the current culture, which is what the Shell
+        used to format the string this function's only caller parses. Shapes that cannot
+        be a grouping ("1,5", "1,2345") are decimal in every culture.
     .EXAMPLE
         ConvertFrom-HumanReadableSize "2.5 GB"  # Returns 2684354560
         ConvertFrom-HumanReadableSize "512MB"   # Returns 536870912
+    .EXAMPLE
+        ConvertFrom-HumanReadableSize "1,234 KB" -Culture ([cultureinfo]'en-US')  # 1263616
+        ConvertFrom-HumanReadableSize "1,234 KB" -Culture ([cultureinfo]'ru-RU')  # 1264
     #>
     param(
         [string]$SizeString,
@@ -1425,8 +1440,13 @@ function Resolve-PathThroughLinks {
         $changed = $false
 
         while ($probe) {
+            # Raised in review: an ancestor that could not be examined used to be silently
+            # classified as "not a link" and the walk carried on upward, so an unreadable
+            # junction ancestor answered "safe to empty". That is the half of the guard
+            # which closes the real attack (C:\cache\Windows where C:\cache is the link),
+            # and it was the half that failed open. Unknown is not safe.
             $item = $null
-            try { $item = Get-Item -LiteralPath $probe -Force -ErrorAction Stop } catch { $item = $null }
+            try { $item = Get-Item -LiteralPath $probe -Force -ErrorAction Stop } catch { return $null }
 
             if ($item -and ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint)) {
                 $target = $null
@@ -1448,10 +1468,16 @@ function Resolve-PathThroughLinks {
             $probe = $parent
         }
 
-        if (-not $changed) { break }
+        # Nothing left to resolve: this is the fully resolved answer
+        if (-not $changed) { return $current }
     }
 
-    return $current
+    # The bound was exhausted while links were still being followed, which means the chain
+    # could not be resolved. The contract for that is $null. Returning the partially
+    # resolved path (raised in review) handed Test-PathProtected a value that still
+    # contained a link and was then judged on its text alone - fail-open in the one
+    # function this release rewrote to fail closed.
+    return $null
 }
 
 function Get-RegistryValueCount {
@@ -1557,9 +1583,14 @@ function Test-PathProtected {
     }
 
     # v2.20: resolve a link root and re-check the real target (see .DESCRIPTION).
-    # A path that does not exist, or cannot be inspected, keeps the previous answer:
-    # there is nothing to delete through it, and treating it as protected would change
-    # the meaning of the function for every caller that probes optional locations.
+    # A path that is not there answers $false - there is nothing to delete through it, and
+    # callers probe optional locations constantly. A path that EXISTS but cannot be
+    # examined answers $true; the two are decided separately below.
+    #
+    # (This comment described the opposite of the code until review caught it: the first
+    # draft lumped "cannot be inspected" in with "does not exist". A comment asserting a
+    # safety property the code does not have is how the fail-open bootstrap shipped in
+    # v2.17, and it ended up copied into SECURITY.md.)
     if (-not $SkipLinkResolution) {
         # A path that cannot be inspected is not the same as a path that is not there.
         # Access denied, an I/O error, a path too long: none of them mean "safe to empty",
@@ -1572,6 +1603,12 @@ function Test-PathProtected {
         } catch [System.IO.DirectoryNotFoundException] {
             return $false
         } catch [System.IO.FileNotFoundException] {
+            return $false
+        } catch [System.Management.Automation.DriveNotFoundException] {
+            # An unmapped or removed drive is a not-found answer too (raised in review).
+            # Without this it fell to the refuse arm below, and every cleanup target on a
+            # removable drive became a "Protected path skipped" WARNING - noise in exactly
+            # the channel this release uses as its silent-failure alarm.
             return $false
         } catch {
             return $true    # exists in some form but cannot be examined - refuse
@@ -4493,7 +4530,20 @@ function Get-StorageSenseVerdict {
     )
 
     if ($null -eq $TaskResult) { return @{ Done = $false; Reason = 'unreadable' } }
-    if (0 -ne [int]$TaskResult) { return @{ Done = $false; Reason = 'failed' } }
+
+    # [int] would THROW here, and precisely on the codes this function exists to catch.
+    # LastTaskResult is a UInt32 and every HRESULT failure has the high bit set, so its
+    # unsigned value exceeds Int32.MaxValue: the 0x80040154 cited above arrives as
+    # 2147746132. The exception escaped Invoke-StorageSense, Invoke-Phase recorded
+    # DeepSystemCleanup as failed, and Clear-WindowsOld never ran.
+    # The first test written for this passed the PowerShell literal 0x80040154, which the
+    # parser types as Int32 -2147221164 - so the cast succeeded and the test was green
+    # BECAUSE of the defect. Tests for this function must use the production type.
+    $resultValue = [long]0
+    if (-not [long]::TryParse([string]$TaskResult, [ref]$resultValue)) {
+        return @{ Done = $false; Reason = 'unreadable' }
+    }
+    if ($resultValue -ne 0) { return @{ Done = $false; Reason = 'failed' } }
     if ($null -eq $FreedBytes) { return @{ Done = $false; Reason = 'not-measured' } }
     if ([long]$FreedBytes -le 0) { return @{ Done = $false; Reason = 'nothing-freed' } }
     return @{ Done = $true; Reason = 'success' }
@@ -4512,8 +4562,11 @@ function Wait-StorageSenseTask {
         disappeared while leaving its finished flag false, so the caller announced "did
         not finish within 120 seconds" after five - a number that never happened.
 
-        Returns Outcome ('finished' | 'vanished' | 'timeout'), Elapsed seconds and the
-        last Task seen.
+        Returns Outcome ('finished' | 'vanished' | 'timeout' | 'unverifiable'), Elapsed
+        seconds and the last Task seen. 'unverifiable' means the task was never observed
+        running AND its previous run time could not be read before the start, so there is
+        nothing to compare against - it is not a failure, but it is not evidence of a run
+        either, and the caller must not treat it as one.
     #>
     param(
         [scriptblock]$GetTask,
@@ -4551,8 +4604,17 @@ function Wait-StorageSenseTask {
         if ($elapsed -ge 10) {
             # Never observed as Running - it may simply have been quicker than the poll
             # interval. The task's own LastRunTime moving is the evidence.
+            #
+            # Raised in review: without a baseline there is no evidence to weigh, and the
+            # old disjunction let the MISSING baseline satisfy the test, because -not $null
+            # is true. Any readable task info then returned "finished" for a task that may
+            # never have started - a false success that goes on to skip all 23 cleanmgr
+            # handlers. A missing baseline is now its own outcome.
+            if ($null -eq $LastRunBefore) {
+                return @{ Outcome = 'unverifiable'; Elapsed = $elapsed; Task = $task }
+            }
             $infoNow = & $GetTaskInfo $task
-            if ($infoNow -and (-not $LastRunBefore -or $infoNow.LastRunTime -ne $LastRunBefore)) {
+            if ($infoNow -and $infoNow.LastRunTime -ne $LastRunBefore) {
                 return @{ Outcome = 'finished'; Elapsed = $elapsed; Task = $task }
             }
         }
@@ -4571,18 +4633,15 @@ function Invoke-StorageSense {
     # v2.20: the one step users asked to be able to switch off on its own. Until now the
     # only way was -SkipCleanup, which also suppresses temp files, browsers, dev caches,
     # Docker/WSL, Visual Studio and the driver store - everything, to avoid one step.
-    if ($SkipDiskCleanup) {
-        Write-Log "Storage Sense / Disk Cleanup skipped (parameter)" -Level INFO
-        return
-    }
-
     if ($ReportOnly) {
         Write-Log "Would run: Storage Sense" -Level DETAIL
         return
     }
 
     # cleanmgr's saved selection lives under this sageset. Both are needed up front: the
-    # sweep below runs on EVERY path, not only when cleanmgr is reached.
+    # sweep below runs on every path that is allowed to change the system, not only when
+    # cleanmgr is reached. (-ReportOnly returns above because it promises to change
+    # nothing at all; -SkipDiskCleanup returns AFTER the sweep, see below.)
     $sageset = 9999
     $regPath = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\VolumeCaches"
 
@@ -4601,6 +4660,15 @@ function Invoke-StorageSense {
         }
     }
 
+    # After the sweep, deliberately (raised in review). The flag means "do not run this
+    # step", not "do not touch anything": returning before the sweep left a timed-out
+    # previous run's StateFlags in the registry forever, which is the exact case the sweep
+    # was added for.
+    if ($SkipDiskCleanup) {
+        Write-Log "Storage Sense / Disk Cleanup skipped (parameter)" -Level INFO
+        return
+    }
+
     # Try Storage Sense first (Windows 11)
     #
     # v2.20: the task was looked up at "\Microsoft\Windows\DiskCleanup\", where it does not
@@ -4616,7 +4684,14 @@ function Invoke-StorageSense {
     # silently picking the first of several tasks with the same name means starting
     # something nobody identified (raised in review).
     $ssSelection = Select-StorageSenseTask -Tasks $ssTasks
+
+    # Set by every branch that has already said why cleanmgr is being used, so the
+    # fallback below cannot contradict it. Raised in review: an ambiguous lookup logged
+    # both "2 tasks with that name - not guessing" and, two lines later, "task not found".
+    $ssExplained = $false
+
     if ($ssSelection.Reason -eq 'ambiguous') {
+        $ssExplained = $true
         Write-Log "Storage Sense: $($ssTasks.Count) tasks with that name ($(($ssTasks | ForEach-Object { $_.TaskPath }) -join ', ')) - not guessing, using Disk Cleanup" -Level INFO
     }
     $task = $ssSelection.Task
@@ -4662,6 +4737,7 @@ function Invoke-StorageSense {
             # ignored, so a task that never started still cost the full 120s wait before
             # anything was reported
             Write-Log "Storage Sense could not be started ($($_.Exception.Message)) - using Disk Cleanup" -Level INFO
+            $ssExplained = $true
         }
 
         if ($started) {
@@ -4710,25 +4786,51 @@ function Invoke-StorageSense {
                 # reported as having failed to finish within 120 - a number that never
                 # happened on that run.
                 Write-Log "Storage Sense task disappeared while being watched - using Disk Cleanup instead" -Level INFO
+            } elseif ($waitResult.Outcome -eq 'unverifiable') {
+                Write-Log "Storage Sense: its previous run time could not be read, so there is no way to tell whether this run happened - using Disk Cleanup instead" -Level INFO
             } else {
-                Write-Log "Storage Sense did not finish within $timeout seconds - using Disk Cleanup instead" -Level INFO
+                # WARNING, not INFO (restored in review): falling back to cleanmgr is a
+                # fine outcome, but this particular one leaves a task we asked for and
+                # could not account for, and cleanmgr is about to start alongside it. The
+                # v2.20 draft downgraded this to INFO and dropped the counter, so a run
+                # where Storage Sense hung for two minutes printed COMPLETED SUCCESSFULLY
+                # in green.
+                Write-Log "Storage Sense did not finish within $timeout seconds - using Disk Cleanup instead" -Level WARNING
+                $script:Stats.WarningsCount++
+
                 $task = @(Get-ScheduledTask @ssLookup) | Select-Object -First 1
                 if ($task -and $task.State -eq 'Running') {
+                    # The stop used to be fire-and-forget with an unconditional "stopped"
+                    # line after it (raised in review). Two cleaners deleting at once is
+                    # exactly the state the free-space accounting cannot describe, so the
+                    # claim is now made only when the task actually stopped.
                     $task | Stop-ScheduledTask -ErrorAction SilentlyContinue
-                    Write-Log "Storage Sense task stopped" -Level INFO
+                    $taskAfterStop = @(Get-ScheduledTask @ssLookup) | Select-Object -First 1
+                    if ($taskAfterStop -and $taskAfterStop.State -eq 'Running') {
+                        Write-Log "Storage Sense task could not be stopped and is still running - Disk Cleanup will run alongside it, so the freed figures below cover both" -Level WARNING
+                        $script:Stats.WarningsCount++
+                    } else {
+                        Write-Log "Storage Sense task stopped" -Level INFO
+                    }
                 }
             }
+
+            # Every branch above has stated its own reason
+            $ssExplained = $true
         }
     }
 
     if (-not $storageSenseDone) {
-        # Fallback to cleanmgr. Every other reason for landing here (start failed, task
-        # failed, timed out) has already said so in its own words, so only the two states
-        # that produce no message of their own are reported here.
-        if (-not $task) {
-            Write-Log "Storage Sense task not found, using Disk Cleanup..." -Level INFO
-        } elseif ($task.State -eq 'Disabled') {
-            Write-Log "Storage Sense task is disabled, using Disk Cleanup..." -Level INFO
+        # Fallback to cleanmgr. Every other reason for landing here (ambiguous lookup,
+        # start failed, task failed, timed out, vanished, unverifiable) has already said
+        # so in its own words and set $ssExplained, so only the two states that produce no
+        # message of their own are reported here.
+        if (-not $ssExplained) {
+            if (-not $task) {
+                Write-Log "Storage Sense task not found, using Disk Cleanup..." -Level INFO
+            } elseif ($task.State -eq 'Disabled') {
+                Write-Log "Storage Sense task is disabled, using Disk Cleanup..." -Level INFO
+            }
         }
 
         # Configure cleanup categories ($sageset / $regPath are set at the top of the
@@ -4798,9 +4900,27 @@ function Invoke-StorageSense {
                 return
             }
 
-            # Run cleanmgr with progress feedback and reasonable timeout
-            $cleanmgr = Start-Process -FilePath "cleanmgr.exe" -ArgumentList "/sagerun:$sageset" `
-                -WindowStyle Hidden -PassThru
+            # Run cleanmgr with progress feedback and reasonable timeout.
+            #
+            # Raised in review, then measured: Start-Process on a missing or blocked
+            # executable leaves the variable $null, and $null.HasExited is also $null - so
+            # "-not $cleanmgr.HasExited" is TRUE and the loop below reported progress every
+            # minute for the full fifteen, then set DiskCleanupPending and warned that an
+            # elevated process was still deleting. All for a process that never started.
+            # Reachable on Server SKUs without Desktop Experience and under AppLocker/WDAC.
+            $cleanmgr = $null
+            try {
+                $cleanmgr = Start-Process -FilePath "cleanmgr.exe" -ArgumentList "/sagerun:$sageset" `
+                    -WindowStyle Hidden -PassThru -ErrorAction Stop
+            } catch {
+                $cleanmgr = $null
+            }
+
+            if (-not $cleanmgr) {
+                Write-Log "Disk Cleanup could not be started (cleanmgr.exe is missing or blocked) - it cleaned nothing" -Level WARNING
+                $script:Stats.WarningsCount++
+                return
+            }
 
             # v2.16: raised from 420s. cleanmgr regularly needs longer on a workstation
             # with a large component store, and killing it produced a warning on every
@@ -5177,8 +5297,7 @@ function Invoke-Phase {
         Write-ResultJson exposes so an automated stand can tell "everything ran" from
         "phase 6 threw and phases 7-9 are simply missing".
 
-        v2.20: Correctness and honesty round - a junction could bypass protected-path checks, four operations reported success while doing nothing, Storage Sense was unreachable so every run fell back to the slow Disk Cleanup, new -SkipDiskCleanup
-    v2.19: -Skip records a phase the user turned off with a skip flag in a third
+        v2.19: -Skip records a phase the user turned off with a skip flag in a third
         bucket, PhasesSkipped, instead of running an empty body and marking it Completed
         (which conflated "ran and did nothing" with "was skipped"). This also carries the
         "... skipped (parameter)" log line that used to come from each phase's own inner
@@ -5370,7 +5489,16 @@ function Start-WinClean {
             Clear-KernelDumps
             # Neither of these reports what it freed, so measure the drive around them
             Measure-FreeSpaceGain -Category 'ComponentStore' -Operation { Invoke-DISMCleanup }
-            Measure-FreeSpaceGain -Category 'DiskCleanup' -Operation { Invoke-StorageSense }
+            # Raised in review: measuring around a step the user switched off credited it
+            # with whatever the drive happened to gain meanwhile - DISM releasing files a
+            # moment earlier is enough - and printed "DiskCleanup freed approximately
+            # 300.00 MB" for something that executed nothing. Invoke-StorageSense is still
+            # called so its registry leftovers get swept; it just is not measured.
+            if ($SkipDiskCleanup) {
+                Invoke-StorageSense
+            } else {
+                Measure-FreeSpaceGain -Category 'DiskCleanup' -Operation { Invoke-StorageSense }
+            }
             Clear-WindowsOld
         }
 

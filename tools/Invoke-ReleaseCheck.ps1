@@ -68,9 +68,18 @@ $version = if ($scriptText -match '(?m)^\$script:Version\s*=\s*"([\d.]+)"') { $M
 if (-not $version) {
     Add-Result -Name 'Version can be determined' -Passed $false -Detail 'no $script:Version assignment found'
 } else {
+    # v2.20: the two PSScriptInfo checks are scoped to the PSScriptInfo block instead of
+    # the whole file. Searching everywhere meant a stray copy of the release-note line
+    # elsewhere in the script satisfied the check on its own - which actually happened,
+    # pasted into Invoke-Phase's comment-based help by a version bump, and the gate would
+    # have stayed green with the real .RELEASENOTES entry deleted. A gate that an accident
+    # can satisfy is the same class of problem as a gate weaker than CI.
+    $psScriptInfo = if ($scriptText -match '(?s)<#PSScriptInfo(.*?)#>') { $Matches[1] } else { '' }
+
     $versionSites = @(
-        @{ What = 'PSScriptInfo .VERSION'; Ok = $scriptText -match "(?m)^\.VERSION\s+$([regex]::Escape($version))\s*$" }
-        @{ What = '.RELEASENOTES first line'; Ok = $scriptText -match "(?m)^\s*v$([regex]::Escape($version)):" }
+        @{ What = 'PSScriptInfo block is present'; Ok = [bool]$psScriptInfo }
+        @{ What = 'PSScriptInfo .VERSION'; Ok = $psScriptInfo -match "(?m)^\.VERSION\s+$([regex]::Escape($version))\s*$" }
+        @{ What = '.RELEASENOTES first line'; Ok = $psScriptInfo -match "(?m)^\s*v$([regex]::Escape($version)):" }
         @{ What = 'SYNOPSIS'; Ok = $scriptText -match "Maintenance Script v$([regex]::Escape($version))" }
         @{ What = 'NOTES Version'; Ok = $scriptText -match "(?m)^\s*Version:\s+$([regex]::Escape($version))\s*$" }
         @{ What = 'NOTES Changes in'; Ok = $scriptText -match "Changes in $([regex]::Escape($version)):" }

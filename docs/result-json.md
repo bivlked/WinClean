@@ -93,7 +93,7 @@ VisualStudioCleanup, DeepSystemCleanup, DiskSpaceReport, Telemetry
 
 ```json
 {
-  "Version": "2.19",
+  "Version": "2.20",
   "Timestamp": "2026-07-21T03:15:42.1234567+00:00",
   "DurationSeconds": 196.4,
   "ReportOnly": false,
@@ -121,6 +121,8 @@ VisualStudioCleanup, DeepSystemCleanup, DiskSpaceReport, Telemetry
   "ErrorsCount": 0,
   "RebootRequired": false,
   "ControlledFolderAccess": "disabled",
+  "LoggingDegraded": false,
+  "DiskCleanupPending": false,
   "Aborted": null,
   "PhasesCompleted": [
     "Preparation",
@@ -186,4 +188,4 @@ The Proxmox stand (`tools/proxmox/Invoke-StandTest.ps1`) reads this JSON and fai
 - `ControlledFolderAccess` is not `"unknown"`.
 - In report modes (`Report`, `ReportNoCleanup`): `ReportOnly` is `true` and `TotalFreedBytes == 0` (a preview that frees bytes is a regression).
 - In full modes: `TotalFreedBytes` is well above a trivial threshold.
-- The phase arrays are disjoint, their union is the nine known phases, and any skip flag in `Parameters` is reflected in `PhasesSkipped` (for example, the `ReportNoCleanup` mode sets `-SkipCleanup` and expects the whole cleanup group to be skipped). These phase checks apply only to result JSON produced by 2.19 or newer: the nightly also runs a pass against the latest published release, which can predate the schema, and asserting it there would fail the run for version skew rather than for a defect. When they are skipped, the harness says so.
+- The phase arrays are disjoint, their union is the nine known phases, and a skip flag that gates a whole phase is reflected in `PhasesSkipped` (for example, the `ReportNoCleanup` mode sets `-SkipCleanup` and expects the whole cleanup group to be skipped). `-SkipDiskCleanup` is the exception and deliberately so: it suppresses one step inside `DeepSystemCleanup`, not the phase, so that phase still lands in `PhasesCompleted`. These phase checks apply only to result JSON produced by 2.19 or newer: the nightly also runs a pass against the latest published release, which can predate the schema, and asserting it there would fail the run for version skew rather than for a defect. When they are skipped, the harness says so.

@@ -1312,3 +1312,108 @@ Describe "v2.20 review: measurements and failures answer honestly" -Tag "Fix", "
 }
 
 #endregion
+
+#region V220R2: second review round, before release
+
+Describe "v2.20 pre-release review: fixes to the fixes" -Tag "Fix", "V220R2" {
+    <#
+    Five reviewers (four specialised agents plus a cross-engine pass) went over this
+    release. The behavioural coverage for what they found lives in Helpers.Tests.ps1;
+    what remains here is code that needs a scheduler, a missing cleanmgr.exe or a
+    registry hive to reach.
+    #>
+
+    Context "Storage Sense: a step that did not happen cannot look like one that did" {
+        It "Refuses to wait on a process that never started" {
+            $body = Get-FunctionBody -Name 'Invoke-StorageSense'
+            # Measured: Start-Process on a missing exe leaves $null, and $null.HasExited is
+            # $null, so '-not $cleanmgr.HasExited' is TRUE - the loop reported progress for
+            # the full fifteen minutes and then set DiskCleanupPending for a process that
+            # did not exist.
+            $body | Should -Match 'if \(-not \$cleanmgr\) \{'
+            $startAt = $body.IndexOf('Start-Process -FilePath "cleanmgr.exe"')
+            $guardAt = $body.IndexOf('if (-not $cleanmgr) {')
+            $startAt | Should -BeGreaterOrEqual 0
+            $guardAt | Should -BeGreaterThan $startAt
+        }
+
+        It "Claims the task stopped only after checking that it stopped" {
+            $body = Get-FunctionBody -Name 'Invoke-StorageSense'
+            $body | Should -Match '\$taskAfterStop'
+            # The unconditional claim must be gone: the success line has to sit in an else
+            $body | Should -Match 'Stop-ScheduledTask[\s\S]{0,400}?\$taskAfterStop'
+        }
+
+        It "Counts a two-minute timeout as a warning again" {
+            $body = Get-FunctionBody -Name 'Invoke-StorageSense'
+            $body | Should -Match 'did not finish within \$timeout seconds[^\n]*-Level WARNING'
+        }
+
+        It "Does not contradict itself about whether the task was found" {
+            $body = Get-FunctionBody -Name 'Invoke-StorageSense'
+            # An ambiguous lookup used to log "2 tasks with that name" and then, two lines
+            # later, "task not found"
+            $body | Should -Match '\$ssExplained'
+            $body | Should -Match 'if \(-not \$ssExplained\)'
+        }
+
+        It "Sweeps the registry leftovers before honouring -SkipDiskCleanup" {
+            $body = Get-FunctionBody -Name 'Invoke-StorageSense'
+            $sweepAt = $body.IndexOf('Remove-ItemProperty -Path $_.PSPath')
+            $skipAt = $body.IndexOf('if ($SkipDiskCleanup) {')
+            $sweepAt | Should -BeGreaterOrEqual 0
+            $skipAt | Should -BeGreaterThan $sweepAt
+        }
+
+        It "Does not measure free space around a step the user switched off" {
+            $body = Get-FunctionBody -Name 'Start-WinClean'
+            # Bracketing a no-op with two drive reads credited DiskCleanup with whatever
+            # the drive gained meanwhile
+            $body | Should -Match 'if \(\$SkipDiskCleanup\) \{\s*\r?\n\s*Invoke-StorageSense'
+        }
+    }
+
+    Context "Link resolution fails closed on every unknown" {
+        It "Returns null when the resolution bound is exhausted" {
+            $body = Get-FunctionBody -Name 'Resolve-PathThroughLinks'
+            # Falling out of the bounded loop means "could not resolve", and the caller
+            # only fails closed on $null
+            $body | Should -Match 'if \(-not \$changed\) \{ return \$current \}'
+            $body.TrimEnd() | Should -Match 'return \$null\s*\}$'
+        }
+
+        It "Returns null when an ancestor cannot be examined" {
+            $body = Get-FunctionBody -Name 'Resolve-PathThroughLinks'
+            $body | Should -Match 'catch \{ return \$null \}'
+        }
+    }
+
+    Context "The release note exists in exactly one place" {
+        It "Appears exactly once inside PSScriptInfo, and its text is not duplicated outside" {
+            # A version bump pasted the whole v2.20 release-note sentence into
+            # Invoke-Phase's comment-based help, and that stray copy satisfied the release
+            # gate's .RELEASENOTES check on its own.
+            # Note the count is taken INSIDE the block: "vX.Y:" also opens legitimate prose
+            # in other help blocks, so a whole-file count would forbid ordinary comments.
+            $version = if ($scriptContent -match '(?m)^\$script:Version\s*=\s*"([\d.]+)"') { $Matches[1] } else { $null }
+            $version | Should -Not -BeNullOrEmpty
+
+            $psScriptInfo = if ($scriptContent -match '(?s)<#PSScriptInfo(.*?)#>') { $Matches[1] } else { '' }
+            $psScriptInfo | Should -Not -BeNullOrEmpty
+            ([regex]::Matches($psScriptInfo, "(?m)^\s*v$([regex]::Escape($version)):")).Count | Should -Be 1
+
+            # And the sentence itself belongs to that one place only
+            $noteLine = ([regex]::Match($psScriptInfo, "(?m)^\s*v$([regex]::Escape($version)):.*$")).Value.Trim()
+            $noteLine.Length | Should -BeGreaterThan 40
+            ([regex]::Matches($scriptContent, [regex]::Escape($noteLine))).Count | Should -Be 1
+        }
+
+        It "The gate looks for it only inside PSScriptInfo" {
+            $gate = Get-Content (Join-Path $PSScriptRoot '..' 'tools' 'Invoke-ReleaseCheck.ps1') -Raw
+            $gate | Should -Match '\$psScriptInfo'
+            $gate | Should -Not -Match "What = '\.RELEASENOTES first line'; Ok = \`$scriptText"
+        }
+    }
+}
+
+#endregion

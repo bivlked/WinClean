@@ -118,6 +118,45 @@ Found by an independent review **of the fixes above**, before release:
   not-run counters all stay at 0 - so counting tests alone could not see an entire test
   file going missing. Both `tools/Invoke-Tests.ps1` and the release gate now check it
 
+Found by a full pre-release review (four specialised reviewers plus a cross-engine pass),
+after the stand had already passed on both machines:
+
+- **The Storage Sense verdict crashed on every real failure code, and the test for it was
+  green because of the defect.** `LastTaskResult` is a `UInt32`; every HRESULT failure has
+  the high bit set, so `0x80040154` arrives as 2147746132 and the `[int]` cast threw. The
+  exception left `Invoke-StorageSense`, the phase was recorded as failed, and
+  `Clear-WindowsOld` never ran. The test passed the PowerShell literal `0x80040154`, which
+  the parser types as `Int32` -2147221164, so the cast succeeded there. Two reviewers found
+  this independently; the fix parses instead of casting, and the test now uses the type
+  Windows actually supplies
+- **A missing baseline counted as proof that Storage Sense had run.** When the pre-run task
+  info could not be read, `-not $LastRunBefore` was true, so the first evidence check
+  returned "finished" for a task that might never have started - and a stale success code
+  plus any unrelated free-space growth then skipped all 23 Disk Cleanup handlers. That
+  state is now its own outcome and always falls back
+- **A `cleanmgr.exe` that never started produced fifteen minutes of fabricated progress.**
+  `Start-Process` leaves `$null` when the executable is missing or blocked, and
+  `$null.HasExited` is `$null`, so the wait loop ran its full course and then reported that
+  an elevated process was still deleting in the background
+- **Two more fail-open holes in the protected-path guard.** An ancestor that could not be
+  examined was silently treated as "not a link", and exhausting the resolution bound
+  returned the partially resolved path instead of `$null`. Both let a path be judged on its
+  text, which is the bypass this release exists to close
+- **A stale comment in that same guard asserted the opposite of the code.** This is how the
+  fail-open bootstrap shipped in 2.17, and that claim reached SECURITY.md before anyone
+  checked it
+- Storage Sense also: a two-minute timeout is a warning again rather than a silent INFO,
+  "task stopped" is claimed only after checking that it stopped, an ambiguous lookup no
+  longer also says the task was not found, and an unmapped drive is treated as absent
+  rather than as unexaminable
+- **`-SkipDiskCleanup` skipped the registry sweep it promised to run, and was credited with
+  bytes it never freed** - the step was measured even when switched off, so unrelated
+  free-space growth was reported as `DiskCleanup freed approximately N MB`
+- **A release note pasted into the wrong help block satisfied the release gate on its own.**
+  The gate matched `.RELEASENOTES` against the whole file, so the real entry could have been
+  deleted while the check stayed green. It is scoped to the PSScriptInfo block now, and a
+  test pins that the note exists in exactly one place
+
 ### Added
 
 - **`-SkipDiskCleanup`** skips only the Storage Sense / Disk Cleanup step. Until now the
@@ -145,7 +184,7 @@ Found by an independent review **of the fixes above**, before release:
 
 ### Tests
 
-- 376 to 433 automated tests. New coverage: the junction guard (a link to a protected root
+- 376 to 450 automated tests. New coverage: the junction guard (a link to a protected root
   is refused, a harmless one is not), a fresh per-run statistics object, the registry value
   counter, and a mocked event-log enumeration failure
 - **The Storage Sense rewrite had no tests at all** - the largest gap in this release, and
