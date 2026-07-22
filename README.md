@@ -321,7 +321,7 @@ WinClean is built to be safe to run on a working machine. The short version:
 
 ```
 ┌────────────────────────────────────────────────────────────────┐
-│                     WinClean v2.20                             │
+│                     WinClean v2.21                             │
 ├────────────────────────────────────────────────────────────────┤
 │  PREPARATION                                                   │
 │  ├─ ✓ Check Administrator Rights                               │

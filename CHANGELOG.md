@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+Planned for a later release: quick system health section (SMART, image integrity, WinRE),
+Windows Update driver listing, run-to-run delta and HTML report. See CLAUDE.md.
+
+---
+
+## [2.21] - 2026-07-23
+
+A release about telling the truth on the way out. The self-update could change a file
+other than the one being run and still print "Update complete", and the exit code called
+a perfectly good maintenance run a failure whenever the machine simply lacked an optional
+tool or a network. Both are the same underlying habit: reporting a state the run did not
+actually verify.
+
 ### Fixed
 
 - **The self-update updated a file that was not being run, and reported success.** The
@@ -88,9 +101,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `docs/troubleshooting.md` explains the "update complete but the version never changes"
   symptom, how to inspect and clean up a two-installation machine, and states plainly that
   a missing `winget` no longer makes the run exit non-zero
+- `docs/result-json.md` documents `AppUpdatesStatus`, the new `UpdatedAndExited` value of
+  `Aborted`, and what each status means for reading `AppUpdatesOffered`
 
-Planned for a later release: quick system health section (SMART, image integrity, WinRE),
-Windows Update driver listing, run-to-run delta and HTML report. See CLAUDE.md.
+### Tests
+
+- 452 to 573. New coverage for update-channel classification, provider discovery and
+  selection across both package providers, on-disk verification of an applied update, and
+  the severity of every skip in the Updates phase. Twenty-one mutations were run against
+  the new guards and each one failed a test
 
 ---
 

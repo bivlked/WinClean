@@ -1,5 +1,5 @@
 <#PSScriptInfo
-.VERSION 2.20
+.VERSION 2.21
 .GUID 8f7c3b2a-1d4e-5f6a-9b8c-0d1e2f3a4b5c
 .AUTHOR bivlked
 .COMPANYNAME
@@ -12,6 +12,7 @@
 .REQUIREDSCRIPTS
 .EXTERNALSCRIPTDEPENDENCIES
 .RELEASENOTES
+    v2.21: Self-update targeting and honest exit codes - the update could change a file that was not the one running and still report success; a missing winget or no connectivity no longer fails the run
     v2.20: Correctness and honesty round - a junction could bypass protected-path checks, four operations reported success while doing nothing, Storage Sense was unreachable so on machines where it works the slow Disk Cleanup no longer runs; where it fails, the new -SkipDiskCleanup is what removes the wait
     v2.19: Contract and documentation round - -SkipCleanup now skips ALL cleanup categories, result JSON gains a tri-state PhasesSkipped, AppUpdatesCount renamed to AppUpdatesOffered (offered, not installed), full docs overhaul
     v2.18: Correctness and hardening follow-up from external code review - diskpart failure detection, driver-store accounting, strict superseded-version rule, exact bootstrap host allowlist
@@ -29,7 +30,7 @@
 
 <#
 .SYNOPSIS
-    WinClean - Ultimate Windows 11 Maintenance Script v2.20
+    WinClean - Ultimate Windows 11 Maintenance Script v2.21
 .DESCRIPTION
     Комплексный скрипт для обновления и очистки Windows 11:
     - Обновление Windows (включая драйверы)
@@ -43,8 +44,20 @@
     - Подробный цветной вывод + лог-файл
 .NOTES
     Author: biv
-    Version: 2.20
+    Version: 2.21
     Requires: PowerShell 7.1+, Windows 11, Administrator rights
+    Changes in 2.21:
+    - The self-update could update a DIFFERENT copy than the one running and report
+      success - it asked whether a Gallery copy existed anywhere, not whether the
+      running file was that copy
+    - Several Gallery installations now disable the automatic update instead of
+      changing one at random; the running path is printed so they can be told apart
+    - Detection, updating and the printed advice work on a machine that has only
+      PSResourceGet; an AllUsers install is no longer invisible
+    - An update that reports success is verified against the version on disk
+    - A missing winget, no internet connection and a failed self-update are warnings,
+      not errors: the exit code no longer reports failure for a complete cleanup
+    - Result JSON gains AppUpdatesStatus, and Aborted gains UpdatedAndExited
     Changes in 2.20:
     - SECURITY: a junction whose target is a protected root could be used as a cleanup
       root - the path check compared text and never resolved the link
@@ -403,7 +416,7 @@ if (-not $LogPath) {
 }
 
 # Script version (single source of truth for version checking)
-$script:Version = "2.20"
+$script:Version = "2.21"
 
 # Protected paths that should never be deleted
 $script:ProtectedPaths = @(
