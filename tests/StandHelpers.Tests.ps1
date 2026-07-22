@@ -74,3 +74,44 @@ Describe "Test-HeartbeatStale (nightly dead-man switch)" -Tag "Unit", "Stand", "
         }
     }
 }
+
+Describe "Test-ResultSupportsPhaseBuckets (version gate for stand assertions)" -Tag "Unit", "Stand", "V219" {
+
+    <#
+    Found by an automated review of the v2.19 PR: the nightly matrix runs one pass
+    against the latest PUBLISHED release, whose result JSON predates the tri-state
+    phase schema. Asserting that schema unconditionally would turn the nightly red for
+    version skew instead of for a broken release.
+    #>
+
+    It "accepts the version that introduced the buckets" {
+        Test-ResultSupportsPhaseBuckets '2.19' | Should -BeTrue
+    }
+
+    It "accepts a later version" {
+        Test-ResultSupportsPhaseBuckets '2.20' | Should -BeTrue
+    }
+
+    It "rejects the release that shipped before the buckets existed" {
+        Test-ResultSupportsPhaseBuckets '2.18' | Should -BeFalse
+    }
+
+    It "compares numerically, not as text" {
+        # '2.9' sorts after '2.19' as a string; as a version it is older
+        Test-ResultSupportsPhaseBuckets '2.9' | Should -BeFalse
+    }
+
+    It "rejects <Case> rather than assuming the schema is there" -ForEach @(
+        @{ Case = 'an empty version'; Value = '' }
+        @{ Case = 'a missing version'; Value = $null }
+        @{ Case = 'an unparseable version'; Value = 'v2.19-beta' }
+    ) {
+        Test-ResultSupportsPhaseBuckets $Value | Should -BeFalse
+    }
+
+    It "works on a version round-tripped through ConvertFrom-Json" {
+        # Mirrors the real path: the harness reads the version out of result JSON
+        $r = [ordered]@{ Version = '2.19' } | ConvertTo-Json | ConvertFrom-Json
+        Test-ResultSupportsPhaseBuckets ([string]$r.Version) | Should -BeTrue
+    }
+}

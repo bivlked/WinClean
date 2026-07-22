@@ -885,7 +885,10 @@ Describe "v2.18: bootstrap host allowlist is exact, not a broad suffix" -Tag "Fi
         if ($src -notmatch '(?ms)^(function Assert-GitHubUri \{.*?\n\})') {
             throw "Assert-GitHubUri not found in $Name"
         }
-        Invoke-Expression $Matches[1]
+        # Dot-sourcing a scriptblock defines the function in this scope exactly as
+        # Invoke-Expression would, without tripping PSAvoidUsingInvokeExpression
+        # (which CI lints as a Warning and therefore fails on).
+        . ([scriptblock]::Create($Matches[1]))
     }
 
     It "Accepts a real release asset URL on github.com" {

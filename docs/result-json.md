@@ -182,4 +182,4 @@ The Proxmox stand (`tools/proxmox/Invoke-StandTest.ps1`) reads this JSON and fai
 - `ControlledFolderAccess` is not `"unknown"`.
 - In report modes (`Report`, `ReportNoCleanup`): `ReportOnly` is `true` and `TotalFreedBytes == 0` (a preview that frees bytes is a regression).
 - In full modes: `TotalFreedBytes` is well above a trivial threshold.
-- The phase arrays are disjoint, their union is the nine known phases, and any skip flag in `Parameters` is reflected in `PhasesSkipped` (for example, the `ReportNoCleanup` mode sets `-SkipCleanup` and expects the whole cleanup group to be skipped).
+- The phase arrays are disjoint, their union is the nine known phases, and any skip flag in `Parameters` is reflected in `PhasesSkipped` (for example, the `ReportNoCleanup` mode sets `-SkipCleanup` and expects the whole cleanup group to be skipped). These phase checks apply only to result JSON produced by 2.19 or newer: the nightly also runs a pass against the latest published release, which can predate the schema, and asserting it there would fail the run for version skew rather than for a defect. When they are skipped, the harness says so.

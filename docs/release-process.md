@@ -32,7 +32,7 @@ This is fail-closed and checks, at minimum:
 - there are no em-dashes or en-dashes anywhere in the tracked text (only hyphen-minus is allowed);
 - the documented test counters match the real Pester count;
 - PowerShell syntax parses;
-- PSScriptAnalyzer reports no Error-level findings;
+- PSScriptAnalyzer is clean over exactly the files and severities CI enforces (both call the same `tools/Invoke-Lint.ps1`, so the gate cannot be greener than CI);
 - Pester runs with **no skipped tests** (a skipped integration suite is a silent gap);
 - the smoke test passes (a real `-ReportOnly` run, console box geometry, result JSON);
 - the working tree is clean and pushed.

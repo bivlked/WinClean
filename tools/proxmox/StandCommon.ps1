@@ -215,3 +215,26 @@ function Test-HeartbeatStale {
     $age = ($Now.ToUniversalTime() - $ts.ToUniversalTime()).TotalHours
     return ($age -gt $MaxAgeHours) -or ($age -lt -1)
 }
+
+function Test-ResultSupportsPhaseBuckets {
+    <#
+    .SYNOPSIS
+        Pure decision: was this result JSON produced by a WinClean new enough to carry
+        the tri-state phase buckets (PhasesCompleted/PhasesSkipped/PhasesFailed)?
+    .DESCRIPTION
+        The nightly matrix deliberately runs one pass against the latest PUBLISHED
+        release, which is normally older than the working tree. Asserting the newest
+        result-JSON schema against that older script turns the nightly red for version
+        skew instead of for a broken release, and a nightly that is red for a boring
+        reason stops being read. So the phase assertions are gated on the version that
+        actually produced the JSON, not on the version of this harness.
+
+        Unknown, empty or unparseable versions return false: assert nothing rather than
+        assert against a schema we cannot confirm exists.
+    #>
+    param([string]$Version)
+
+    $parsed = $null
+    if (-not [version]::TryParse($Version, [ref]$parsed)) { return $false }
+    return ($parsed -ge [version]'2.19')
+}

@@ -213,7 +213,16 @@ if (-not $jsonRaw) {
     # union must be exactly the known phase set (a name missing from all three means the
     # run crashed before dispatching it). A phase the user skipped must land in
     # PhasesSkipped, never PhasesCompleted - this exercises the F2/F3 honesty fix e2e.
-    if (-not $result.Aborted) {
+    #
+    # Gated on the version that produced the JSON: the -Source release pass runs the
+    # latest PUBLISHED script, which predates this schema, and asserting it there would
+    # fail the nightly for version skew rather than for a broken release.
+    $hasPhaseBuckets = Test-ResultSupportsPhaseBuckets ([string]$result.Version)
+    if (-not $result.Aborted -and -not $hasPhaseBuckets) {
+        # Say it out loud: a silently skipped assertion reads as a passed one
+        Write-Host "  note: phase-bucket assertions skipped, result JSON is from v$($result.Version) (pre-2.19 schema)" -ForegroundColor DarkYellow
+    }
+    if (-not $result.Aborted -and $hasPhaseBuckets) {
         $knownPhases = @('Preparation','Updates','SystemCleanup','DeveloperCleanup',
                          'DockerWSLCleanup','VisualStudioCleanup','DeepSystemCleanup',
                          'DiskSpaceReport','Telemetry')

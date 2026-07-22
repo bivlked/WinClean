@@ -14,7 +14,7 @@ Windows Update driver listing, run-to-run delta and HTML report. See CLAUDE.md.
 
 ---
 
-## [2.19] - 2026-07-21
+## [2.19] - 2026-07-22
 
 A contract-correctness and documentation round, following a second external review (this time
 of the docs and repository organization). No new cleanup features. Every code change was
@@ -50,6 +50,18 @@ deep dives under `docs/`).
   verifies the `-SkipCleanup` contract end-to-end
 - **Supply chain**: CI GitHub Actions are pinned to commit SHAs with Dependabot updates
 
+### Fixed
+
+- **The nightly stand would have gone red for version skew.** Its release pass deliberately
+  runs the latest *published* script, which predates the tri-state phase schema, yet the phase
+  assertions were unconditional. The checks are now gated on the version that produced the
+  result JSON, and a skipped assertion says so out loud instead of passing quietly
+- **The release gate could report green while CI was failing.** The gate linted three files at
+  Error severity, while CI linted `tools/` and `tests/` as well, at Error and Warning. A
+  `PSAvoidUsingInvokeExpression` warning in the test suite therefore kept `main` red from 2.18
+  onwards without the gate ever seeing it. The rule list and the file list now live in a single
+  `tools/Invoke-Lint.ps1` that both CI and the gate run, and the warning itself is fixed
+
 ### Docs
 
 - Corrected the feature list: updates go through PSWindowsUpdate + winget (not a separate
@@ -61,9 +73,11 @@ deep dives under `docs/`).
 
 ### Tests
 
-- Added coverage for the phase dispatch tri-state and its invariant, the `-SkipCleanup` group
-  contract, the `AppUpdatesOffered` honesty, the get.ps1/WinClean parameter-parity guard, the
-  nightly dead-man decision, and three previously untested helpers
+- 309 to 368 automated tests, covering the phase dispatch tri-state and its invariant, the
+  `-SkipCleanup` group contract, the `AppUpdatesOffered` honesty, the get.ps1/WinClean
+  parameter-parity guard, the nightly dead-man decision, and three previously untested helpers
+- New documentation guards (`tests/Docs.Tests.ps1`): every tracked page is checked for dash
+  characters and for internal links that point at a file which does not exist
 
 ---
 
