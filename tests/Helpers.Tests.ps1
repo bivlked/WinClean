@@ -1329,6 +1329,24 @@ Describe "Wait-StorageSenseTask" -Tag "Unit", "Helper", "V220" {
             -GetTaskInfo { param($t) [pscustomobject]@{ LastRunTime = [datetime]'2026-07-22 11:00' } } `
             -LastRunBefore $null -TimeoutSeconds 60 -CheckInterval 5 -Wait $script:noWait
         $result.Outcome | Should -Be 'unverifiable'
+        # The whole window is used to watch. The first repair returned at ten seconds,
+        # which gave a slow-starting task no chance to be seen and let Disk Cleanup start
+        # alongside it (raised in the next review round).
+        $result.Elapsed | Should -Be 60
+    }
+
+    It "still accepts being seen running as evidence when there is no baseline" {
+        # Direct observation needs no comparison: if the task was Running and then was not,
+        # it ran, whether or not its previous run time could be read.
+        $script:wssCalls = 0
+        $getTask = {
+            $script:wssCalls++
+            if ($script:wssCalls -lt 3) { [pscustomobject]@{ State = 'Running' } } else { [pscustomobject]@{ State = 'Ready' } }
+        }
+        $result = Wait-StorageSenseTask -GetTask $getTask -GetTaskInfo { param($t) $null } `
+            -LastRunBefore $null -TimeoutSeconds 60 -CheckInterval 5 -Wait $script:noWait
+        $result.Outcome | Should -Be 'finished'
+        $result.Elapsed | Should -Be 15
     }
 
     It "actually waits when no wait scriptblock is injected" {

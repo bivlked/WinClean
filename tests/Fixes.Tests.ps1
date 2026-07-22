@@ -1408,10 +1408,21 @@ Describe "v2.20 pre-release review: fixes to the fixes" -Tag "Fix", "V220R2" {
             ([regex]::Matches($scriptContent, [regex]::Escape($noteLine))).Count | Should -Be 1
         }
 
-        It "The gate looks for it only inside PSScriptInfo" {
+        It "The gate looks for it only inside the .RELEASENOTES section" {
+            # Scoping to the whole PSScriptInfo block was still too wide: a "vX.Y:" line
+            # under any other field satisfied it while .RELEASENOTES was empty
             $gate = Get-Content (Join-Path $PSScriptRoot '..' 'tools' 'Invoke-ReleaseCheck.ps1') -Raw
-            $gate | Should -Match '\$psScriptInfo'
+            $gate | Should -Match '\$releaseNotes'
+            $gate | Should -Match "What = '\.RELEASENOTES first line'; Ok = \`$releaseNotes"
             $gate | Should -Not -Match "What = '\.RELEASENOTES first line'; Ok = \`$scriptText"
+        }
+
+        It "Resolve-PathThroughLinks stops the ancestor walk at the volume root" {
+            # The walk climbed past the root of a UNC share, Get-Item on \\server failed,
+            # and the fail-closed rule then refused every UNC cleanup root
+            $body = Get-FunctionBody -Name 'Resolve-PathThroughLinks'
+            $body | Should -Match 'GetPathRoot'
+            $body | Should -Match '\$parent\.Length -lt \$rootPath\.Length'
         }
     }
 }

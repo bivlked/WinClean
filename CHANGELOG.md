@@ -154,8 +154,20 @@ after the stand had already passed on both machines:
   free-space growth was reported as `DiskCleanup freed approximately N MB`
 - **A release note pasted into the wrong help block satisfied the release gate on its own.**
   The gate matched `.RELEASENOTES` against the whole file, so the real entry could have been
-  deleted while the check stayed green. It is scoped to the PSScriptInfo block now, and a
-  test pins that the note exists in exactly one place
+  deleted while the check stayed green. It is scoped to the `.RELEASENOTES` section now, and
+  a test pins that the note exists in exactly one place
+
+A fourth review round, on the fixes above:
+
+- **The repair for the missing baseline gave up too early.** Returning "unverifiable" after
+  ten seconds left a slow-starting task free to begin afterwards, with Disk Cleanup already
+  running alongside it. The whole wait window is used to watch now, and being seen running
+  is accepted as evidence on its own, because it needs nothing to compare against
+- **The ancestor walk climbed past the root of a UNC share**, where `Get-Item` cannot
+  succeed, so the newly fail-closed rule refused every UNC cleanup root. The walk stops at
+  the volume root
+- **Scoping the release-note check to the PSScriptInfo block was still too wide** - a
+  matching line under any other field satisfied it. It reads the `.RELEASENOTES` section
 
 ### Added
 
@@ -184,7 +196,7 @@ after the stand had already passed on both machines:
 
 ### Tests
 
-- 376 to 450 automated tests. New coverage: the junction guard (a link to a protected root
+- 376 to 452 automated tests. New coverage: the junction guard (a link to a protected root
   is refused, a harmless one is not), a fresh per-run statistics object, the registry value
   counter, and a mocked event-log enumeration failure
 - **The Storage Sense rewrite had no tests at all** - the largest gap in this release, and

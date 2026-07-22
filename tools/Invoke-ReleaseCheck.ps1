@@ -76,10 +76,15 @@ if (-not $version) {
     # can satisfy is the same class of problem as a gate weaker than CI.
     $psScriptInfo = if ($scriptText -match '(?s)<#PSScriptInfo(.*?)#>') { $Matches[1] } else { '' }
 
+    # Narrowed once more in review: scoping to the whole PSScriptInfo block still let a
+    # "vX.Y:" line sitting under some OTHER field satisfy the check while .RELEASENOTES
+    # itself was empty. Take the section, not the block.
+    $releaseNotes = if ($psScriptInfo -match '(?s)\.RELEASENOTES(.*?)(?=\r?\n\s*\.[A-Z]|$)') { $Matches[1] } else { '' }
+
     $versionSites = @(
         @{ What = 'PSScriptInfo block is present'; Ok = [bool]$psScriptInfo }
         @{ What = 'PSScriptInfo .VERSION'; Ok = $psScriptInfo -match "(?m)^\.VERSION\s+$([regex]::Escape($version))\s*$" }
-        @{ What = '.RELEASENOTES first line'; Ok = $psScriptInfo -match "(?m)^\s*v$([regex]::Escape($version)):" }
+        @{ What = '.RELEASENOTES first line'; Ok = $releaseNotes -match "(?m)^\s*v$([regex]::Escape($version)):" }
         @{ What = 'SYNOPSIS'; Ok = $scriptText -match "Maintenance Script v$([regex]::Escape($version))" }
         @{ What = 'NOTES Version'; Ok = $scriptText -match "(?m)^\s*Version:\s+$([regex]::Escape($version))\s*$" }
         @{ What = 'NOTES Changes in'; Ok = $scriptText -match "Changes in $([regex]::Escape($version)):" }

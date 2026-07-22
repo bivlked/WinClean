@@ -1435,6 +1435,13 @@ function Resolve-PathThroughLinks {
     $current = $Path
     # Bounded: a link loop would otherwise spin here forever
     for ($round = 0; $round -lt 64; $round++) {
+        # Raised in review: the ancestor walk used to climb past the root of a UNC share.
+        # Split-Path turns \\server\share into \\server, which is not a filesystem object,
+        # so Get-Item failed, the fail-closed rule above answered $null, and every UNC
+        # cleanup root was refused. Nothing above the volume root is ours to inspect.
+        $rootPath = ''
+        try { $rootPath = [System.IO.Path]::GetPathRoot($current).TrimEnd('\', '/') } catch { $rootPath = '' }
+
         $probe = $current
         $tail = @()
         $changed = $false
@@ -1464,6 +1471,7 @@ function Resolve-PathThroughLinks {
 
             $parent = Split-Path $probe -Parent
             if (-not $parent -or $parent -eq $probe) { break }
+            if ($rootPath -and $parent.Length -lt $rootPath.Length) { break }
             $tail = ,(Split-Path $probe -Leaf) + $tail
             $probe = $parent
         }
@@ -4609,15 +4617,28 @@ function Wait-StorageSenseTask {
             # old disjunction let the MISSING baseline satisfy the test, because -not $null
             # is true. Any readable task info then returned "finished" for a task that may
             # never have started - a false success that goes on to skip all 23 cleanmgr
-            # handlers. A missing baseline is now its own outcome.
-            if ($null -eq $LastRunBefore) {
-                return @{ Outcome = 'unverifiable'; Elapsed = $elapsed; Task = $task }
-            }
-            $infoNow = & $GetTaskInfo $task
-            if ($infoNow -and $infoNow.LastRunTime -ne $LastRunBefore) {
-                return @{ Outcome = 'finished'; Elapsed = $elapsed; Task = $task }
+            # handlers.
+            #
+            # Corrected again in the next review round: the first repair returned here at
+            # once, which gave a slow-starting task no chance to be seen and let cleanmgr
+            # start alongside it. Keep watching instead - being observed Running is direct
+            # evidence and needs no baseline - and only answer "unverifiable" if the whole
+            # window passes without ever seeing it.
+            if ($null -ne $LastRunBefore) {
+                $infoNow = & $GetTaskInfo $task
+                if ($infoNow -and $infoNow.LastRunTime -ne $LastRunBefore) {
+                    return @{ Outcome = 'finished'; Elapsed = $elapsed; Task = $task }
+                }
             }
         }
+    }
+
+    # Never seen running, and there was no previous run time to compare against: the window
+    # is over and nothing about this invocation was ever observed. That is not a timeout in
+    # the useful sense - there is simply no evidence either way, and the caller must not
+    # read it as one.
+    if (-not $wasRunning -and $null -eq $LastRunBefore) {
+        return @{ Outcome = 'unverifiable'; Elapsed = $elapsed; Task = $task }
     }
 
     return @{ Outcome = 'timeout'; Elapsed = $elapsed; Task = $task }
