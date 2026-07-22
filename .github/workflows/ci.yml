@@ -22,54 +22,22 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Run PSScriptAnalyzer
         shell: pwsh
         run: |
           Set-PSRepository PSGallery -InstallationPolicy Trusted
-          Install-Module PSScriptAnalyzer -Force -Scope CurrentUser
 
-          # Exclude rules that are acceptable for interactive console scripts:
-          # - PSAvoidUsingWriteHost: Intentional for colored console output
-          # - PSAvoidUsingEmptyCatchBlock: Intentional for silent failure handling
-          # - PSUseUsingScopeModifierInNewRunspaces: Variables passed via ArgumentList
-          # - PSUseShouldProcessForStateChangingFunctions: Not needed for CLI utility
-          # - PSReviewUnusedParameter: Parameters used via $script: scope
-          # - PSUseSingularNouns: Naming convention choice (Clear-BrowserCaches etc.)
-          # - PSUseDeclaredVarsMoreThanAssignments: Debug/expansion variables
-          # - PSUseBOMForUnicodeEncodedFile: BOM not required for UTF-8
-          # - PSAvoidOverwritingBuiltInCmdlets: Write-Log is internal function
-          $excludeRules = @(
-            'PSAvoidUsingWriteHost',
-            'PSAvoidUsingEmptyCatchBlock',
-            'PSUseUsingScopeModifierInNewRunspaces',
-            'PSUseShouldProcessForStateChangingFunctions',
-            'PSReviewUnusedParameter',
-            'PSUseSingularNouns',
-            'PSUseDeclaredVarsMoreThanAssignments',
-            'PSUseBOMForUnicodeEncodedFile',
-            'PSAvoidOverwritingBuiltInCmdlets'
-          )
+          # The rule list, the file list and the analyzer version all live in
+          # tools/Invoke-Lint.ps1, which the release gate calls as well. Duplicating any
+          # of them here is what let a Warning in tests/ keep main red across a release
+          # while the gate reported all green. Installing "latest" here would reopen the
+          # same hole from the other side, so ask the script which version it needs.
+          $pin = ./tools/Invoke-Lint.ps1 -RequiredAnalyzerVersion
+          Install-Module PSScriptAnalyzer -RequiredVersion $pin -Force -Scope CurrentUser
 
-          # v2.17: get.ps1 and install.ps1 are what users actually execute from the
-          # internet, and the worst incident in this project came from get.ps1 - yet
-          # neither was ever linted here. tools/ and tests/ are covered too.
-          $paths = @('./WinClean.ps1', './get.ps1', './install.ps1') +
-                   (Get-ChildItem ./tools, ./tests -Filter *.ps1 -Recurse | ForEach-Object FullName)
-
-          $results = foreach ($p in $paths) {
-            Invoke-ScriptAnalyzer -Path $p -Severity Error,Warning -ExcludeRule $excludeRules
-          }
-
-          if ($results) {
-            $results | Format-Table -AutoSize ScriptName, Line, RuleName, Message
-            Write-Host ""
-            Write-Host "::error::PSScriptAnalyzer found $($results.Count) issue(s)"
-            exit 1
-          } else {
-            Write-Host "::notice::PSScriptAnalyzer: No issues found in $($paths.Count) file(s)!"
-          }
+          ./tools/Invoke-Lint.ps1 -FailOnFinding
 
   syntax:
     name: Syntax Check
@@ -77,7 +45,7 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Check PowerShell syntax
         shell: pwsh
@@ -106,7 +74,7 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Install Pester
         shell: pwsh
@@ -144,7 +112,7 @@ jobs:
           Write-Host "::notice::All $($result.PassedCount) tests passed"
 
       - name: Upload Test Results
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: always()
         with:
           name: test-results
@@ -157,7 +125,7 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       # v2.17: the smoke runner checks console box geometry and the result JSON of a
       # real ReportOnly run. It existed since 2.15 but was never wired into CI, so the

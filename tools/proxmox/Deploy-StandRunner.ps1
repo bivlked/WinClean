@@ -15,7 +15,10 @@
          credentials never leave the host and are not stored in this repository
       4. Installs the cron job (03:30 nightly, flock-guarded)
 .PARAMETER CronSchedule
-    Cron time spec (default: "30 3 * * *")
+    Cron time spec for the nightly matrix (default: "30 3 * * *")
+.PARAMETER HeartbeatCronSchedule
+    Cron time spec for the independent dead-man check (default: "0 7 * * *"). Runs
+    later than the nightly so a nightly that never fired is still caught and alerted.
 .NOTES
     v2.17 (p.31 of the audit): the gateway container ID and its SOCKS proxy
     addresses used to be hardcoded here, leaking internal network topology into a
@@ -25,7 +28,8 @@
 [CmdletBinding()]
 param(
     [string]$ConfigPath = (Join-Path $PSScriptRoot 'stand.config.json'),
-    [string]$CronSchedule = '30 3 * * *'
+    [string]$CronSchedule = '30 3 * * *',
+    [string]$HeartbeatCronSchedule = '0 7 * * *'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -145,13 +149,17 @@ $tgResult = ssh -o BatchMode=yes $target $tgCmd 2>&1
 if ($LASTEXITCODE -ne 0) { throw "Telegram env setup failed:`n$($tgResult -join "`n")" }
 Write-Host "  /root/.winclean-stand.env: $($tgResult | Select-Object -Last 1)" -ForegroundColor Green
 
-# 4. Cron job (flock-guarded so overlapping runs cannot double-start)
-Write-Host "[4/4] Cron job..." -ForegroundColor Cyan
+# 4. Cron jobs (flock-guarded so overlapping runs cannot double-start).
+# Two independent entries: the nightly matrix, and a later dead-man check that alerts
+# if the nightly never left a fresh heartbeat (p.29). Separate lock files so the quick
+# read-only check never contends with a long matrix run.
+Write-Host "[4/4] Cron jobs..." -ForegroundColor Cyan
 $cronLine = "$CronSchedule root /usr/bin/flock -n /run/winclean-stand.lock /usr/local/bin/pwsh -NoProfile -File $remoteDir/Invoke-NightlyStand.ps1 >> $remoteDir/results/cron.log 2>&1"
-$cronCmd = "printf '%s\n' 'SHELL=/bin/bash' 'PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin' '$cronLine' > /etc/cron.d/winclean-stand && chmod 644 /etc/cron.d/winclean-stand && cat /etc/cron.d/winclean-stand"
+$heartbeatLine = "$HeartbeatCronSchedule root /usr/bin/flock -n /run/winclean-stand-hb.lock /usr/local/bin/pwsh -NoProfile -File $remoteDir/Invoke-NightlyStand.ps1 -HeartbeatCheckOnly >> $remoteDir/results/cron.log 2>&1"
+$cronCmd = "printf '%s\n' 'SHELL=/bin/bash' 'PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin' '$cronLine' '$heartbeatLine' > /etc/cron.d/winclean-stand && chmod 644 /etc/cron.d/winclean-stand && cat /etc/cron.d/winclean-stand"
 $cronResult = ssh -o BatchMode=yes $target $cronCmd 2>&1
 if ($LASTEXITCODE -ne 0) { throw "Cron setup failed:`n$($cronResult -join "`n")" }
 
 Write-Host ""
-Write-Host "Deployed. Nightly schedule: $CronSchedule" -ForegroundColor Green
+Write-Host "Deployed. Nightly schedule: $CronSchedule ; dead-man check: $HeartbeatCronSchedule" -ForegroundColor Green
 Write-Host "Manual run on host: ssh $target pwsh -NoProfile -File $remoteDir/Invoke-NightlyStand.ps1 -Mode Report" -ForegroundColor Cyan

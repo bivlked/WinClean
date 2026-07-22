@@ -77,7 +77,11 @@ if (-not $version) {
     )
     foreach ($readme in @('README.md', 'README_RU.md')) {
         $text = Get-Content (Join-Path $repoRoot $readme) -Raw
-        $versionSites += @{ What = "$readme badge"; Ok = $text -match "-$([regex]::Escape($version))-blue" }
+        # v2.19: the version badge is dynamic (shields.io github/v/release), so it carries no
+        # hardcoded version to drift. Guard that it stayed dynamic rather than being
+        # re-hardcoded; the flow diagram still names the version explicitly, so that is the
+        # place the release must bump.
+        $versionSites += @{ What = "$readme dynamic release badge"; Ok = $text -match "img\.shields\.io/github/v/release/bivlked/WinClean" }
         $versionSites += @{ What = "$readme flow diagram"; Ok = $text -match "WinClean v$([regex]::Escape($version))" }
     }
 
@@ -124,19 +128,15 @@ $syntaxErrors = foreach ($f in @('WinClean.ps1', 'get.ps1', 'install.ps1')) {
 Add-Result -Name 'PowerShell syntax is valid' -Passed (-not $syntaxErrors) `
     -Detail $(if ($syntaxErrors) { $syntaxErrors -join ', ' } else { '' })
 
-# --- 5. PSScriptAnalyzer: no Error-level findings ----------------------------
-# Warnings are expected and documented in CLAUDE.md (Write-Host, empty catch blocks).
+# --- 5. PSScriptAnalyzer, exactly the scope CI enforces ----------------------
+# Runs tools/Invoke-Lint.ps1, the same script the CI lint job runs, so this gate
+# cannot be greener than CI. It used to be: this check linted three files at Error
+# severity while CI linted tools/ and tests/ too, at Error and Warning. A Warning in
+# tests/ kept main red for two days across a release and the gate never saw it.
 if (Get-Module -ListAvailable PSScriptAnalyzer) {
-    # get.ps1 and install.ps1 are shipped to users by the one-liners and caused the
-    # worst incident in this project, so they are linted too
-    $analyzerErrors = @(
-        foreach ($f in 'WinClean.ps1', 'get.ps1', 'install.ps1') {
-            $full = Join-Path $repoRoot $f
-            if (Test-Path $full) { Invoke-ScriptAnalyzer -Path $full -Severity Error }
-        }
-    )
-    Add-Result -Name 'PSScriptAnalyzer: no errors' -Passed ($analyzerErrors.Count -eq 0) `
-        -Detail $(if ($analyzerErrors) { ($analyzerErrors | Select-Object -First 3 | ForEach-Object { "$($_.RuleName):$($_.Line)" }) -join ', ' } else { '' })
+    $analyzerFindings = @(& (Join-Path $PSScriptRoot 'Invoke-Lint.ps1') -Quiet)
+    Add-Result -Name 'PSScriptAnalyzer: no findings (same scope as CI)' -Passed ($analyzerFindings.Count -eq 0) `
+        -Detail $(if ($analyzerFindings) { ($analyzerFindings | Select-Object -First 3 | ForEach-Object { "$($_.ScriptName):$($_.Line) $($_.RuleName)" }) -join ', ' } else { '' })
 } else {
     Add-Result -Name 'PSScriptAnalyzer available' -Passed $false -Detail 'module not installed'
 }

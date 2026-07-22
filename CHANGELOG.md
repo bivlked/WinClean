@@ -14,6 +14,73 @@ Windows Update driver listing, run-to-run delta and HTML report. See CLAUDE.md.
 
 ---
 
+## [2.19] - 2026-07-22
+
+A contract-correctness and documentation round, following a second external review (this time
+of the docs and repository organization). No new cleanup features. Every code change was
+verified against the code and covered by tests; the documentation was reworked to match the
+code exactly and to follow the three-tier model (fast copy-paste start, light explanations,
+deep dives under `docs/`).
+
+### Changed
+
+- **`-SkipCleanup` now skips ALL cleanup categories** (system, deep, developer, Docker/WSL,
+  Visual Studio), matching the documented "skip all cleanup" contract and the "Updates Only"
+  profile. Previously it left developer, Docker/WSL and Visual Studio cleanup running. This is
+  a **behavior change**: the (undocumented) combination of `-SkipCleanup` with dev/Docker/VS
+  cleanup still active is no longer possible - use the per-category `-Skip*Cleanup` flags for
+  finer control
+- **Result JSON field `AppUpdatesCount` renamed to `AppUpdatesOffered`.** `winget upgrade --all`
+  cannot report how many applications actually installed (it silently skips pinned, manifest-less
+  and UAC-cancelled packages), so the figure is the number of updates winget *offered*. The
+  console summary now reads `Windows: X installed, Apps: Y offered` instead of claiming all as
+  installed. No shipped consumer reads this field
+
+### Added
+
+- **Tri-state phase reporting in the result JSON.** A new `PhasesSkipped` array joins
+  `PhasesCompleted`/`PhasesFailed`, so a phase turned off by a skip flag is recorded as *skipped*
+  rather than *completed*. The three arrays are a dispatch status (invoked / suppressed / threw),
+  are pairwise disjoint, and their union is exactly the nine known phases for a non-aborted run
+- **`docs/` documentation site**: safety model, what-is-cleaned inventory, result-JSON schema,
+  release process, troubleshooting, FAQ and comparison pages, linked from the README
+- **Nightly stand honesty**: the matrix now also runs a quick pass against the latest release
+  tag's script (not just `main`), so a broken release with a healthy `main` is caught, and a
+  dead-man heartbeat check alerts if the nightly never ran. A new `ReportNoCleanup` stand mode
+  verifies the `-SkipCleanup` contract end-to-end
+- **Supply chain**: CI GitHub Actions are pinned to commit SHAs with Dependabot updates
+
+### Fixed
+
+- **The nightly stand would have gone red for version skew.** Its release pass deliberately
+  runs the latest *published* script, which predates the tri-state phase schema, yet the phase
+  assertions were unconditional. The checks are now gated on the version that produced the
+  result JSON, and a skipped assertion says so out loud instead of passing quietly
+- **The release gate could report green while CI was failing.** The gate linted three files at
+  Error severity, while CI linted `tools/` and `tests/` as well, at Error and Warning. A
+  `PSAvoidUsingInvokeExpression` warning in the test suite therefore kept `main` red from 2.18
+  onwards without the gate ever seeing it. The rule list and the file list now live in a single
+  `tools/Invoke-Lint.ps1` that both CI and the gate run, and the warning itself is fixed
+
+### Docs
+
+- Corrected the feature list: updates go through PSWindowsUpdate + winget (not a separate
+  Microsoft Store app path); browser cleanup covers seven browsers with per-browser profile
+  scope; Disk Cleanup arms 23 registry handlers
+- SECURITY.md: separated integrity verification (fail-closed SHA256 via the bootstrap scripts)
+  from `-ReportOnly` (a behavior preview, not an integrity check); added a Supply Chain section
+- CONTRIBUTING.md and the PR template gained a release-impacting-changes gate
+
+### Tests
+
+- 309 to 368 automated tests, covering the phase dispatch tri-state and its invariant, the
+  `-SkipCleanup` group contract, the `AppUpdatesOffered` honesty, the get.ps1/WinClean
+  parameter-parity guard, the nightly dead-man decision, and three previously untested helpers
+- New documentation guards (`tests/Docs.Tests.ps1`): every tracked page is checked for dash
+  characters and for internal links that point at a file which does not exist
+
+---
+
 ## [2.18] - 2026-07-20
 
 A correctness and hardening follow-up to 2.17, driven by an external code review (seven

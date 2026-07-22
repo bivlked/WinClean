@@ -12,18 +12,24 @@
     Artifacts are stored under tools/proxmox/results/<timestamp>/.
 .PARAMETER Mode
     Report (default): -ReportOnly -SkipUpdates, safe and fast (~2 min in guest).
+    ReportNoCleanup: -ReportOnly -SkipCleanup -SkipUpdates - verifies the v2.19
+    contract that -SkipCleanup suppresses the whole cleanup group (F1), e2e via the
+    PhasesSkipped buckets. Also fast; changes nothing.
     Full: real cleanup WITHOUT updates (-SkipUpdates; updates need Windows
     licensing/network time and are better exercised manually).
     FullWithUpdates: everything enabled - the complete production scenario (slow).
 .PARAMETER Source
     local (default): upload the working-tree WinClean.ps1 (tests unpushed changes).
-    main / release: the guest downloads from GitHub (also validates get.ps1 path).
+    main / release: the guest downloads WinClean.ps1 by raw URL from that branch/tag
+    (raw.githubusercontent.com/.../<ref>/WinClean.ps1). This exercises the script at that
+    ref, not the release asset download or the get.ps1 one-liner (use -VerifyPublished
+    and a manual one-liner run for those).
 .PARAMETER KeepRunning
     Leave the VM running after the test (for interactive debugging via console)
 #>
 [CmdletBinding()]
 param(
-    [ValidateSet('Report', 'Full', 'FullWithUpdates')]
+    [ValidateSet('Report', 'ReportNoCleanup', 'Full', 'FullWithUpdates')]
     [string]$Mode = 'Report',
 
     [ValidateSet('local', 'main', 'release')]
@@ -100,11 +106,13 @@ Invoke-WebRequest -Uri "https://raw.githubusercontent.com/bivlked/WinClean/`$tag
 # 3. Run WinClean
 $modeArgs = switch ($Mode) {
     'Report'          { "-ReportOnly -SkipUpdates" }
+    'ReportNoCleanup' { "-ReportOnly -SkipCleanup -SkipUpdates" }
     'Full'            { "-SkipUpdates" }
     'FullWithUpdates' { "" }
 }
 $timeout = switch ($Mode) {
     'Report'          { 1800 }
+    'ReportNoCleanup' { 1800 }
     'Full'            { 3600 }
     'FullWithUpdates' { 7200 }
 }
@@ -184,8 +192,13 @@ if (-not $jsonRaw) {
         $failures += "Controlled Folder Access state could not be verified - cleanup figures are unreliable"
     }
 
-    if ($Mode -eq 'Report') {
-        if (-not $result.ReportOnly) { $failures += "ReportOnly not confirmed in result JSON" }
+    # A report mode that silently ran for real is the 18.07 incident: guard it explicitly
+    # before trusting the ReportOnly-driven branch below, or a run that dropped ReportOnly
+    # would fall through to the "Full freed enough" check and pass while destroying data.
+    if ($Mode -in 'Report', 'ReportNoCleanup' -and -not $result.ReportOnly) {
+        $failures += "ReportOnly not confirmed in result JSON for mode $Mode"
+    }
+    if ($result.ReportOnly) {
         # A preview that frees bytes is the 18.07 incident happening again
         if ([long]$result.TotalFreedBytes -ne 0) {
             $failures += "Report mode freed $($result.TotalFreedBytes) bytes - it must change nothing"
@@ -193,6 +206,48 @@ if (-not $jsonRaw) {
     } elseif ([long]$result.TotalFreedBytes -le 1MB) {
         # One byte used to be enough to pass; a real run on a rolled-back VM frees far more
         $failures += "Full mode freed almost nothing (TotalFreedBytes = $($result.TotalFreedBytes))"
+    }
+
+    # v2.19: the three phase buckets are a dispatch status. Validate the invariant on
+    # real hardware - they must be disjoint, and for a run that was not aborted their
+    # union must be exactly the known phase set (a name missing from all three means the
+    # run crashed before dispatching it). A phase the user skipped must land in
+    # PhasesSkipped, never PhasesCompleted - this exercises the F2/F3 honesty fix e2e.
+    #
+    # Gated on the version that produced the JSON: the -Source release pass runs the
+    # latest PUBLISHED script, which predates this schema, and asserting it there would
+    # fail the nightly for version skew rather than for a broken release.
+    $hasPhaseBuckets = Test-ResultSupportsPhaseBuckets ([string]$result.Version)
+    if (-not $result.Aborted -and -not $hasPhaseBuckets) {
+        # Say it out loud: a silently skipped assertion reads as a passed one
+        Write-Host "  note: phase-bucket assertions skipped, result JSON is from v$($result.Version) (pre-2.19 schema)" -ForegroundColor DarkYellow
+    }
+    if (-not $result.Aborted -and $hasPhaseBuckets) {
+        $knownPhases = @('Preparation','Updates','SystemCleanup','DeveloperCleanup',
+                         'DockerWSLCleanup','VisualStudioCleanup','DeepSystemCleanup',
+                         'DiskSpaceReport','Telemetry')
+        $completed = @($result.PhasesCompleted)
+        $skipped   = @($result.PhasesSkipped)
+        $failed    = @($result.PhasesFailed)
+        $union     = @($completed + $skipped + $failed)
+
+        if (@($union | Sort-Object -Unique).Count -ne $union.Count) {
+            $failures += "Phase buckets overlap - a phase is in more than one of Completed/Skipped/Failed"
+        }
+        $missing = @($knownPhases | Where-Object { $_ -notin $union })
+        $extra   = @($union | Where-Object { $_ -notin $knownPhases })
+        if ($missing) { $failures += "Phases missing from result JSON (crashed before dispatch?): $($missing -join ', ')" }
+        if ($extra)   { $failures += "Unexpected phase names in result JSON: $($extra -join ', ')" }
+
+        if ($result.Parameters.SkipUpdates) {
+            if ('Updates' -notin $skipped) { $failures += "SkipUpdates set but 'Updates' not in PhasesSkipped" }
+            if ('Updates' -in $completed)  { $failures += "SkipUpdates set but 'Updates' counted as Completed" }
+        }
+        if ($result.Parameters.SkipCleanup) {
+            foreach ($ph in 'SystemCleanup','DeepSystemCleanup','DeveloperCleanup','DockerWSLCleanup','VisualStudioCleanup','DiskSpaceReport') {
+                if ($ph -notin $skipped) { $failures += "SkipCleanup set but '$ph' not in PhasesSkipped" }
+            }
+        }
     }
 }
 

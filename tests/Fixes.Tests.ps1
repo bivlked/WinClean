@@ -885,7 +885,10 @@ Describe "v2.18: bootstrap host allowlist is exact, not a broad suffix" -Tag "Fi
         if ($src -notmatch '(?ms)^(function Assert-GitHubUri \{.*?\n\})') {
             throw "Assert-GitHubUri not found in $Name"
         }
-        Invoke-Expression $Matches[1]
+        # Dot-sourcing a scriptblock defines the function in this scope exactly as
+        # Invoke-Expression would, without tripping PSAvoidUsingInvokeExpression
+        # (which CI lints as a Warning and therefore fails on).
+        . ([scriptblock]::Create($Matches[1]))
     }
 
     It "Accepts a real release asset URL on github.com" {
@@ -943,6 +946,126 @@ Describe "v2.17: volume roots are protected" -Tag "Fix", "V217" {
 
     It "Test-PathProtected still allows a normal cleanup target" {
         Test-PathProtected -Path (Join-Path $env:SystemRoot 'Temp') | Should -BeFalse
+    }
+}
+
+#endregion
+
+#region v2.19: -SkipCleanup contract + phase dispatch wiring
+
+Describe "v2.19: -SkipCleanup suppresses the whole cleanup group" -Tag "Fix", "V219", "SkipCleanup" {
+
+    BeforeAll {
+        $body = Get-FunctionBody -Name 'Start-WinClean'
+    }
+
+    It "System, deep and disk-report phases are gated on -SkipCleanup" {
+        $body | Should -Match "Invoke-Phase -Name 'SystemCleanup' -Skip:\`$SkipCleanup"
+        $body | Should -Match "Invoke-Phase -Name 'DeepSystemCleanup' -Skip:\`$SkipCleanup"
+        $body | Should -Match "Invoke-Phase -Name 'DiskSpaceReport' -Skip:\`$SkipCleanup"
+    }
+
+    It "Developer/Docker/VS phases are ALSO gated on -SkipCleanup, not only their own flag" {
+        # This is the bug the external review found: before v2.19 these three ran even
+        # with -SkipCleanup, contradicting the documented 'skip all cleanup' contract.
+        $body | Should -Match "Invoke-Phase -Name 'DeveloperCleanup' -Skip:\(\`$SkipCleanup -or \`$SkipDevCleanup\)"
+        $body | Should -Match "Invoke-Phase -Name 'DockerWSLCleanup' -Skip:\(\`$SkipCleanup -or \`$SkipDockerCleanup\)"
+        $body | Should -Match "Invoke-Phase -Name 'VisualStudioCleanup' -Skip:\(\`$SkipCleanup -or \`$SkipVSCleanup\)"
+    }
+
+    It "Preparation and Updates carry their own skip flags" {
+        $body | Should -Match "Invoke-Phase -Name 'Preparation' -Skip:\`$SkipRestore"
+        $body | Should -Match "Invoke-Phase -Name 'Updates' -Skip:\`$SkipUpdates"
+    }
+
+    It "TotalSteps nests dev/docker/vs increments under -not SkipCleanup" {
+        # The progress denominator must follow the same suppression, or a -SkipCleanup
+        # run counts progress against phases that will never run.
+        $body | Should -Match '(?s)if \(-not \$SkipCleanup\) \{\s*\$script:Stats\.TotalSteps \+= 2.*?SkipDevCleanup.*?SkipDockerCleanup.*?SkipVSCleanup.*?\}'
+    }
+}
+
+#endregion
+
+#region v2.19: app updates reported as offered, not installed (296v.1)
+
+Describe "v2.19: app updates are reported as offered, not installed" -Tag "Fix", "V219", "AppUpdates" {
+
+    It "Update-Applications records the offered count from the parsed table" {
+        $body = Get-FunctionBody -Name 'Update-Applications'
+        $body | Should -Match '\$script:Stats\.AppUpdatesOffered = \$updateCount'
+        # The old name must be gone from the live code - it claimed 'installed' falsely
+        $body | Should -Not -Match '\$script:Stats\.AppUpdatesCount'
+    }
+
+    It "Result JSON exposes AppUpdatesOffered, not AppUpdatesCount" {
+        $body = Get-FunctionBody -Name 'Write-ResultJson'
+        $body | Should -Match 'AppUpdatesOffered\s+=\s+\$script:Stats\.AppUpdatesOffered'
+        $body | Should -Not -Match 'AppUpdatesCount\s+=\s+\$script:Stats\.AppUpdatesCount'
+    }
+
+    It "Final statistics label the app number as offered and drop the 'installed' claim" {
+        # The rendering lives in Show-FinalStatisticsBody; Show-FinalStatistics only wraps it
+        $body = Get-FunctionBody -Name 'Show-FinalStatisticsBody'
+        $body | Should -Match '\$script:Stats\.AppUpdatesOffered'
+        $body | Should -Match 'Apps: \$appsOffered offered'
+        # Apps were never confirmed installed; the updates line must not be labelled so
+        $body | Should -Not -Match '-Label "Updates installed:"'
+    }
+}
+
+#endregion
+
+#region v2.19: get.ps1 parameter allowlist matches WinClean (F4)
+
+Describe "v2.19: get.ps1 forwards exactly WinClean's parameter set" -Tag "Fix", "V219", "Bootstrap" {
+    # The reviewer confirmed the lists match today; this is the guard that keeps them in
+    # sync. A new WinClean parameter that get.ps1 does not know would be silently dropped
+    # from the one-line install, so drift must fail the build, not surprise a user.
+
+    BeforeAll {
+        function Get-NamedArrayLiteral {
+            param($Ast, [string]$VarName)
+            $assign = $Ast.FindAll({
+                param($n)
+                $n -is [System.Management.Automation.Language.AssignmentStatementAst] -and
+                $n.Left -is [System.Management.Automation.Language.VariableExpressionAst] -and
+                $n.Left.VariablePath.UserPath -eq $VarName
+            }, $true) | Select-Object -First 1
+            if (-not $assign) { throw "Assignment '`$$VarName' not found" }
+            $strings = $assign.Right.FindAll({
+                param($n) $n -is [System.Management.Automation.Language.StringConstantExpressionAst]
+            }, $true)
+            return @($strings | ForEach-Object { $_.Value } | Sort-Object)
+        }
+
+        # WinClean's real parameters, split by static type
+        $wcAst = [System.Management.Automation.Language.Parser]::ParseFile($scriptPath, [ref]$null, [ref]$null)
+        $wcParams = $wcAst.ParamBlock.Parameters
+        $script:wcSwitch = @($wcParams | Where-Object { $_.StaticType -eq [switch] } |
+                             ForEach-Object { $_.Name.VariablePath.UserPath } | Sort-Object)
+        $script:wcValue  = @($wcParams | Where-Object { $_.StaticType -eq [string] } |
+                             ForEach-Object { $_.Name.VariablePath.UserPath } | Sort-Object)
+
+        # get.ps1's declared allowlist, read via AST (dot-sourcing it would try to run it)
+        $getPath = (Resolve-Path (Join-Path $PSScriptRoot '..' 'get.ps1')).Path
+        $getAst = [System.Management.Automation.Language.Parser]::ParseFile($getPath, [ref]$null, [ref]$null)
+        $script:getSwitch = Get-NamedArrayLiteral -Ast $getAst -VarName 'switchParams'
+        $script:getValue  = Get-NamedArrayLiteral -Ast $getAst -VarName 'valueParams'
+    }
+
+    It "switch parameters match exactly" {
+        ($script:getSwitch -join ',') | Should -Be ($script:wcSwitch -join ',')
+    }
+
+    It "value parameters match exactly" {
+        ($script:getValue -join ',') | Should -Be ($script:wcValue -join ',')
+    }
+
+    It "every WinClean parameter is reachable through get.ps1" {
+        $allWc  = @($script:wcSwitch + $script:wcValue | Sort-Object)
+        $allGet = @($script:getSwitch + $script:getValue | Sort-Object)
+        ($allGet -join ',') | Should -Be ($allWc -join ',')
     }
 }
 

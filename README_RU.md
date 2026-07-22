@@ -6,27 +6,103 @@
 
 ### Комплексный скрипт обслуживания Windows 11
 
-[![Версия](https://img.shields.io/badge/версия-2.18-blue.svg)](https://github.com/bivlked/WinClean/releases)
+[![Последний релиз](https://img.shields.io/github/v/release/bivlked/WinClean?label=релиз&logo=github&color=blue)](https://github.com/bivlked/WinClean/releases/latest)
 [![PSGallery](https://img.shields.io/powershellgallery/v/WinClean?label=PSGallery&logo=powershell&logoColor=white)](https://www.powershellgallery.com/packages/WinClean)
 [![CI](https://github.com/bivlked/WinClean/actions/workflows/ci.yml/badge.svg)](https://github.com/bivlked/WinClean/actions/workflows/ci.yml)
 [![PowerShell 7.1+](https://img.shields.io/badge/PowerShell-7.1%2B-5391FE?logo=powershell&logoColor=white)](https://github.com/PowerShell/PowerShell)
 [![Windows 11](https://img.shields.io/badge/Windows-11-0078D4?logo=windows11&logoColor=white)](https://www.microsoft.com/windows/windows-11)
 [![Лицензия: MIT](https://img.shields.io/badge/Лицензия-MIT-green.svg)](LICENSE)
 
-**Автоматическое обслуживание системы: обновления, очистка и оптимизация в одном скрипте**
+**Одна команда, чтобы обновить, очистить и оптимизировать Windows 11 - безопасно.**
 
 [English](README.md) | [Русский](README_RU.md)
 
 ---
 
-[Зачем WinClean?](#-зачем-winclean) •
-[Возможности](#-возможности) •
 [Быстрый старт](#-быстрый-старт) •
+[Возможности](#-возможности) •
 [Параметры](#-параметры) •
 [Безопасность](#%EF%B8%8F-безопасность) •
+[Документация](#-подробнее) •
 [FAQ](#-faq)
 
 </div>
+
+---
+
+**WinClean** - это бесплатный **скрипт очистки и обслуживания Windows 11** с открытым исходным кодом на **PowerShell**. Одной командой он ставит обновления Windows и приложений, **освобождает место на диске**, очищая временные файлы и кэши браузеров, **чистит кэши разработчика** (npm, pip, NuGet, Docker, WSL, IDE) и выполняет глубокую очистку системы - с точкой восстановления, защищёнными системными путями и режимом предпросмотра, чтобы ничего важного не пострадало.
+
+> 💡 **Средний результат:** освобождается 5-20 ГБ, в зависимости от использования системы.
+
+---
+
+## 🚀 Быстрый старт
+
+> **Требования:** PowerShell 7.1+ (`winget install Microsoft.PowerShell`) и терминал от имени **администратора** (Win+X -> Терминал (Администратор)).
+
+**Сначала посмотрите, что будет сделано (режим предпросмотра, только чтение):**
+
+```powershell
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/bivlked/WinClean/main/get.ps1))) -ReportOnly
+```
+
+**Разовый запуск (обновления + очистка):**
+
+```powershell
+irm https://raw.githubusercontent.com/bivlked/WinClean/main/get.ps1 | iex
+```
+
+**Установка (или обновление) + ярлык на рабочем столе, всегда с правами администратора:**
+
+```powershell
+irm https://raw.githubusercontent.com/bivlked/WinClean/main/install.ps1 | iex
+```
+
+<table>
+<tr>
+<td>
+
+### 🔒 Почему one-liner можно доверять
+
+- Bootstrap-скрипты скачивают `WinClean.ps1` из **последнего GitHub Release** и **сверяют SHA256** с опубликованным ассетом `WinClean.ps1.sha256`. Проверка **fail-closed**: несовпадение или отсутствие ассета прерывают запуск, отката на изменяемую ветку нет. (Сам маленький bootstrap-скрипт берётся из `main` и достаточно короткий, чтобы прочитать его заранее.)
+- `install.ps1` ставит скрипт в `%ProgramFiles%\WinClean` (только для администратора), поэтому не-админ не может подменить установленный скрипт, который запускает ярлык.
+- `-ReportOnly` показывает, что будет сделано, и не меняет ничего из того, что стал бы чистить или обновлять.
+- Лицензия MIT, без телеметрии, персональные данные не отправляются. Скрипт обращается только к стандартным сервисам обслуживания (Windows Update, winget, PowerShell Gallery) и делает проверку связи. См. **[SECURITY.md](SECURITY.md)** и **[docs/safety.md](docs/safety.md)**.
+
+</td>
+</tr>
+</table>
+
+<details>
+<summary>📥 Альтернативные способы установки</summary>
+
+### 📦 PowerShell Gallery
+
+```powershell
+Install-Script -Name WinClean -Scope CurrentUser
+```
+
+Затем запустите от имени администратора:
+```powershell
+WinClean.ps1
+```
+
+### Ручная загрузка
+
+```powershell
+Invoke-WebRequest -Uri "https://raw.githubusercontent.com/bivlked/WinClean/main/WinClean.ps1" -OutFile "WinClean.ps1"
+.\WinClean.ps1
+```
+
+### Клонирование репозитория
+
+```powershell
+git clone https://github.com/bivlked/WinClean.git
+cd WinClean
+.\WinClean.ps1
+```
+
+</details>
 
 ---
 
@@ -61,8 +137,6 @@
 </tr>
 </table>
 
-> 💡 **Средний результат очистки:** 5-20 ГБ освобождено, в зависимости от использования системы
-
 ---
 
 ## ✨ Возможности
@@ -72,18 +146,16 @@
 <td width="33%" valign="top">
 
 ### 🔄 Обновления
-- Windows Update (+ драйверы)
-- Приложения Microsoft Store
-- Пакеты winget
-- Модуль PSWindowsUpdate
+- Windows Update (+ драйверы, через PSWindowsUpdate)
+- Пакеты winget (в т.ч. Store-пакеты, доступные через winget)
 
 </td>
 <td width="33%" valign="top">
 
 ### 🗑️ Очистка
 - Временные файлы (с учётом возраста)
-- Кэши браузеров (6 браузеров)
-- Кэши Windows (8 типов)
+- Кэши браузеров (7 браузеров)
+- Кэши Windows
 - Хранилище драйверов (старые версии)
 - Устаревшие дампы ядра
 - Очистка корзины
@@ -105,8 +177,9 @@
 <td width="33%" valign="top">
 
 ### 🐳 Docker и WSL
-- Неиспользуемые образы
 - Остановленные контейнеры
+- Неиспользуемые сети
+- Dangling-образы
 - Кэш сборки
 - Сжатие VHDX WSL2
 
@@ -134,65 +207,7 @@
 </tr>
 </table>
 
----
-
-## 🚀 Быстрый старт
-
-> Требования: PowerShell 7.1+ (`winget install Microsoft.PowerShell`) и терминал от имени администратора (Win+X -> Терминал (Администратор)).
-
-### ⚡ Разовый запуск (одна команда)
-
-```powershell
-irm https://raw.githubusercontent.com/bivlked/WinClean/main/get.ps1 | iex
-```
-
-С параметрами:
-
-```powershell
-& ([scriptblock]::Create((irm https://raw.githubusercontent.com/bivlked/WinClean/main/get.ps1))) -ReportOnly
-```
-
-### 📌 Установка или обновление + ярлык на рабочем столе (одна команда)
-
-Устанавливает последний релиз (с проверкой SHA256) в `%ProgramFiles%\WinClean` и создаёт на рабочем столе ярлык **WinClean**, который всегда запускается с правами администратора. Для обновления просто выполните команду ещё раз:
-
-```powershell
-irm https://raw.githubusercontent.com/bivlked/WinClean/main/install.ps1 | iex
-```
-
-<details>
-<summary>📥 Альтернативные способы установки</summary>
-
-### 📦 PowerShell Gallery
-
-```powershell
-Install-Script -Name WinClean -Scope CurrentUser
-```
-
-Затем запустите от имени администратора:
-```powershell
-WinClean.ps1
-```
-
-### Ручная загрузка
-
-```powershell
-# Скачать
-Invoke-WebRequest -Uri "https://raw.githubusercontent.com/bivlked/WinClean/main/WinClean.ps1" -OutFile "WinClean.ps1"
-
-# Запустить от имени администратора
-.\WinClean.ps1
-```
-
-### Клонирование репозитория
-
-```powershell
-git clone https://github.com/bivlked/WinClean.git
-cd WinClean
-.\WinClean.ps1
-```
-
-</details>
+> **Браузеры:** Edge, Chrome, Brave, Yandex, Opera, Opera GX и Firefox. Для Chrome, Edge и Firefox очищаются все профили, для остальных - профиль по умолчанию. Закладки, пароли и история не затрагиваются. Полный список: **[docs/what-is-cleaned.md](docs/what-is-cleaned.md)**.
 
 ---
 
@@ -201,7 +216,7 @@ cd WinClean
 | Параметр | Описание | По умолчанию |
 |:---------|:---------|:------------:|
 | `-SkipUpdates` | Пропустить обновления Windows и winget | `false` |
-| `-SkipCleanup` | Пропустить все операции очистки | `false` |
+| `-SkipCleanup` | Пропустить **всю** очистку (система, глубокая, разработчик, Docker/WSL, Visual Studio) | `false` |
 | `-SkipRestore` | Пропустить создание точки восстановления | `false` |
 | `-SkipDevCleanup` | Пропустить кэши разработчика (npm, pip и т.д.) | `false` |
 | `-SkipDockerCleanup` | Пропустить очистку Docker/WSL | `false` |
@@ -211,58 +226,11 @@ cd WinClean
 | `-LogPath` | Путь к файлу лога | Авто |
 | `-ResultJsonPath` | Машиночитаемый итог прогона (JSON) для автоматизации/CI | Выкл |
 
----
-
-## 💡 Примеры использования
-
-<table>
-<tr>
-<td width="50%">
-
-### Полное обслуживание
-```powershell
-.\WinClean.ps1
-```
-Все обновления + вся очистка
-
-</td>
-<td width="50%">
-
-### Только очистка
-```powershell
-.\WinClean.ps1 -SkipUpdates
-```
-Без обновлений, только очистка
-
-</td>
-</tr>
-<tr>
-<td width="50%">
-
-### Режим предпросмотра
-```powershell
-.\WinClean.ps1 -ReportOnly
-```
-Посмотреть, что будет сделано
-
-</td>
-<td width="50%">
-
-### Быстрая очистка
-```powershell
-.\WinClean.ps1 -SkipUpdates -SkipDockerCleanup
-```
-Только быстрая очистка
-
-</td>
-</tr>
-</table>
+> `-SkipCleanup` отключает всю группу очистки целиком. Для более точного контроля, когда системную очистку выполнить нужно, используйте флаги категорий (`-SkipDevCleanup`, `-SkipDockerCleanup`, `-SkipVSCleanup`). Схема `-ResultJsonPath` описана в **[docs/result-json.md](docs/result-json.md)**.
 
 ---
 
 ## 🎯 Рекомендуемые профили
-
-Выберите подходящий профиль для ваших нужд:
 
 | Профиль | Команда | Для чего |
 |:--------|:--------|:---------|
@@ -270,9 +238,9 @@ cd WinClean
 | **Безопасный** | `.\WinClean.ps1 -SkipUpdates -SkipDockerCleanup` | Минимум риска - только временные файлы и кэши |
 | **Разработчик** | `.\WinClean.ps1` | Полная очистка - включая npm, pip, nuget, Docker, IDE кэши |
 | **Быстрый** | `.\WinClean.ps1 -SkipUpdates -SkipDevCleanup -SkipVSCleanup` | Быстро - только системная очистка |
-| **Только обновления** | `.\WinClean.ps1 -SkipCleanup` | Только обновления Windows и приложений |
+| **Только обновления** | `.\WinClean.ps1 -SkipCleanup` | Только обновления Windows и приложений, без очистки |
 
-> 💡 **Совет:** Всегда сначала запускайте с `-ReportOnly` для предпросмотра!
+> 💡 **Совет:** Всегда сначала запускайте с `-ReportOnly` для предпросмотра.
 
 ---
 
@@ -280,7 +248,7 @@ cd WinClean
 
 | Требование | Версия | Примечания |
 |:-----------|:-------|:-----------|
-| **Windows** | 11 | Протестировано на 23H2/24H2/25H2 |
+| **Windows** | 11 | Протестировано на 23H2/24H2/25H2 (большинство функций работают и на Windows 10) |
 | **PowerShell** | 7.1+ | [Скачать здесь](https://aka.ms/powershell) |
 | **Права** | Администратор | Требуется для системных операций |
 
@@ -300,28 +268,19 @@ cd WinClean
 
 ## 🛡️ Безопасность
 
-### ✅ Что делает WinClean
+WinClean создан так, чтобы его можно было безопасно запускать на рабочей машине. Кратко:
 
 | Функция безопасности | Описание |
 |:---------------------|:---------|
-| 🔄 **Точка восстановления** | Создаётся перед любыми изменениями |
-| 🛡️ **Защищённые пути** | Системные папки никогда не затрагиваются |
-| 📦 **Сохранение пакетов** | NuGet, npm, Maven пакеты сохраняются |
-| ❓ **Подтверждение** | Windows.old запрашивает подтверждение |
-| 🔧 **Восстановление служб** | Использует try/finally для служб |
-| 👁️ **Режим предпросмотра** | `-ReportOnly` показывает изменения заранее |
+| 🔄 **Точка восстановления** | Создаётся перед фазами обслуживания; при неудаче пишется предупреждение и прогон продолжается (отключается `-SkipRestore`) |
+| 🛡️ **Защищённые пути** | `C:\Windows`, `C:\Program Files`, `C:\Users` и корни томов никогда не удаляются |
+| 📦 **Сохранение пакетов** | `node_modules`, `.nuget\packages`, виртуальные окружения, `vendor` сохраняются |
+| 👁️ **Режим предпросмотра** | `-ReportOnly` сначала показывает изменения |
+| 🔒 **Fail-closed установка** | One-liner'ы сверяют SHA256 с ассетом релиза |
+| 🧪 **Проверка на VM** | Каждый релиз прогоняется end-to-end на реальных Windows 11 VM (ru-RU и en-US) |
 
-### 🚫 Защищённые пути (никогда не удаляются)
-
-```
-C:\Windows\
-C:\Program Files\
-C:\Program Files (x86)\
-C:\Users\
-C:\Users\ВашеИмя\
-```
-
-### ✅ Безопасно очищается vs 🛡️ Сохраняется
+<details>
+<summary>✅ Очищается vs 🛡️ Сохраняется</summary>
 
 | ✅ Очищается | 🛡️ Сохраняется |
 |:-------------|:---------------|
@@ -333,13 +292,17 @@ C:\Users\ВашеИмя\
 | `NuGet\v3-cache` | `\.nuget\packages` |
 | `\.gradle\build-cache` | `\.gradle\caches\modules` |
 
+</details>
+
+> Полная модель доверия и безопасности, включая Controlled Folder Access и проверку bootstrap: **[docs/safety.md](docs/safety.md)**.
+
 ---
 
 ## 📊 Порядок выполнения
 
 ```
 ┌────────────────────────────────────────────────────────────────┐
-│                     WinClean v2.18                             │
+│                     WinClean v2.19                             │
 ├────────────────────────────────────────────────────────────────┤
 │  ПОДГОТОВКА                                                    │
 │  ├─ ✓ Проверка прав администратора                             │
@@ -358,10 +321,10 @@ C:\Users\ВашеИмя\
 ├────────────────────────────────────────────────────────────────┤
 │  ГЛУБОКАЯ ОЧИСТКА                                              │
 │  ├─ 🔧 Очистка компонентов DISM                                │
-│  ├─ 💾 Очистка диска (24 категории)                            │
+│  ├─ 💾 Storage Sense или Очистка диска (до 23 обработчиков)    │
 │  ├─ 🚗 Хранилище драйверов (устаревшие пакеты)                 │
 │  ├─ 🧹 Старые дампы ядра (старше 30 дней)                      │
-│  └─ 📁 Удаление Windows.old (с подтверждением)                 │
+│  └─ 📁 Удаление Windows.old (запрос; 15 сек по умолч. = да)    │
 ├────────────────────────────────────────────────────────────────┤
 │  ПРИВАТНОСТЬ (опционально)                                     │
 │  ├─ 🔒 Очистка DNS кэша и истории                              │
@@ -371,21 +334,29 @@ C:\Users\ВашеИмя\
 └────────────────────────────────────────────────────────────────┘
 ```
 
+> Статус диспетчеризации каждой фазы записывается в result JSON как **completed**, **skipped** или **failed** (вызвана / подавлена флагом / бросила), чтобы автоматический прогон отличал «всё выполнено» от «фаза упала». См. **[docs/result-json.md](docs/result-json.md)**.
+
 ---
 
 ## 📝 Логирование
 
-Каждый запуск создаёт подробный лог:
+Каждый запуск пишет подробный лог в `%TEMP%\WinClean_<дата>.log` с временной меткой, статусом (успех / предупреждение / ошибка), освобождённым местом по категориям и общим временем. Для машиночитаемого итога используйте `-ResultJsonPath`.
 
-```
-%TEMP%\WinClean_20260117_143052.log
-```
+---
 
-**Содержимое лога:**
-- ⏰ Временная метка каждой операции
-- ✅ Успех / ⚠️ Предупреждение / ❌ Ошибка
-- 📊 Освобождённое место по категориям
-- ⏱️ Общее время выполнения
+## 📚 Подробнее
+
+Углублённая документация - в **[`docs/`](docs/)**:
+
+| Страница | Что внутри |
+|:---------|:-----------|
+| [Модель безопасности](docs/safety.md) | Точки восстановления, защищённые пути, fail-closed bootstrap, Controlled Folder Access |
+| [Что очищается](docs/what-is-cleaned.md) | Полный список по фазам: очищается vs сохраняется |
+| [Result JSON](docs/result-json.md) | Схема `-ResultJsonPath` для автоматизации и CI |
+| [Устранение неполадок](docs/troubleshooting.md) | Частые проблемы и решения |
+| [FAQ](docs/faq.md) | Расширенные вопросы и ответы |
+| [Сравнение](docs/comparison.md) | Чем WinClean отличается от ручной очистки |
+| [Процесс релиза](docs/release-process.md) | Как собираются и проверяются релизы |
 
 ---
 
@@ -394,28 +365,21 @@ C:\Users\ВашеИмя\
 <details>
 <summary><b>Безопасно ли запускать WinClean?</b></summary>
 
-Да! WinClean создаёт точку восстановления перед изменениями и никогда не трогает защищённые системные пути. Используйте `-ReportOnly` для предварительного просмотра изменений.
+Да. WinClean пытается создать точку восстановления перед фазами обслуживания (а при неудаче продолжает с предупреждением) и никогда не удаляет целиком защищённые системные корни вроде `C:\Windows` или `C:\Program Files`. Используйте `-ReportOnly` для предпросмотра. Подробнее: [docs/safety.md](docs/safety.md).
 
 </details>
 
 <details>
-<summary><b>Удалит ли он мои установленные программы?</b></summary>
+<summary><b>Удалит ли он мои программы или пакеты?</b></summary>
 
-Нет. WinClean очищает только кэши и временные файлы. Ваши установленные программы, npm-пакеты, NuGet-пакеты и пользовательские данные остаются нетронутыми.
+Нет. WinClean очищает только кэши и временные файлы. Установленные программы, пакеты npm/NuGet и пользовательские данные остаются нетронутыми.
 
 </details>
 
 <details>
 <summary><b>Как часто нужно запускать?</b></summary>
 
-Рекомендуется раз в месяц. Активные разработчики или пользователи с ограниченным дисковым пространством могут запускать еженедельно.
-
-</details>
-
-<details>
-<summary><b>Зачем нужны права администратора?</b></summary>
-
-Требуются для: Windows Update, очистки системного кэша, операций DISM, управления службами и создания точек восстановления.
+Хороший вариант по умолчанию - раз в месяц. Активные разработчики или пользователи с ограниченным местом могут запускать еженедельно.
 
 </details>
 
@@ -426,22 +390,17 @@ C:\Users\ВашеИмя\
 
 </details>
 
-<details>
-<summary><b>Что делать, если что-то пошло не так?</b></summary>
-
-Используйте точку восстановления, созданную в начале работы, для отката. Проверьте лог-файл для получения информации о выполненных изменениях.
-
-</details>
+Больше вопросов - в **[docs/faq.md](docs/faq.md)** и **[docs/troubleshooting.md](docs/troubleshooting.md)**.
 
 ---
 
-## 🤝 Участие в разработке
+## 🤝 Участие и сообщество
 
-Мы приветствуем вклад в проект! Не стесняйтесь создавать Pull Request.
+Мы приветствуем вклад в проект. См. **[CONTRIBUTING.md](CONTRIBUTING.md)** для процесса, стиля кода и тестирования, и открывайте **[Discussion](https://github.com/bivlked/WinClean/discussions)** для вопросов, идей или истории успеха.
 
 1. Сделайте форк репозитория
 2. Создайте ветку для вашей функции (`git checkout -b feature/AmazingFeature`)
-3. Закоммитьте изменения (`git commit -m 'Add some AmazingFeature'`)
+3. Закоммитьте изменения (`git commit -m 'feat: add some amazing feature'`)
 4. Отправьте ветку (`git push origin feature/AmazingFeature`)
 5. Откройте Pull Request
 
@@ -459,6 +418,7 @@ C:\Users\ВашеИмя\
 
 **[Сообщить об ошибке](https://github.com/bivlked/WinClean/issues)** •
 **[Предложить функцию](https://github.com/bivlked/WinClean/issues)** •
+**[Обсуждения](https://github.com/bivlked/WinClean/discussions)** •
 **[История изменений](CHANGELOG.md)**
 
 Сделано с ❤️ для пользователей Windows

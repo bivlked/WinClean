@@ -181,3 +181,60 @@ if (Test-Path -LiteralPath $qGuest) {
         return $null
     }
 }
+
+function Test-HeartbeatStale {
+    <#
+    .SYNOPSIS
+        Pure decision for the nightly dead-man switch: is the last run too old?
+    .DESCRIPTION
+        A night the matrix never ran leaves no per-run report and is otherwise
+        indistinguishable from a healthy silent night. An independent cron reads the
+        heartbeat written by Invoke-NightlyStand and calls this to decide whether to
+        alert. Missing, empty or unparseable timestamps count as stale - the whole point
+        is to fail loud when there is no proof a run happened.
+    #>
+    param(
+        # Parsed heartbeat object (from last-run.json) or $null when the file is absent
+        $Heartbeat,
+        [Parameter(Mandatory)][datetime]$Now,
+        [int]$MaxAgeHours = 26
+    )
+
+    if (-not $Heartbeat -or -not $Heartbeat.Timestamp) { return $true }
+
+    $ts = [datetime]::MinValue
+    $parsed = [datetime]::TryParse(
+        [string]$Heartbeat.Timestamp, [cultureinfo]::InvariantCulture,
+        [System.Globalization.DateTimeStyles]::RoundtripKind, [ref]$ts)
+    if (-not $parsed) { return $true }
+
+    # Stale when older than the window, OR implausibly in the future. The checker always
+    # runs hours after the heartbeat, so a genuine one is comfortably in the past; a
+    # future timestamp means the clock ran backwards or the file is corrupt, and must not
+    # be read as proof a recent run happened (that would silently suppress the alert).
+    $age = ($Now.ToUniversalTime() - $ts.ToUniversalTime()).TotalHours
+    return ($age -gt $MaxAgeHours) -or ($age -lt -1)
+}
+
+function Test-ResultSupportsPhaseBuckets {
+    <#
+    .SYNOPSIS
+        Pure decision: was this result JSON produced by a WinClean new enough to carry
+        the tri-state phase buckets (PhasesCompleted/PhasesSkipped/PhasesFailed)?
+    .DESCRIPTION
+        The nightly matrix deliberately runs one pass against the latest PUBLISHED
+        release, which is normally older than the working tree. Asserting the newest
+        result-JSON schema against that older script turns the nightly red for version
+        skew instead of for a broken release, and a nightly that is red for a boring
+        reason stops being read. So the phase assertions are gated on the version that
+        actually produced the JSON, not on the version of this harness.
+
+        Unknown, empty or unparseable versions return false: assert nothing rather than
+        assert against a schema we cannot confirm exists.
+    #>
+    param([string]$Version)
+
+    $parsed = $null
+    if (-not [version]::TryParse($Version, [ref]$parsed)) { return $false }
+    return ($parsed -ge [version]'2.19')
+}

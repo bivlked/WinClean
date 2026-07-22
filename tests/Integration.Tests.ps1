@@ -317,6 +317,17 @@ Write-ResultJson -Path $ResultJsonPath
         $json.PSObject.Properties.Name | Should -Contain 'ErrorsCount'
         $json.PSObject.Properties.Name | Should -Contain 'FreedByCategory'
     }
+
+    It "JSON exposes the tri-state phase buckets (v2.19)" {
+        # PhasesSkipped joins Completed/Failed so a consumer can tell a phase the user
+        # turned off from one that ran or threw. ConvertFrom-Json turns an empty JSON
+        # array into $null, so re-wrap before asserting it is a collection.
+        $json = Get-Content $jsonPath -Raw | ConvertFrom-Json
+        foreach ($field in 'PhasesCompleted', 'PhasesFailed', 'PhasesSkipped') {
+            $json.PSObject.Properties.Name | Should -Contain $field
+            ,@($json.$field) | Should -BeOfType [System.Object[]]
+        }
+    }
 }
 
 Describe "Sandbox: temp age filter is recursive" -Tag "Integration" -Skip:(-not $IsElevated) {
