@@ -23,7 +23,51 @@ If the check itself cannot run (third-party antivirus, stripped image, broken WM
 
 If `winget` is not installed, the application-update phase is skipped and the run continues. Windows updates (via PSWindowsUpdate) are unaffected.
 
+This is reported as a **warning**, and the run can still finish with **exit code 0**. Before v2.21 it was an error, and since the exit code is derived from the error count alone, every run on a machine without App Installer ended with code 1 even though all nine phases completed - which any scheduler or CI job reads as a failed run. A missing optional third-party tool is a property of the machine, not a failure of the run, the same way a machine without Docker is a normal machine here. A `winget` that **is** present and then fails is still reported, at a severity that follows whether the run can safely carry on: the upgrade check failing outright or an unhandled error is an error, while a stale package source, a timeout or a partly failed upgrade batch is a warning.
+
+Note that a machine with **no internet connection** never reaches the winget check: the update phases stop earlier, and that earlier branch is still an error. So "a missing winget no longer fails the run" holds for an online machine without App Installer, not for an offline one.
+
 **Fix:** install **App Installer** from the Microsoft Store, or bootstrap winget, then re-run. Note that the app-update count in the summary is what winget **offered**, not a confirmed install count (see [FAQ](faq.md) and [result-json.md](result-json.md)).
+
+---
+
+## "Update complete" but the version never changes
+
+Symptom: WinClean announces an update, reports success, asks you to run it again - and the next run shows the same old version. Forever.
+
+Cause: **two installations on one machine**, which is an ordinary situation rather than an exotic one. `install.ps1` puts a copy in `%ProgramFiles%\WinClean` (this is what the desktop shortcut starts), while an older `Install-Script` copy may still sit in `Documents\PowerShell\Scripts`. Up to v2.20 WinClean asked only whether a Gallery copy existed **somewhere**, then acted as if the answer had been "the file you are running is that copy". `Update-Script` dutifully updated the copy in Documents, and the shortcut kept starting the untouched one.
+
+Since v2.21 the check compares the **running file** with the Gallery install location and offers a self-update only when they are the same file. Every other copy is told the method that actually applies to it (see [Updating an existing installation](../README.md#-updating-an-existing-installation)). An update that reports success is also verified against the version on disk afterwards, so a provider that silently changes nothing is reported instead of being announced as complete.
+
+**Fix on an affected machine:** update the copy the shortcut points at by re-running `install.ps1` elevated, and remove the abandoned Gallery copy if you no longer use it:
+
+**Step 1 - find out which copies exist and which one you actually run.** Either provider may report an install performed by the other, so ask both; whichever module is absent simply reports an unknown command, which is expected.
+
+```powershell
+Get-InstalledScript -Name WinClean -ErrorAction SilentlyContinue |
+    Select-Object Version, InstalledLocation
+Get-PSResource -Name WinClean -ErrorAction SilentlyContinue |
+    Where-Object { $_.Type -eq 'Script' } | Select-Object Version, InstalledLocation
+Get-Item "$env:ProgramFiles\WinClean\WinClean.ps1" -ErrorAction SilentlyContinue
+```
+
+The copy you run is the one your shortcut points at (right-click the shortcut -> Properties -> Target). WinClean also prints that path itself, but only in the two cases where telling the installations apart is the point: several Gallery installs at once, and an update that reported success without changing the running file.
+
+**Step 2 - remove only a copy whose location is *not* the one you run.** `AllUsers` and `CurrentUser` installs can coexist, and an unscoped uninstall is not guaranteed to pick the one you meant, so pin it to the version you saw at the location you want gone:
+
+```powershell
+Uninstall-Script -Name WinClean -RequiredVersion <version at that location>       # PowerShellGet
+Uninstall-PSResource -Name WinClean -Version <version at that location>           # PSResourceGet
+```
+
+If two installs report the **same** version at different locations, `Uninstall-Script` cannot name one of them (it has no `-Scope`). `Uninstall-PSResource` does take `-Scope`, so it can, provided PSResourceGet performed that install. When in doubt do not guess: update the copy you run by **replacing that exact file** with the script asset from the [latest release](https://github.com/bivlked/WinClean/releases/latest), and remove the other installation's folder only once you have confirmed it is not the path you launch. Removing an `AllUsers` install needs an elevated session, and neither command touches the `%ProgramFiles%\WinClean` copy at all - that one is not a Gallery installation and is replaced by re-running `install.ps1`.
+
+### What WinClean does in each of these states
+
+The advice you see depends on which copy is running, so the two situations above behave differently:
+
+- **The running copy is the `%ProgramFiles%\WinClean` one** (the usual case for the desktop shortcut). It was never Gallery-managed, so there is no self-update to decline: WinClean names the installer as the way to update it. Removing the stray Gallery copy does not change this - re-running `install.ps1` is the update path for this copy, by design.
+- **The running copy is one of several Gallery installs.** Here WinClean declines to update itself rather than modifying a copy at random, prints the path it is running from, and points at the manual replacement above. It keeps declining while more than one Gallery install remains; resolving the duplicate is what restores the automatic update.
 
 ---
 

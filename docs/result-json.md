@@ -23,13 +23,14 @@ This page documents every field, gives a full sample, and explains how to consum
 | `FreedByCategory` | object | Map of category name to bytes freed, e.g. `{ "Temp": 187912345, "DriverStore": 451801088 }`. Categories are added as work happens, so a category can appear with `0` (for example DriverStore is recorded after a successful package removal even if the measured freed size was zero). |
 | `WindowsUpdatesCount` | number | Number of Windows updates installed (from PSWindowsUpdate, which reports per-update results, so this is a real installed count). |
 | `AppUpdatesOffered` | number | Number of application updates winget **offered**. See the note below - this is not a confirmed install count. |
+| `AppUpdatesStatus` | string | Why that count is what it is: `checked`, `check-failed`, `skipped-parameter`, `skipped-offline`, `skipped-no-winget`, or `not-run`. Added in v2.21. |
 | `WarningsCount` | number | Count of warnings raised during the run. Warnings are the silent-failure alarm; treat a non-zero value as something to inspect. |
 | `ErrorsCount` | number | Count of errors raised during the run. A healthy run reports `0`. |
 | `RebootRequired` | bool | `true` when a change (a Windows update, an app update finishing on reboot) needs a restart to take effect. |
 | `LoggingDegraded` | bool | v2.20. `true` when writing the log file failed at some point during the run. The run itself still completed, but `LogPath` points at an incomplete file: do not read that log as the full record of what happened. |
 | `DiskCleanupPending` | bool | v2.20. `true` when Disk Cleanup outlived its timeout and was left running in the background. `TotalFreedBytes` is then a lower bound rather than the final figure, because deletion continued after this file was written. |
 | `ControlledFolderAccess` | string | Tri-state, see below. Reflects whether Defender's Controlled Folder Access may have silently blocked deletions. |
-| `Aborted` | string or null | `null` unless the run stopped early for a known reason (currently only a declined pending reboot, `"PendingRebootDeclined"`, sets it). When set, the phase arrays below are incomplete by design. Note `null` does not by itself prove every phase ran - see the invariant note below. |
+| `Aborted` | string or null | `null` unless the run stopped early for a known reason: `"PendingRebootDeclined"` (the user declined to continue with a reboot pending) or `"UpdatedAndExited"` (v2.21 - the script updated itself and exited so the new version runs next time). When set, the phase arrays below are incomplete by design. Note `null` does not by itself prove every phase ran - see the invariant note below. |
 | `PhasesCompleted` | array of string | Phases whose action ran to completion without an uncaught exception. |
 | `PhasesFailed` | array of string | Phases whose action threw. |
 | `PhasesSkipped` | array of string | Phases a skip flag suppressed before they ran. |
@@ -61,6 +62,21 @@ Consequently:
 - `AppUpdatesOffered` is set from the parsed upgrade table and is meaningful in every path, including `-ReportOnly` and a later failed upgrade.
 - It is **not** proof that N applications were installed. If you need the true installed set, parse winget's own per-package output separately; WinClean does not attempt this.
 - The console summary reflects the same honesty: `Windows: X installed, Apps: Y offered`.
+
+### `AppUpdatesStatus` (added in v2.21)
+
+`AppUpdatesOffered: 0` on its own is ambiguous: it is what you get both when winget was asked and had nothing to upgrade, and when winget was never asked at all. Until v2.21 the two could be told apart by the exit code, because a missing winget was an error. That is no longer true - a missing optional tool is now a warning, so the run can exit 0 - and this field carries the distinction instead.
+
+| Value | Meaning |
+|-------|---------|
+| `checked` | winget was found, asked, and returned a list. `AppUpdatesOffered` is a real answer. |
+| `check-failed` | winget was found but the check did not produce a list - it timed out, exited non-zero, or could not be completed at all. The count is meaningless. |
+| `skipped-no-winget` | winget is not installed on this machine. The run continues; a warning is logged. |
+| `skipped-offline` | No connectivity, so the update phases stopped before winget. This branch is still an **error**. |
+| `skipped-parameter` | `-SkipUpdates` was passed. |
+| `not-run` | The phase never executed (for example the run aborted earlier). |
+
+Treat any value other than `checked` as "the count means nothing", not as "there was nothing to update".
 
 ### `ControlledFolderAccess` (tri-state string)
 
@@ -117,6 +133,7 @@ VisualStudioCleanup, DeepSystemCleanup, DiskSpaceReport, Telemetry
   },
   "WindowsUpdatesCount": 0,
   "AppUpdatesOffered": 0,
+  "AppUpdatesStatus": "skipped-parameter",
   "WarningsCount": 1,
   "ErrorsCount": 0,
   "RebootRequired": false,

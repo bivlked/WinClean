@@ -340,6 +340,13 @@ function New-RunStats {
     # apps actually installed (it silently skips pinned/manifest-less/UAC-cancelled ones),
     # so we only ever know how many it OFFERED. Naming it "installed" was a false claim.
     AppUpdatesOffered    = 0
+    # v2.21: why the app-update phase produced the count it did. Added because demoting a
+    # missing winget from error to warning removed the only machine-readable way to tell
+    # "checked, nothing to upgrade" from "could not check at all" - both are
+    # AppUpdatesOffered = 0 with WarningsCount incremented by one of many possible causes.
+    # 'not-run' | 'checked' | 'check-failed' | 'skipped-parameter' | 'skipped-offline'
+    # | 'skipped-no-winget'
+    AppUpdatesStatus     = 'not-run'
     WarningsCount        = 0
     ErrorsCount          = 0
     RebootRequired       = $false
@@ -829,13 +836,552 @@ function Test-PSGalleryConnection {
     }
 }
 
+function Test-PathInsideRoot {
+    <#
+    .SYNOPSIS
+        Tells whether a path lies inside a directory
+    .DESCRIPTION
+        Pure decision, added in v2.21 for the update-channel rule below.
+        The root gets a trailing separator before the comparison, so C:\Temp2\x is not
+        read as living inside C:\Temp. Case-insensitive, matching the file system.
+        An unusable path or root answers "not inside" rather than throwing: the only
+        consumer picks wording from the answer, and a wrong "yes" prints an instruction
+        that does not apply to the copy the user is running.
+    #>
+    param(
+        [AllowNull()][string]$Path,
+        [AllowNull()][string]$Root
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Path) -or [string]::IsNullOrWhiteSpace($Root)) { return $false }
+
+    try {
+        $fullPath = [System.IO.Path]::GetFullPath($Path)
+        $fullRoot = [System.IO.Path]::GetFullPath($Root).TrimEnd('\', '/') + [System.IO.Path]::DirectorySeparatorChar
+    } catch {
+        return $false
+    }
+
+    return $fullPath.StartsWith($fullRoot, [System.StringComparison]::OrdinalIgnoreCase)
+}
+
+function Get-ScriptUpdateChannel {
+    <#
+    .SYNOPSIS
+        Decides how THIS running copy of WinClean can be updated
+    .DESCRIPTION
+        Pure decision, added in v2.21 to fix an update that reported success while
+        updating a different file.
+        Until now the question asked was "does a Gallery copy exist anywhere on this
+        machine", and the answer was acted on as if it had been "is the file I am
+        running that copy". Both are commonly true at once: install.ps1 (v2.15) puts a
+        copy in %ProgramFiles%\WinClean while an older Install-Script copy still sits in
+        Documents\PowerShell\Scripts. Update-Script then updated the copy in Documents,
+        printed "run WinClean again to use the new version", and the shortcut kept
+        starting the untouched Program Files copy - forever, with no error anywhere.
+        Returns one of:
+          gallery           - the running file IS the only Gallery copy; it can update itself
+          gallery-ambiguous - it matches a Gallery copy, but several installs exist
+          installer         - it lives in %ProgramFiles%\WinClean, so install.ps1 updates it
+          oneliner          - it lives under TEMP, so get.ps1 downloaded it for this run
+          manual            - somewhere else; only a manual download applies
+          unknown           - the path is unavailable, so nothing may be promised
+        Ambiguity resolves away from 'gallery' on purpose: the cost of the wrong answer
+        is asymmetric. Printing an instruction to a copy that could have updated itself
+        is a minor annoyance; auto-updating a file nobody is running is the defect.
+        That is also why several installs (AllUsers and CurrentUser can coexist) refuse
+        the automatic path outright, raised in review. PowerShellGet's Update-Script has no
+        -Scope at all; PSResourceGet's Update-PSResource does have one, but WinClean does
+        not map a matched install location back to a scope, and the updater is chosen by
+        which provider answered rather than by which install matched. So the target cannot
+        currently be named, and declining beats guessing: verifying afterwards would report
+        a miss honestly, but only after the unused copy had already been modified. Same rule
+        as Select-StorageSenseTask. Aiming the PSResourceGet updater by scope is possible
+        and is left as future work rather than claimed here.
+        Known limit: the comparison is lexical. A path reached through a junction or an
+        8.3 alias fails to match and is merely shown an instruction (safe). The reverse -
+        two files differing only in case inside one case-sensitive directory - would match
+        wrongly, and is left unhandled as a configuration this script does not support.
+        'installer' and 'oneliner' describe WHERE the file is, which is what decides the
+        right instruction; they do not claim to prove which tool put it there.
+    #>
+    param(
+        [AllowNull()][string]$ExecutingPath,
+        [AllowNull()][string[]]$GalleryLocation,
+        [AllowNull()][string]$ProgramFilesRoot = [Environment]::GetFolderPath([Environment+SpecialFolder]::ProgramFiles),
+        [AllowNull()][string]$TempRoot = [System.IO.Path]::GetTempPath()
+    )
+
+    if ([string]::IsNullOrWhiteSpace($ExecutingPath)) { return 'unknown' }
+    try { $fullPath = [System.IO.Path]::GetFullPath($ExecutingPath) } catch { return 'unknown' }
+
+    # Compare the full file path, not its folder: a Gallery install owns exactly
+    # WinClean.ps1 inside InstalledLocation, and a differently named copy sharing that
+    # folder is not the file the provider would replace.
+    # Deduplicate case-insensitively, matching the comparison below and the file system.
+    # Select-Object -Unique is case-SENSITIVE (verified, 22.07.2026), so the two providers
+    # reporting one install with different casing would have looked like two installs and
+    # silently switched a perfectly updatable machine to the refusal path.
+    $seen = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    $candidates = @()
+    foreach ($location in @($GalleryLocation)) {
+        if ([string]::IsNullOrWhiteSpace($location)) { continue }
+        try { $candidate = [System.IO.Path]::GetFullPath((Join-Path $location 'WinClean.ps1')) } catch { continue }
+        if ($seen.Add($candidate)) { $candidates += $candidate }
+    }
+
+    foreach ($candidate in $candidates) {
+        if ([string]::Equals($fullPath, $candidate, [System.StringComparison]::OrdinalIgnoreCase)) {
+            if ($candidates.Count -gt 1) { return 'gallery-ambiguous' }
+            return 'gallery'
+        }
+    }
+
+    $installerRoot = if ([string]::IsNullOrWhiteSpace($ProgramFilesRoot)) { $null }
+                     else { Join-Path $ProgramFilesRoot 'WinClean' }
+    if (Test-PathInsideRoot -Path $fullPath -Root $installerRoot) { return 'installer' }
+    if (Test-PathInsideRoot -Path $fullPath -Root $TempRoot) { return 'oneliner' }
+    return 'manual'
+}
+
+function Get-UpdateVerification {
+    <#
+    .SYNOPSIS
+        Decides whether an update that reported no error actually replaced the file
+    .DESCRIPTION
+        Pure decision, added in v2.21. "The cmdlet did not throw" is not "the file on
+        disk is now the new version" - the whole point of this release's predecessor was
+        that operations reporting success without doing anything are the expensive kind
+        of defect, and an updater is the last place to trust a silent success.
+        Returns Applied and Reason ('applied' | 'unchanged' | 'unreadable').
+        An unreadable or unparsable version is never 'applied': that is the state where
+        nothing is known, and claiming success there is the behaviour being removed.
+    #>
+    param(
+        [AllowNull()][string]$ExpectedVersion,
+        [AllowNull()][string]$ObservedVersion
+    )
+
+    $observed = $null
+    $expected = $null
+    if (-not [Version]::TryParse([string]$ObservedVersion, [ref]$observed) -or
+        -not [Version]::TryParse([string]$ExpectedVersion, [ref]$expected)) {
+        return @{ Applied = $false; Reason = 'unreadable' }
+    }
+
+    # Missing components are -1 in [Version], not 0, so "2.21" compares as LESS than
+    # "2.21.0" (raised in review). The Gallery is free to report either form for the same
+    # release, and without this the check would announce "the update did not apply" after
+    # a perfectly good update - a false alarm in the one place whose job is to be trusted.
+    $observed = [Version]::new($observed.Major, $observed.Minor,
+                               [math]::Max(0, $observed.Build), [math]::Max(0, $observed.Revision))
+    $expected = [Version]::new($expected.Major, $expected.Minor,
+                               [math]::Max(0, $expected.Build), [math]::Max(0, $expected.Revision))
+
+    if ($observed -lt $expected) { return @{ Applied = $false; Reason = 'unchanged' } }
+    return @{ Applied = $true; Reason = 'applied' }
+}
+
+function Get-ScriptFileVersion {
+    <#
+    .SYNOPSIS
+        Reads the .VERSION line out of a WinClean.ps1 file on disk
+    .DESCRIPTION
+        Added in v2.21 to verify an update against the file actually being run, rather
+        than against what a package provider believes it installed. PowerShell reads a
+        script into memory before executing it, so the running file can be replaced and
+        re-read while the current run continues.
+        Returns the version string, or $null when the file cannot be read or carries no
+        .VERSION line - both mean "not verified", never "verified".
+    #>
+    param([AllowNull()][string]$Path)
+
+    if ([string]::IsNullOrWhiteSpace($Path)) { return $null }
+    try { $head = Get-Content -LiteralPath $Path -TotalCount 40 -ErrorAction Stop } catch { return $null }
+
+    foreach ($line in $head) {
+        if ($line -match '^\s*\.VERSION\s+([\d.]+)\s*$') { return $Matches[1] }
+    }
+    return $null
+}
+
+function Get-InstalledWinCleanLocation {
+    <#
+    .SYNOPSIS
+        Returns the folders holding a PowerShell Gallery copy of WinClean
+    .DESCRIPTION
+        Two providers can own that copy: PowerShellGet (Install-Script) and PSResourceGet
+        (Install-PSResource). Measured on 22.07.2026 with each in turn: both report the
+        other's install, because they share the InstalledScriptInfos metadata, and for a
+        script InstalledLocation is the Scripts folder itself - unlike modules, it carries
+        no version subfolder. Both are still queried, because which provider ships is a
+        property of the PowerShell version rather than of this machine. PSResourceGet is
+        asked for AllUsers explicitly, because its -Scope defaults to CurrentUser.
+        An array: CurrentUser and AllUsers installs can coexist. THROWS when no provider
+        covered the machine and at least one query failed - including when some locations
+        WERE found, because a partial list is not a smaller answer: a hidden install turns
+        an ambiguous target back into a confident one. An unreadable machine must not be
+        reported as a machine with no Gallery copy either, because that answer sends the
+        caller on to advise an installer command and build a second installation.
+    #>
+    $locations = @()
+    $failures = @()
+    $answered = $false
+
+    # Each provider is isolated (raised in review): -ErrorAction SilentlyContinue only
+    # covers non-terminating errors, so a broken PowerShellGet used to abort this function
+    # outright and PSResourceGet was never asked - turning a repairable half-outage into
+    # "no Gallery copy exists", which is exactly the wrong answer to give this caller.
+    if (Get-Command Get-InstalledScript -ErrorAction SilentlyContinue) {
+        try {
+            # Enumerated without -Name and filtered here (raised in review, verified
+            # 22.07.2026): asking for a specific name raises a plain Exception when it is
+            # not installed, which cannot be told from a real outage without matching a
+            # localised message - so the query had to run with SilentlyContinue and a
+            # suppressed failure then passed as an authoritative "no copy installed".
+            # Listing everything returns an EMPTY COLLECTION when nothing is installed, so
+            # -ErrorAction Stop now separates the two properly. This provider enumerates
+            # both scopes, so one completed call covers the machine.
+            $locations += @(Get-InstalledScript -ErrorAction Stop |
+                            Where-Object { $_.Name -eq 'WinClean' } |
+                            ForEach-Object { $_.InstalledLocation })
+            $answered = $true
+        } catch {
+            $failures += $_
+            Write-Log "PowerShellGet could not be queried for installed copies: $_" -Level DETAIL
+        }
+    }
+    if (Get-Command Get-PSResource -ErrorAction SilentlyContinue) {
+        # -ErrorAction Stop here too, but for a different reason than above: measured
+        # 22.07.2026, this provider raises a TYPED ResourceNotFoundException for "nothing
+        # installed", so the two outcomes are separated by exception type rather than by
+        # asking a question that cannot fail.
+        $currentUserRead = $false
+        try {
+            $locations += @(Get-PSResource -Name 'WinClean' -ErrorAction Stop |
+                            Where-Object { $_.Type -eq 'Script' } |
+                            ForEach-Object { $_.InstalledLocation })
+            $currentUserRead = $true
+        } catch {
+            if ($_.Exception.GetType().Name -eq 'ResourceNotFoundException') {
+                $currentUserRead = $true   # answered: this scope holds no copy
+            } else {
+                $failures += $_
+                Write-Log "PSResourceGet could not be queried for installed copies: $_" -Level DETAIL
+            }
+        }
+
+        # AllUsers has to be asked for explicitly (raised in review, verified here):
+        # Get-PSResource's -Scope is not nullable, so an unbound call means CurrentUser and
+        # searches only the Documents paths. PowerShellGet's Get-InstalledScript enumerates
+        # both scopes, which is why this was invisible on any machine that has it - and why
+        # it mattered exactly on the PSResourceGet-only machine this release added support
+        # for. AllUsers is the natural scope for a script that requires administrator, so
+        # missing it classified a Gallery copy as 'manual' and advised install.ps1, adding a
+        # second installation.
+        # Support is read from the cmdlet's own metadata rather than tried and ignored
+        # (raised in review): "this build has no -Scope" is a limitation to accept, but any
+        # OTHER failure means the AllUsers half went unread, and swallowing that would hide
+        # precisely the installation this branch exists to find.
+        # Tracked per scope (raised in review): a single "somebody answered" flag let a
+        # successful CurrentUser query mask a failed AllUsers one, and AllUsers is the half
+        # this whole branch exists to read. This provider counts as having covered the
+        # machine only when BOTH scopes were read - or when the build predates -Scope, which
+        # is an accepted limitation rather than a failure.
+        $allUsersRead = $true
+        if ((Get-Command Get-PSResource).Parameters.ContainsKey('Scope')) {
+            $allUsersRead = $false
+            try {
+                $locations += @(Get-PSResource -Name 'WinClean' -Scope AllUsers -ErrorAction Stop |
+                                Where-Object { $_.Type -eq 'Script' } |
+                                ForEach-Object { $_.InstalledLocation })
+                $allUsersRead = $true
+            } catch {
+                if ($_.Exception.GetType().Name -eq 'ResourceNotFoundException') {
+                    $allUsersRead = $true
+                } else {
+                    $failures += $_
+                    Write-Log "PSResourceGet could not be queried for AllUsers copies: $_" -Level DETAIL
+                }
+            }
+        }
+
+        if ($currentUserRead -and $allUsersRead) { $answered = $true }
+    }
+
+    # Nothing found AND something failed is not the same as nothing installed (raised in
+    # review). Treating them alike classified the running file as 'manual' and printed
+    # "this copy did not come from the Gallery" plus an installer command - which would add
+    # a SECOND installation next to the one that was merely unreadable, building the very
+    # state this release exists to stop misreporting. The caller turns this into a warning
+    # and offers nothing, which is the honest answer when the machine cannot be read.
+    # An absent provider is not a failure: a machine with no package provider at all
+    # legitimately has no Gallery copy.
+    # Keyed on "nobody answered", not "somebody failed" (raised in review): with a broken
+    # PowerShellGet beside a working PSResourceGet that legitimately reports no copy, a
+    # failure count above zero would raise a warning on a machine that answered correctly.
+    # Coverage alone decides, NOT emptiness (raised in review): with CurrentUser returning
+    # the running copy while the AllUsers query failed, a non-empty list looked like a
+    # complete answer - and a hidden second install turns 'gallery-ambiguous' back into
+    # 'gallery', re-enabling exactly the automatic update whose target cannot be resolved.
+    # A partial list is not a smaller answer, it is a different question answered.
+    if (-not $answered -and $failures.Count -gt 0) {
+        throw "installed copies could not be enumerated: $($failures[-1])"
+    }
+
+    # Case-insensitive, for the reason given in Get-ScriptUpdateChannel: both providers
+    # report the same install, and differing casing between them must not read as two.
+    # Normalised first (raised in review), so "C:\Scripts" and "C:\Scripts\" are one
+    # location here too - this function promises distinct locations, and the caller is not
+    # the only thing entitled to rely on that.
+    $unique = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    $result = @()
+    foreach ($location in $locations) {
+        if ([string]::IsNullOrWhiteSpace($location)) { continue }
+        $normalized = try { [System.IO.Path]::GetFullPath($location) } catch { $location }
+        # GetFullPath keeps a trailing separator, so "C:\Scripts" and "C:\Scripts\" would
+        # still be two. Trimmed everywhere except a root, where the separator is meaningful:
+        # "C:\" is the root while "C:" means the current directory on that drive.
+        $root = try { [System.IO.Path]::GetPathRoot($normalized) } catch { '' }
+        if ($normalized.Length -gt $root.Length) { $normalized = $normalized.TrimEnd('\', '/') }
+        if ($unique.Add($normalized)) { $result += $normalized }
+    }
+    return $result
+}
+
+function Select-UpdateCommand {
+    <#
+    .SYNOPSIS
+        Picks the cmdlet that should perform the update on this machine
+    .DESCRIPTION
+        Added in v2.21, raised in review. Choosing the updater by mere presence sent a
+        machine whose PowerShellGet is installed but broken - an unregistered PSGallery,
+        say - straight back to Update-Script, even though discovery had just succeeded
+        through PSResourceGet. The provider that answered is evidence about which one
+        works, so it goes first; the other remains as a fallback for the case where the
+        answering provider has no updater available.
+        Returns the command name, or $null when neither exists.
+    #>
+    param([AllowNull()][string]$Provider)
+
+    $order = if ($Provider -eq 'PSResourceGet') { @('Update-PSResource', 'Update-Script') }
+             else { @('Update-Script', 'Update-PSResource') }
+
+    foreach ($command in $order) {
+        if (Get-Command $command -ErrorAction SilentlyContinue) { return $command }
+    }
+    return $null
+}
+
+function Wait-ForKeyPress {
+    <#
+    .SYNOPSIS
+        Best-effort "press any key" pause for the update prompts
+    .DESCRIPTION
+        Split out in v2.21 for two reasons. It centralises the guard - Test-InteractiveConsole
+        can be satisfied by a host whose RawUI still refuses ReadKey, and an exception there
+        must never abort a maintenance run or a COMPLETED update.
+        It also makes the interactive branches testable at all: RawUI.ReadKey blocks on a
+        real console, so a test that reached it hung the whole suite until it was killed.
+        A named function can be mocked; a method call on $Host cannot.
+    #>
+    # The failure is recorded rather than erased: at the non-Gallery prompt this pause is
+    # what gives the user time to read the instruction the whole release exists to deliver,
+    # and a host that refuses ReadKey turns it into a no-op that scrolls past (raised in
+    # review). DETAIL, because it changes nothing about the run's outcome.
+    try { $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown") }
+    catch { Write-Log "Console did not accept a keypress, continuing without the pause: $_" -Level DETAIL }
+}
+
+function Get-UpdateInstruction {
+    <#
+    .SYNOPSIS
+        The correct way to update the copy identified by Get-ScriptUpdateChannel
+    .DESCRIPTION
+        Split out in v2.21 so the advice can be tested. The old code had exactly two
+        messages, and the one shown to every non-Gallery copy advised
+        "Install-Script -Name WinClean" - which installs a SECOND copy in Documents and
+        leaves the running one untouched. That is not a hint that fails to help; it
+        builds the two-installation state this release exists to stop misreporting.
+        Returns the lines to print.
+    #>
+    param(
+        [AllowNull()][string]$Channel,
+        [AllowNull()][string]$ExecutingPath,
+        [AllowNull()][string]$Provider
+    )
+
+    $installer = '    irm https://raw.githubusercontent.com/bivlked/WinClean/main/install.ps1 | iex'
+
+    # Listing commands for the two-installation cases. Both providers are shown because
+    # either can report the other's install; whichever module is absent simply reports an
+    # unknown command, which is why the caller is told to expect that (raised in review -
+    # -ErrorAction cannot suppress a missing command, only a failing one).
+    $inspect = @(
+        '    Get-InstalledScript -Name WinClean -ErrorAction SilentlyContinue |',
+        '        Select-Object Version, InstalledLocation',
+        '    Get-PSResource -Name WinClean -ErrorAction SilentlyContinue |',
+        '        Where-Object { $_.Type -eq ''Script'' } | Select-Object Version, InstalledLocation',
+        '  (one of the two may not exist on this machine - that is expected)'
+    )
+    $running = if ([string]::IsNullOrWhiteSpace($ExecutingPath)) { @() }
+               else { @("  The file you are running now is:", "    $ExecutingPath") }
+
+    switch ($Channel) {
+        'gallery' {
+            # Name the command this machine actually has, preferring the provider that
+            # discovery just proved works (raised in review). Advising Update-Script on a
+            # PSResourceGet-only machine is advice that cannot be run; naming either one
+            # where NEITHER exists is the same mistake twice.
+            $manual = Select-UpdateCommand -Provider $Provider
+            if ($manual) { return @("  To update manually: $manual -Name WinClean") }
+            # "no update command is available" rather than "no provider is installed":
+            # Get-Command proves the former, and a module that fails to auto-load looks
+            # identical to one that is absent
+            return @(
+                '  No PowerShell update command is available, so this copy cannot update itself.',
+                '  Download the latest release: https://github.com/bivlked/WinClean/releases/latest'
+            )
+        }
+        'gallery-ambiguous' {
+            # Several Gallery installs exist and Update-Script cannot be aimed at one of
+            # them, so WinClean declines to touch any (raised in review). Naming the running
+            # path matters here: it is the only way the reader can tell the copies apart.
+            # Must end with something the reader can actually do (raised in review):
+            # removing an install is only safe when the copies differ, so the always-works
+            # answer - replace the printed file from the release - is stated first.
+            return @(
+                '  Several PowerShell Gallery installations of WinClean are present, and WinClean',
+                '  cannot tell which one an automatic update would change - so it did not try.'
+            ) + $running + @(
+                '  Update it directly by replacing that file with the latest release:',
+                '    https://github.com/bivlked/WinClean/releases/latest',
+                '  To stop this recurring, list the installations and remove the ones you do not run:'
+            ) + $inspect
+        }
+        'gallery-unverified' {
+            # Shown after an update that reported success but left the running file at the
+            # old version. Raised in review: this branch used to print the 'manual' advice,
+            # telling a copy that IS Gallery-managed that it is not, and pointing it at
+            # install.ps1 - which would add a second installation, the very state that made
+            # the update target the wrong file in the first place.
+            return @(
+                '  The provider may have updated a different installation than the one you are running.'
+            ) + $running + @(
+                '  List the copies present and compare their locations with the path above:'
+            ) + $inspect + @(
+                '  Or download the latest release manually: https://github.com/bivlked/WinClean/releases/latest'
+            )
+        }
+        'installer' {
+            # Describes where the file is, not who put it there (the header of
+            # Get-ScriptUpdateChannel says the same): the instruction is right either way,
+            # because re-running the installer replaces exactly this location
+            return @(
+                '  This copy lives where install.ps1 installs. Update it by re-running the installer',
+                '  in an elevated terminal:',
+                $installer
+            )
+        }
+        'oneliner' {
+            return @(
+                '  This copy is running from a temporary folder, which is where get.ps1 puts the',
+                '  release it downloads - and it downloads the latest one every time:',
+                '    irm https://raw.githubusercontent.com/bivlked/WinClean/main/get.ps1 | iex'
+            )
+        }
+        default {
+            # 'manual', 'unknown' and anything unforeseen: never advise Install-Script,
+            # which would add a copy instead of updating this one.
+            # States what was observed, not where the file came from (raised in review):
+            # the location list can also be short because a provider could not be read, and
+            # asserting provenance on that basis is a claim the code cannot back.
+            $lead = if ($Channel -eq 'unknown') {
+                '  The location of this copy could not be determined, so it cannot update itself.'
+            } else {
+                '  This copy does not match a PowerShell Gallery installation, so it cannot update itself.'
+            }
+            return @(
+                $lead,
+                '  Install it properly (creates an elevated desktop shortcut, updates in place):',
+                $installer,
+                '  Or download the release manually: https://github.com/bivlked/WinClean/releases/latest'
+            )
+        }
+    }
+}
+
+function Find-GalleryWinClean {
+    <#
+    .SYNOPSIS
+        Asks the PowerShell Gallery for the latest published WinClean
+    .DESCRIPTION
+        Added in v2.21, raised in review. Discovery called Find-Script unconditionally,
+        which is a PowerShellGet command. On a machine carrying only PSResourceGet - the
+        exact configuration the updater fallback below exists for - that command does not
+        exist, discovery threw, the surrounding catch turned it into "no update available",
+        and the entire update path was dead while every test around it passed. A fallback
+        that cannot be reached is not a fallback.
+        Returns Version, ReleaseNotes and Provider ('PowerShellGet' | 'PSResourceGet'), or
+        $null when the providers answered and the Gallery has nothing. THROWS when every
+        provider that exists failed - "could not ask" is not an answer, and swallowing it
+        made an unregistered repository look identical to "you are up to date".
+        Provider is carried because it is evidence: the one that just answered is known to
+        work, and the updater should not then be chosen by mere presence and land on the
+        one that failed.
+    #>
+    # Each provider is tried on its own merits (raised in review): falling back only when
+    # a command is ABSENT leaves a present-but-broken PowerShellGet - an unregistered
+    # PSGallery, say - masking a PSResourceGet that would have answered. Each keeps its own
+    # repository registration, so one failing says nothing about the other. Discovery is
+    # read-only, so trying both costs nothing but a round trip.
+    $found = $null
+    $provider = $null
+    $failures = @()
+    $answered = $false
+
+    if (Get-Command Find-Script -ErrorAction SilentlyContinue) {
+        try {
+            $found = @(Find-Script -Name 'WinClean' -Repository PSGallery -ErrorAction Stop)[0]
+            $answered = $true
+            if ($found) { $provider = 'PowerShellGet' }
+        } catch { $failures += $_; $found = $null }
+    }
+    if (-not $found -and (Get-Command Find-PSResource -ErrorAction SilentlyContinue)) {
+        # Filtered to scripts: a module sharing the name would otherwise set the version.
+        # [0] of an empty filtered array is $null, which is the intended "nothing found".
+        # The provider returns the latest matching version, so no sorting is done here.
+        try {
+            $found = @(Find-PSResource -Name 'WinClean' -Repository PSGallery -ErrorAction Stop |
+                       Where-Object { $_.Type -eq 'Script' })[0]
+            $answered = $true
+            if ($found) { $provider = 'PSResourceGet' }
+        } catch { $failures += $_; $found = $null }
+    }
+
+    # "Could not ask" must not look like "asked, nothing newer" (raised in review - this
+    # was a regression introduced by the per-provider catches above). Before them, a failing
+    # Find-Script threw all the way to the caller, which logged a warning; swallowing it
+    # here made an unregistered PSGallery, a TLS or proxy failure and an unpublished script
+    # all read as "you are up to date", with nothing in the log at all.
+    # Keyed on "nobody answered", not on "somebody failed" (also raised in review): with a
+    # broken PowerShellGet beside a working PSResourceGet, a failure count above zero would
+    # turn a perfectly good answer into a warning on every run.
+    if (-not $answered -and $failures.Count -gt 0) {
+        throw "the PowerShell Gallery could not be queried: $($failures[-1])"
+    }
+
+    if (-not $found) { return $null }
+    return @{ Version = $found.Version; ReleaseNotes = $found.ReleaseNotes; Provider = $provider }
+}
+
 function Test-ScriptUpdate {
     <#
     .SYNOPSIS
         Проверяет наличие обновлений WinClean в PowerShell Gallery
     .DESCRIPTION
         Сравнивает текущую версию скрипта с последней версией в PowerShell Gallery.
-        Проверяет, был ли скрипт установлен через PSGallery (для возможности автообновления).
+        Определяет, каким способом можно обновить ИМЕННО выполняемую копию (v2.21).
     .OUTPUTS
         [hashtable] с информацией об обновлении или $null если обновление не требуется
     #>
@@ -847,24 +1393,31 @@ function Test-ScriptUpdate {
     try {
         $currentVersion = [Version]$script:Version
 
-        # Query PSGallery for latest version
-        $galleryScript = Find-Script -Name "WinClean" -Repository PSGallery -ErrorAction Stop
+        # Query PSGallery for latest version, through whichever provider this machine has
+        $galleryScript = Find-GalleryWinClean
+        if (-not $galleryScript) { return $null }
         $latestVersion = [Version]$galleryScript.Version
 
         if ($latestVersion -gt $currentVersion) {
-            # Check if installed via PSGallery (for auto-update capability)
-            $installedScript = Get-InstalledScript -Name "WinClean" -ErrorAction SilentlyContinue
-
+            # v2.21: which copy is running decides what can be offered, not whether a
+            # Gallery copy exists somewhere on the machine
             return @{
                 CurrentVersion = $currentVersion.ToString()
                 LatestVersion  = $latestVersion.ToString()
-                IsInstalled    = $null -ne $installedScript
+                Channel        = Get-ScriptUpdateChannel -ExecutingPath $PSCommandPath `
+                                                         -GalleryLocation (Get-InstalledWinCleanLocation)
+                Provider       = $galleryScript.Provider
                 ReleaseNotes   = $galleryScript.ReleaseNotes
             }
         }
     } catch {
-        # Silently fail - update check is not critical
+        # Counted (raised in review): Write-Log does not touch the counters - every warning
+        # in this file increments one by hand - so this one was invisible in the summary and
+        # in the result JSON. The "silently fail" comment it replaces had outlived the code:
+        # the level was already WARNING, and the try now covers channel classification,
+        # provider lookup and two [Version] casts, any of which can throw.
         Write-Log "Update check failed: $_" -Level WARNING
+        $script:Stats.WarningsCount++
     }
 
     return $null
@@ -903,66 +1456,148 @@ function Invoke-ScriptUpdate {
     Write-Host " (new)" -ForegroundColor DarkGreen
     Write-Host ""
 
-    Write-Log "Update available: v$($UpdateInfo.CurrentVersion) -> v$($UpdateInfo.LatestVersion)" -Level INFO
+    # The channel belongs in the log line, not only on screen (raised in review): the two
+    # automatic paths below print their advice with Write-Host alone, so a scheduled or CI
+    # run recorded that an update existed and nothing about which copy was running or what
+    # was advised - the one fact this release is about.
+    Write-Log "Update available: v$($UpdateInfo.CurrentVersion) -> v$($UpdateInfo.LatestVersion) (channel: $($UpdateInfo.Channel))" -Level INFO
 
     # In ReportOnly mode, just inform and continue
     if ($ReportOnly) {
+        Write-Log "ReportOnly mode - no update attempted" -Level INFO
         Write-Host "  ReportOnly mode - skipping update" -ForegroundColor DarkGray
+        # Raised in review: the applicable method is still worth naming here. A preview run
+        # is often exactly when someone is deciding how to update, and printing nothing
+        # contradicted the documented promise that WinClean names the option that applies.
+        foreach ($line in (Get-UpdateInstruction -Channel $UpdateInfo.Channel -ExecutingPath $PSCommandPath -Provider $UpdateInfo.Provider)) {
+            Write-Host $line -ForegroundColor Gray
+        }
         Write-Host ""
         return
     }
 
     # Check if interactive console is available
     if (-not (Test-InteractiveConsole)) {
+        Write-Log "Non-interactive mode - no update attempted" -Level INFO
         Write-Host "  Non-interactive mode - skipping update prompt" -ForegroundColor DarkGray
-        Write-Host "  To update manually: Update-Script -Name WinClean" -ForegroundColor Gray
+        # v2.21: the instruction now follows the running copy. It used to name
+        # Update-Script unconditionally, which does nothing for the copy in
+        # %ProgramFiles% that the desktop shortcut starts.
+        foreach ($line in (Get-UpdateInstruction -Channel $UpdateInfo.Channel -ExecutingPath $PSCommandPath -Provider $UpdateInfo.Provider)) {
+            Write-Host $line -ForegroundColor Gray
+        }
         Write-Host ""
         return
     }
 
-    if ($UpdateInfo.IsInstalled) {
-        # Installed via PSGallery - can auto-update
-        Write-Host "  Update now? (" -NoNewline -ForegroundColor Gray
-        Write-Host "Y" -NoNewline -ForegroundColor Green
-        Write-Host "/n): " -NoNewline -ForegroundColor Gray
-
-        $response = Read-Host
-        if ($response -eq '' -or $response -imatch '^[YyДд]') {
-            Write-Host ""
-            Write-Host "  Updating WinClean..." -ForegroundColor Cyan
-
-            try {
-                Update-Script -Name WinClean -Force -ErrorAction Stop
-                Write-Log "Update successful" -Level SUCCESS
-                Write-Host ""
-                Write-Host "  ✓ Update complete!" -ForegroundColor Green
-                Write-Host "  Please run WinClean again to use the new version." -ForegroundColor Gray
-                Write-Host ""
-                Write-Host "  Press any key to exit..." -ForegroundColor DarkGray
-                $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
-                exit 0
-            } catch {
-                Write-Log "Update failed: $_" -Level ERROR
-                Write-Host "  ✗ Update failed: $_" -ForegroundColor Red
-                Write-Host "  Continuing with current version..." -ForegroundColor Yellow
-                Write-Host ""
-            }
-        } else {
-            Write-Log "Update skipped by user" -Level INFO
-            Write-Host "  Update skipped. Continuing with current version..." -ForegroundColor DarkGray
-            Write-Host ""
+    if ($UpdateInfo.Channel -ne 'gallery') {
+        # Anything but a single unambiguous Gallery copy: say what applies to THIS file and
+        # continue. 'gallery-ambiguous' deliberately lands here too - it IS a Gallery copy,
+        # but with several installs present no updater can be aimed at this one.
+        # The wording must not contradict the channel (raised in review): a
+        # 'gallery-ambiguous' copy IS Gallery-managed - that is precisely why it is here.
+        # 'unknown' exists precisely to promise nothing, so the log must not promise either
+        # (raised in review): it used to state flatly that the copy is not Gallery-managed
+        # while the console, two lines later, said its location could not be determined.
+        $why = switch ($UpdateInfo.Channel) {
+            'gallery-ambiguous' { "several Gallery installations exist and WinClean does not resolve which one an update would change" }
+            'unknown'           { "the location of the running copy could not be determined" }
+            default             { "this copy does not match a Gallery installation" }
         }
-    } else {
-        # Not installed via PSGallery - show manual instructions
-        Write-Host "  WinClean was not installed via PowerShell Gallery." -ForegroundColor Yellow
-        Write-Host "  To enable auto-updates, install with:" -ForegroundColor Gray
-        Write-Host ""
-        Write-Host "    Install-Script -Name WinClean -Scope CurrentUser -Force" -ForegroundColor White
+        Write-Log "Update available but $why (channel: $($UpdateInfo.Channel))" -Level INFO
+        foreach ($line in (Get-UpdateInstruction -Channel $UpdateInfo.Channel -ExecutingPath $PSCommandPath -Provider $UpdateInfo.Provider)) {
+            Write-Host $line -ForegroundColor Gray
+        }
         Write-Host ""
         Write-Host "  Press any key to continue with current version..." -ForegroundColor DarkGray
-        $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
+        Wait-ForKeyPress
         Write-Host ""
+        return
     }
+
+    # The running file is the Gallery copy, so updating it updates what runs next
+    Write-Host "  Update now? (" -NoNewline -ForegroundColor Gray
+    Write-Host "Y" -NoNewline -ForegroundColor Green
+    Write-Host "/n): " -NoNewline -ForegroundColor Gray
+
+    $response = Read-Host
+    if ($response -ne '' -and $response -inotmatch '^[YyДд]') {
+        Write-Log "Update skipped by user" -Level INFO
+        Write-Host "  Update skipped. Continuing with current version..." -ForegroundColor DarkGray
+        Write-Host ""
+        return
+    }
+
+    Write-Host ""
+    Write-Host "  Updating WinClean..." -ForegroundColor Cyan
+
+    try {
+        # PowerShellGet ships with PowerShell today and PSResourceGet is its replacement;
+        # either can be the one present, and the one that answered discovery goes first
+        switch (Select-UpdateCommand -Provider $UpdateInfo.Provider) {
+            'Update-Script'     { Update-Script -Name WinClean -Force -ErrorAction Stop }
+            'Update-PSResource' { Update-PSResource -Name WinClean -Force -TrustRepository -ErrorAction Stop }
+            default { throw "no update command available (neither Update-Script nor Update-PSResource)" }
+        }
+    } catch {
+        # A warning, not an error (raised in review): the exit code is computed from
+        # ErrorsCount alone, and the old level/counter pairing logged ERROR while still
+        # exiting 0 - a contradiction in the one place that must be believable. Failing to
+        # update the script is not a failure of the maintenance the user actually asked for.
+        Write-Log "Update failed: $_" -Level WARNING
+        $script:Stats.WarningsCount++
+        Write-Host "  ✗ Update failed: $_" -ForegroundColor Red
+        Write-Host "  Continuing with current version..." -ForegroundColor Yellow
+        Write-Host ""
+        return
+    }
+
+    # v2.21: verify against the file being executed. A provider that reports success
+    # while the running file stays at the old version is the exact failure this release
+    # fixes, and it must not be re-announced as "update complete".
+    $observedVersion = Get-ScriptFileVersion -Path $PSCommandPath
+    $verification = Get-UpdateVerification -ExpectedVersion $UpdateInfo.LatestVersion `
+                                           -ObservedVersion $observedVersion
+    if (-not $verification.Applied) {
+        # Report what was actually read, not what this process started as: with several
+        # installations present those two can differ, and naming the wrong one would send
+        # the reader looking at the wrong file (raised in review).
+        $detail = if ($verification.Reason -eq 'unchanged') {
+            "the file still reports v$observedVersion"
+        } else {
+            "its version could not be read back"
+        }
+        Write-Log "Update reported success but $detail - continuing with the current version" -Level WARNING
+        $script:Stats.WarningsCount++
+        Write-Host "  ! The update reported success, but $detail." -ForegroundColor Yellow
+        foreach ($line in (Get-UpdateInstruction -Channel 'gallery-unverified' -ExecutingPath $PSCommandPath)) {
+            Write-Host $line -ForegroundColor Gray
+        }
+        Write-Host ""
+        return
+    }
+
+    Write-Log "Update successful" -Level SUCCESS
+    Write-Host ""
+    Write-Host "  ✓ Update complete!" -ForegroundColor Green
+    Write-Host "  Please run WinClean again to use the new version." -ForegroundColor Gray
+    Write-Host ""
+    Write-Host "  Press any key to exit..." -ForegroundColor DarkGray
+
+    # This exit bypasses the finally in Start-WinClean, so the result JSON has to be
+    # written here (raised in review). Start-WinClean deletes any previous file before the
+    # update check, so without this a consumer saw exit code 0 and NO artefact at all -
+    # indistinguishable from a crash, and identical to a run that did nothing. Same shape
+    # as the PendingRebootDeclined path, which already does this.
+    $script:Stats.Aborted = 'UpdatedAndExited'
+    Write-ResultJson -Path $ResultJsonPath
+
+    Wait-ForKeyPress
+    # Not an unconditional 0 (raised in review): Write-ResultJson reports its own failure by
+    # counting an error rather than throwing, and exiting 0 anyway would rebuild the exact
+    # "success with no artefact" state the JSON write was added here to prevent.
+    if ($script:Stats.ErrorsCount -gt 0) { exit 1 }
+    exit 0
 }
 
 function Install-ModuleWithTimeout {
@@ -2297,11 +2932,13 @@ function Update-Applications {
 
     if ($SkipUpdates) {
         Write-Log "Application updates skipped (parameter)" -Level INFO
+        $script:Stats.AppUpdatesStatus = 'skipped-parameter'
         return
     }
 
     if (-not (Test-InternetConnection)) {
         Write-Log "No internet connection - skipping app updates" -Level ERROR
+        $script:Stats.AppUpdatesStatus = 'skipped-offline'
         $script:Stats.ErrorsCount++
         return
     }
@@ -2322,10 +2959,27 @@ function Update-Applications {
     }
 
     if (-not $wingetPath) {
-        Write-Log "Winget not found - install App Installer from Microsoft Store" -Level ERROR
-        $script:Stats.ErrorsCount++
+        # v2.21: a warning, not an error. The absence of an optional third-party tool is a
+        # property of the machine, not a failure of this run - by the same rule that makes
+        # a machine without Docker or Visual Studio a normal machine here.
+        # It mattered because the exit code is computed from ErrorsCount alone: every run
+        # on a machine without App Installer ended with code 1 while all nine phases
+        # completed, so any scheduler, CI job or test harness reading that code saw a
+        # failed run forever. A winget that IS present and then fails is still reported;
+        # its severity depends on whether the run can carry on - the upgrade check failing
+        # outright and an unhandled exception are errors, while a stale source, a timeout
+        # or a partly failed batch are warnings.
+        Write-Log "Winget not found - skipping application updates (install App Installer from Microsoft Store to enable them)" -Level WARNING
+        $script:Stats.AppUpdatesStatus = 'skipped-no-winget'
+        $script:Stats.WarningsCount++
         return
     }
+
+    # From here winget exists and is about to be asked, but the status is only raised to
+    # 'checked' once the check actually returns a list (raised in review): setting it here
+    # meant a timed-out or failing check still reported 'checked' with AppUpdatesOffered = 0
+    # - precisely the ambiguity this field was added to remove.
+    $script:Stats.AppUpdatesStatus = 'check-failed'
 
     try {
         # Update sources only if not in ReportOnly mode (source update modifies state)
@@ -2406,6 +3060,9 @@ function Update-Applications {
             $script:Stats.ErrorsCount++
             return
         }
+
+        # The check returned a usable list, so its count now means something
+        $script:Stats.AppUpdatesStatus = 'checked'
 
         # Parse output for update count (language-independent approach)
         # Uses table separator "---" as marker, then counts all data lines
@@ -5261,6 +5918,10 @@ function Write-ResultJson {
             # OFFERED, not a confirmed install count (winget upgrade --all cannot report the
             # latter). No shipped consumer reads this field; the nightly stand does not.
             AppUpdatesOffered   = $script:Stats.AppUpdatesOffered
+            # v2.21: distinguishes "checked, nothing to upgrade" from "could not check".
+            # Both are AppUpdatesOffered = 0, and demoting a missing winget to a warning
+            # removed the only other signal a consumer had (a non-zero exit code).
+            AppUpdatesStatus    = $script:Stats.AppUpdatesStatus
             WarningsCount       = $script:Stats.WarningsCount
             ErrorsCount         = $script:Stats.ErrorsCount
             RebootRequired      = [bool]$script:Stats.RebootRequired
@@ -5429,10 +6090,20 @@ function Start-WinClean {
 
     # Check for script updates. v2.17: gated by -SkipUpdates - the flag promises no
     # update activity, and this path costs a PSGallery round trip on every run.
+    #
+    # Guarded (raised in review): this block runs BEFORE the main try/finally, so anything
+    # thrown here escaped Start-WinClean entirely - no result JSON, no phase buckets, no
+    # exit-code accounting - and killed the run before its first phase. The update check is
+    # optional; the maintenance it precedes is not, and must not be lost to it.
     if (-not $SkipUpdates) {
-        $updateInfo = Test-ScriptUpdate
-        if ($updateInfo) {
-            Invoke-ScriptUpdate -UpdateInfo $updateInfo
+        try {
+            $updateInfo = Test-ScriptUpdate
+            if ($updateInfo) {
+                Invoke-ScriptUpdate -UpdateInfo $updateInfo
+            }
+        } catch {
+            Write-Log "Update check could not be completed: $_" -Level WARNING
+            $script:Stats.WarningsCount++
         }
     }
 
@@ -5473,6 +6144,11 @@ function Start-WinClean {
         Invoke-Phase -Name 'Preparation' -Skip:$SkipRestore -Action {
             $null = New-SystemRestorePoint -Description "WinClean $(Get-Date -Format 'yyyy-MM-dd HH:mm')"
         }
+
+        # Recorded here, not inside Update-Applications (raised in review): -SkipUpdates
+        # stops the phase from dispatching at all, so the branch that sets this inside the
+        # function is unreachable in production and the status stayed 'not-run'.
+        if ($SkipUpdates) { $script:Stats.AppUpdatesStatus = 'skipped-parameter' }
 
         Invoke-Phase -Name 'Updates' -Skip:$SkipUpdates -Action {
             Update-WindowsSystem
