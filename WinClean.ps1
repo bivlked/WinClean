@@ -1307,7 +1307,12 @@ function ConvertFrom-HumanReadableSize {
         ConvertFrom-HumanReadableSize "2.5 GB"  # Returns 2684354560
         ConvertFrom-HumanReadableSize "512MB"   # Returns 536870912
     #>
-    param([string]$SizeString)
+    param(
+        [string]$SizeString,
+        # Only consulted for a genuinely ambiguous string (see the disambiguation below).
+        # Injectable so the rule can be tested without changing the machine's locale.
+        [cultureinfo]$Culture = [cultureinfo]::CurrentCulture
+    )
 
     if (-not $SizeString) { return 0 }
 
@@ -1327,15 +1332,53 @@ function ConvertFrom-HumanReadableSize {
     $numberPart = $Matches[1]
     $unit = $Matches[2].ToUpper()
 
-    # Decimal-separator ambiguity ("1.234,5" EU vs "1,234.5" US vs a lone "," or "."):
-    # whichever mark appears LAST is the decimal point; anything earlier was a
-    # thousands grouping and is dropped.
+    # Decimal-separator disambiguation.
+    #
+    # When BOTH marks appear the answer is certain: whichever comes LAST is the decimal
+    # point and the earlier one was grouping ("1.234,5" EU against "1,234.5" US).
+    #
+    # A LONE mark is the hard case, and v2.20 is where it was fixed. The old rule was
+    # "a lone mark is the decimal point", which read the ordinary en-US thousands form
+    # "1,234 KB" as 1.234 KB - low by a factor of a thousand, on the shell fallback that
+    # measures the Recycle Bin.
+    # The obvious repair is worse. Handing the string to [double]::TryParse with the
+    # current culture looks right and is not: measured on .NET, AllowThousands does NOT
+    # validate the grouping shape, so en-US reads "1,5" as 15 and "1,2345" as 12345 -
+    # trading a 1000x under-read for a 10x over-read, and breaking "1,5 GB".
+    # So the SHAPE is checked here first, and the culture is consulted only for a string
+    # that could honestly be either reading.
     $lastComma = $numberPart.LastIndexOf(',')
     $lastDot = $numberPart.LastIndexOf('.')
-    if ($lastComma -gt $lastDot) {
-        $numberPart = $numberPart.Replace('.', '').Replace(',', '.')
-    } elseif ($lastDot -gt $lastComma) {
-        $numberPart = $numberPart.Replace(',', '')
+
+    if ($lastComma -ge 0 -and $lastDot -ge 0) {
+        if ($lastComma -gt $lastDot) {
+            $numberPart = $numberPart.Replace('.', '').Replace(',', '.')
+        } else {
+            $numberPart = $numberPart.Replace(',', '')
+        }
+    } elseif ($lastComma -ge 0 -or $lastDot -ge 0) {
+        $sep = if ($lastComma -ge 0) { ',' } else { '.' }
+
+        # A thousands grouping is "1-3 digits, then one or more groups of exactly 3".
+        # "1,5" and "1,2345" cannot be that, so there the mark is the decimal point and
+        # no culture can argue otherwise.
+        if ($numberPart -match "^\d{1,3}($([regex]::Escape($sep))\d{3})+$") {
+            $isDecimal = $Culture.NumberFormat.NumberDecimalSeparator -eq $sep
+            if (-not $isDecimal -and $Culture.NumberFormat.NumberGroupSeparator -ne $sep) {
+                # The culture uses this mark for neither purpose - ru-RU groups with a
+                # no-break space and would call a lone dot meaningless. Our own
+                # Format-FileSize writes invariant text, so fall back to reading it that
+                # way: a dot is the decimal point, a comma is grouping.
+                $isDecimal = ($sep -eq '.')
+            }
+            if ($isDecimal) {
+                $numberPart = $numberPart.Replace(',', '.')
+            } else {
+                $numberPart = $numberPart.Replace($sep, '')
+            }
+        } else {
+            $numberPart = $numberPart.Replace(',', '.')
+        }
     }
 
     $multiplier = switch ($unit) {

@@ -187,6 +187,53 @@ Describe "ConvertFrom-HumanReadableSize" -Tag "Unit", "Helper" {
             ConvertFrom-HumanReadableSize -SizeString $SizeString | Should -Be $Expected
         }
 
+        It "Reads the en-US thousands form instead of dividing it by a thousand (v2.20)" {
+            # The defect: a lone separator was always taken for the decimal point, so the
+            # ordinary "1,234 KB" from an en-US shell was read as 1.234 KB
+            $enUS = [cultureinfo]::GetCultureInfo('en-US')
+            ConvertFrom-HumanReadableSize -SizeString "1,234 KB" -Culture $enUS | Should -Be 1263616
+        }
+
+        It "Still reads the same string as a decimal where the culture says so" {
+            # ru-RU writes 1.234 as "1,234" and groups thousands with a no-break space,
+            # so the identical text means something else there
+            $ruRU = [cultureinfo]::GetCultureInfo('ru-RU')
+            ConvertFrom-HumanReadableSize -SizeString "1,234 KB" -Culture $ruRU | Should -Be 1264
+        }
+
+        It "Does not let the culture override a shape that cannot be a grouping" {
+            # Guards the repair that would have been worse than the defect: .NET's
+            # AllowThousands does not validate grouping, so a culture-first parse reads
+            # "1,5" as 15 on en-US. Three digits are required after the separator.
+            $enUS = [cultureinfo]::GetCultureInfo('en-US')
+            ConvertFrom-HumanReadableSize -SizeString "1,5 GB" -Culture $enUS | Should -Be 1610612736
+            ConvertFrom-HumanReadableSize -SizeString "1,2345 MB" -Culture $enUS | Should -Be 1294467
+        }
+
+        It "Handles repeated grouping: '12,345,678 B' on en-US" {
+            $enUS = [cultureinfo]::GetCultureInfo('en-US')
+            ConvertFrom-HumanReadableSize -SizeString "12,345,678 B" -Culture $enUS | Should -Be 12345678
+        }
+
+        It "Applies the same rule to a lone dot: '<Culture>' reads '1.234 KB' as <Expected>" -ForEach @(
+            @{ Culture = 'en-US'; Expected = 1264 }      # dot is the decimal point there
+            @{ Culture = 'de-DE'; Expected = 1263616 }   # dot groups thousands there
+        ) {
+            ConvertFrom-HumanReadableSize -SizeString "1.234 KB" -Culture ([cultureinfo]::GetCultureInfo($Culture)) |
+                Should -Be $Expected
+        }
+
+        It "Leaves an unambiguous two-separator string alone whatever the culture" {
+            # Both marks present means the last one is the decimal point, and no culture
+            # can make that ambiguous
+            foreach ($c in 'en-US', 'ru-RU', 'de-DE') {
+                ConvertFrom-HumanReadableSize -SizeString "1,234.5 MB" -Culture ([cultureinfo]::GetCultureInfo($c)) |
+                    Should -Be 1294467072
+                ConvertFrom-HumanReadableSize -SizeString "1.234,5 MB" -Culture ([cultureinfo]::GetCultureInfo($c)) |
+                    Should -Be 1294467072
+            }
+        }
+
         It "Converts binary-unit spellings: '<SizeString>'" -ForEach @(
             @{ SizeString = "1 MiB";   Expected = 1048576 }
             @{ SizeString = "1.5 GiB"; Expected = 1610612736 }

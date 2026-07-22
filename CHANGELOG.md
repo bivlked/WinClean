@@ -104,6 +104,15 @@ Found by an independent review **of the fixes above**, before release:
   that refuses to guess between same-named tasks; and a task that disappeared after five
   seconds was reported as "did not finish within 120 seconds", a number that never
   happened
+- **A thousands separator was read as a decimal point, dividing sizes by a thousand.**
+  `"1,234 KB"` - the ordinary en-US form, and exactly what the shell returns for Recycle
+  Bin entries when the exact size property is unavailable - was read as 1.234 KB. The old
+  rule said a lone separator is always the decimal point. The obvious repair would have
+  been worse than the defect: measured on .NET, `AllowThousands` does not validate the
+  grouping shape, so parsing with the current culture reads `"1,5"` as 15 on en-US, that
+  is a tenfold over-read replacing a thousandfold under-read. The grouping shape is
+  checked first now (one to three digits, then groups of exactly three), and the culture
+  is consulted only for a string that could honestly be read either way
 - **A test file that failed to load kept CI green.** Measured on Pester 5.7.1: a parse
   error yields `Result=Failed` and `FailedContainersCount=1` while the failed, skipped and
   not-run counters all stay at 0 - so counting tests alone could not see an entire test
@@ -124,9 +133,19 @@ Found by an independent review **of the fixes above**, before release:
   unbounded while CI pinned an upper bound - with Pester 6 published, one `Install-Module`
   would have split the two
 
+### Documentation
+
+- `docs/troubleshooting.md` explains why the same application can be offered for update on
+  every run, which is a question WinClean will be blamed for and cannot fix in code. Two
+  causes, both reproduced on a live machine: `winget` refuses to manage user-scope packages
+  from an elevated process (and WinClean requires elevation), and an installer that records
+  a stale version in its own uninstall entry makes the offer permanent, because that entry
+  is what `winget` compares against rather than the installed executable. Includes the
+  read-only diagnosis and both ways out
+
 ### Tests
 
-- 376 to 426 automated tests. New coverage: the junction guard (a link to a protected root
+- 376 to 433 automated tests. New coverage: the junction guard (a link to a protected root
   is refused, a harmless one is not), a fresh per-run statistics object, the registry value
   counter, and a mocked event-log enumeration failure
 - **The Storage Sense rewrite had no tests at all** - the largest gap in this release, and
