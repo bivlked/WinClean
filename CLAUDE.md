@@ -167,6 +167,8 @@ Publish-PSResource -Path .\WinClean.ps1 -Repository PSGallery -ApiKey $env:PSGAL
 
 **Где хранится ключ:** переменная окружения `PSGALLERY_API_KEY` (User scope)
 
+🔴 **PSGallery - ПОСЛЕДНИЙ шаг релиза и единственный необратимый.** Опубликованную версию нельзя удалить или заменить (только unlist), тот же номер повторно не занять. Всё остальное чинится: ассеты перезаливаются `--clobber`, тег удаляется, коммит ревертится. Поэтому порядок такой: релиз -> `-VerifyPublished` -> e2e one-liner на стенде -> и только потом PSGallery.
+
 ### Стиль кода
 
 - Функции: `Verb-Noun` (PowerShell conventions)

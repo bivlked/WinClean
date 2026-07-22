@@ -73,6 +73,8 @@ Publish-PSResource -Path .\WinClean.ps1 -Repository PSGallery -ApiKey $env:PSGAL
 
 The API key lives in the `PSGALLERY_API_KEY` environment variable. Publishing here is what lets already-installed copies discover the update through `Test-ScriptUpdate`; skipping it leaves PSGallery users behind even though the GitHub one-liners are current.
 
+**Publish to PSGallery last.** It is the only irreversible step in this runbook: a published version cannot be deleted or replaced, only unlisted, and the same version number can never be re-used. Everything else can be corrected (assets re-uploaded with `--clobber`, a tag deleted, a commit reverted). So run the post-release verification first and publish to PSGallery only once the GitHub Release is confirmed good.
+
 ## Stand verification
 
 Every release is validated on real Windows 11 VMs before and after publishing, run manually with `tools/proxmox/Invoke-StandTest.ps1`:
@@ -89,6 +91,6 @@ Every release is validated on real Windows 11 VMs before and after publishing, r
 4. Run `pwsh tools/Invoke-ReleaseCheck.ps1 -IncludeStand` (one Full/local pass), and manually run the RU + EN stand (`Invoke-StandTest.ps1` with each `-ConfigPath`) in Full and `-Mode ReportNoCleanup`.
 5. Merge to `main` and push.
 6. Compute the SHA256, write `WinClean.ps1.sha256`, and `gh release create vX.Y` with both assets.
-7. `Publish-PSResource` to PSGallery.
-8. Run `pwsh tools/Invoke-ReleaseCheck.ps1 -VerifyPublished` (confirms the assets and SHA256), then a manual one-liner run (`irm https://raw.githubusercontent.com/bivlked/WinClean/main/get.ps1 | iex`) to confirm the release asset and the `get.ps1` path serve the new version. (`Invoke-StandTest.ps1 -Source release` on the stand is a separate check - it runs the tag's raw `WinClean.ps1`, not the release asset or the one-liner.)
+7. Run `pwsh tools/Invoke-ReleaseCheck.ps1 -VerifyPublished` (confirms both assets exist and the SHA256 matches), then a manual one-liner run (`irm https://raw.githubusercontent.com/bivlked/WinClean/main/get.ps1 | iex`) to confirm the release asset and the `get.ps1` path serve the new version. Run that one-liner **on a stand VM, never on your own workstation**: it is a real elevated cleanup run, not a preview. (`Invoke-StandTest.ps1 -Source release` on the stand is a separate check - it runs the tag's raw `WinClean.ps1`, not the release asset or the one-liner.)
+8. `Publish-PSResource` to PSGallery - **last**, because it is the one step that cannot be undone.
 9. Confirm README badges, the GitHub Release, PSGallery and the CHANGELOG all show the same version.
