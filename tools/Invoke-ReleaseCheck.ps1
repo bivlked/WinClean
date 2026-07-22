@@ -161,11 +161,15 @@ if ($pester) {
     # layer that executes real cleanup code - skips itself without administrator rights,
     # and a release must never go out on "176 of 204 passed, the rest silently absent".
     $notRun = $pester.SkippedCount + $pester.NotRunCount
+    # v2.20: a test file that fails to LOAD contributes no tests, so the three counters
+    # above stay at zero while its whole coverage is gone (measured on Pester 5.7.1).
+    $failedContainers = $pester.FailedContainersCount
     Add-Result -Name "Pester: $($pester.PassedCount)/$($pester.TotalCount) passed, none skipped" `
-        -Passed ($pester.FailedCount -eq 0 -and $notRun -eq 0) `
+        -Passed ($pester.FailedCount -eq 0 -and $notRun -eq 0 -and $failedContainers -eq 0) `
         -Detail $(
             if ($pester.FailedCount) { ($pester.Failed | Select-Object -First 3 | ForEach-Object { $_.ExpandedPath }) -join '; ' }
             elseif ($notRun) { "$notRun тест(ов) не выполнено - нужны права администратора" }
+            elseif ($failedContainers) { "$failedContainers тест-файл(ов) не загрузились - их тесты не выполнялись" }
             else { '' })
 
     $countClaims = @(

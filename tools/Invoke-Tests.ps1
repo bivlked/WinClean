@@ -83,14 +83,24 @@ $result = Invoke-Pester -Configuration $config
 # skip there means something is actually wrong rather than "no admin rights".
 $notRun = $result.SkippedCount + $result.NotRunCount
 
+# A container that fails during DISCOVERY contributes no tests at all, so counting tests
+# alone cannot see it. Measured on Pester 5.7.1 with a deliberately unparsable test file:
+# Result=Failed and FailedContainersCount=1, while FailedCount, SkippedCount and
+# NotRunCount were all 0. Without this, a syntax error in a test file would delete that
+# file's entire coverage and still leave CI green.
+$failedContainers = $result.FailedContainersCount
+
 if (-not $Quiet) {
     Write-Host ""
-    Write-Host "Pester $($module.Version): $($result.PassedCount)/$($result.TotalCount) passed, $($result.FailedCount) failed, $notRun did not run"
+    Write-Host "Pester $($module.Version): $($result.PassedCount)/$($result.TotalCount) passed, $($result.FailedCount) failed, $notRun did not run, $failedContainers file(s) failed to load"
     if ($result.FailedCount -gt 0) {
         Write-Host "::error::$($result.FailedCount) test(s) failed"
     }
     if ($notRun -gt 0) {
         Write-Host "::error::$notRun test(s) did not run - coverage is missing"
+    }
+    if ($failedContainers -gt 0) {
+        Write-Host "::error::$failedContainers test file(s) failed to load - their tests never ran"
     }
 }
 
@@ -100,4 +110,4 @@ if ($Quiet) {
     $result
 }
 
-if ($FailOnProblem -and ($result.FailedCount -gt 0 -or $notRun -gt 0)) { exit 1 }
+if ($FailOnProblem -and ($result.FailedCount -gt 0 -or $notRun -gt 0 -or $failedContainers -gt 0)) { exit 1 }

@@ -72,6 +72,43 @@ path turned out to have been unreachable since it was written.
 - Stand tooling: `Deploy-StandRunner` ignored ssh's exit code, and `New-StandVM` accepted
   a PowerShell installation on file existence alone, ignoring msiexec's result
 
+Found by an independent review **of the fixes above**, before release:
+
+- **A winget that cannot start was the one silent path left in that block.** Only a
+  non-zero exit code was reported. When the winget entry is a Windows Apps stub that
+  passes `Test-Path` but will not launch, the job still completes, the error is swallowed
+  and no exit code is ever set - and the guard short-circuited on exactly that null. The
+  package list was then built from stale data without a word in the log
+- **A partial event-log enumeration failure still read as success.** The check used the
+  *filtered* list, so 40 readable channels out of 510 with 470 errors printed "Event logs
+  cleared (40 logs)". The unfiltered result decides now, and channels that could not be
+  listed are reported separately from channels that failed to clear
+- **The npm cache measurement had the defect this release fixed for browsers.** Both
+  sides used the walker that answers 0 for "empty" and for "unreadable" alike, so a cache
+  that became unreadable after the clean counted as fully freed
+- **The browser measurement subtracted two different file sets.** "Before" used the raw
+  walker (inaccessible files skipped silently), "after" used the checked one (refuses to
+  answer on any error), so a real deletion could land in the "nothing freed" branch. Both
+  sides are now measured per path with the same function, and a single unmeasurable
+  folder no longer discards the delta for all thirty. A second review pass caught the
+  first attempt at this: clamping each path at zero separately would have reported 100 MB
+  when one cache shrank by 100 MB while another was recreated and grew by 80 MB, so the
+  measurable pairs are summed first and clamped once
+- **Killing the restore-point child raced its own cleanup.** `Kill` returns once
+  termination has been requested, not once the process is gone, so the repair could read
+  the creation frequency while the dying child was still writing 0 into it, see a healthy
+  value, and delete the marker - producing exactly the damage the marker exists to record.
+  The wait is bounded, so a child that outlives it keeps the marker rather than being
+  assumed dead
+- **Storage Sense re-resolved its task by name while waiting**, quietly undoing the rule
+  that refuses to guess between same-named tasks; and a task that disappeared after five
+  seconds was reported as "did not finish within 120 seconds", a number that never
+  happened
+- **A test file that failed to load kept CI green.** Measured on Pester 5.7.1: a parse
+  error yields `Result=Failed` and `FailedContainersCount=1` while the failed, skipped and
+  not-run counters all stay at 0 - so counting tests alone could not see an entire test
+  file going missing. Both `tools/Invoke-Tests.ps1` and the release gate now check it
+
 ### Added
 
 - **`-SkipDiskCleanup`** skips only the Storage Sense / Disk Cleanup step. Until now the
@@ -89,9 +126,18 @@ path turned out to have been unreachable since it was written.
 
 ### Tests
 
-- 376 to 393 automated tests. New coverage: the junction guard (a link to a protected root
+- 376 to 426 automated tests. New coverage: the junction guard (a link to a protected root
   is refused, a harmless one is not), a fresh per-run statistics object, the registry value
   counter, and a mocked event-log enumeration failure
+- **The Storage Sense rewrite had no tests at all** - the largest gap in this release, and
+  the one place where a defect ("exit code 0 proves a cleanup happened") had already been
+  found. Its three decisions are now separate functions with 15 behavioural tests: which
+  task to use and when to refuse to guess, whether a run counts as a cleanup, and how the
+  wait ends. The wait no longer needs a scheduler or two real minutes to be tested
+- Three deliberate mutations were used to confirm the new tests can fail: removing the
+  free-space requirement, collapsing "task vanished" into "timed out", and letting the
+  selector pick the first of several same-named tasks. All three were caught, and the file
+  was restored by hash after each
 - Two logging tests could not fail: their only assertion sat inside `if (Test-Path $log)`,
   so a missing log file - the very defect they exist to catch - made them pass. Both were
   verified by mutation after the fix

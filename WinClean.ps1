@@ -1901,6 +1901,7 @@ function New-SystemRestorePoint {
         Set-RunMarker -Phase 'RestorePointFrequencyOverride' -Data @{ PreviousValue = $prevFreqOuter }
 
         $childKilled = $false
+        $childExited = $true    # only meaningful once a kill has been attempted
         try {
             $proc = Start-Process -FilePath 'powershell.exe' `
                 -ArgumentList @('-NoProfile', '-NoLogo', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', $encodedCommand) `
@@ -1910,6 +1911,13 @@ function New-SystemRestorePoint {
             if (-not $proc.WaitForExit($timeoutMs)) {
                 $proc.Kill($true)
                 $childKilled = $true
+                # v2.20, corrected in review: Kill returns once termination has been
+                # REQUESTED, not once the tree is gone. Without this wait the finally
+                # below could read the creation frequency while the dying child was still
+                # writing 0 into it, see a non-zero value, conclude there was nothing to
+                # repair and delete the marker - leaving the frequency pinned at 0 with no
+                # record of it, which is exactly the damage this mechanism exists for.
+                $childExited = $proc.WaitForExit(5000)
                 throw "restore point creation timed out after $($timeoutMs / 1000) seconds"
             }
 
@@ -1930,7 +1938,16 @@ function New-SystemRestorePoint {
             # without touching anything when the value is no longer 0, so verifying on the
             # normal path costs nothing and turns an assumption into a check.
             if (Restore-RestorePointFrequency -PreviousValue $prevFreqOuter) {
-                Clear-RunMarker
+                if ($childKilled -and -not $childExited) {
+                    # Raised in review: the wait above has a bound, and a child that
+                    # outlives it can still write the override AFTER this check passed.
+                    # Keeping the marker costs one repair attempt on the next run;
+                    # clearing it here would lose the only record that anything happened.
+                    Write-Log "Restore point child was killed but had not exited 5 seconds later - the marker is kept, because it can still re-apply the override after this check" -Level WARNING
+                    $script:Stats.WarningsCount++
+                } else {
+                    Clear-RunMarker
+                }
             } else {
                 $how = if ($childKilled) { 'was killed' } else { 'exited normally' }
                 Write-Log "Restore point child $how but its registry override could not be undone - the marker is kept so the next run retries" -Level WARNING
@@ -2242,10 +2259,26 @@ function Update-Applications {
                 Write-Log "Winget source update timed out - package list may be stale" -Level WARNING
                 $script:Stats.WarningsCount++
             } else {
+                # v2.20, corrected in review: "no usable result" is a failure in its own
+                # right. When the winget entry is a WindowsApps AppExecLink stub - passes
+                # Test-Path, but will not start once App Installer is deregistered - the
+                # job still reaches Completed, Receive-Job swallows the error and
+                # $LASTEXITCODE is never set, so the last output element is $null. The old
+                # guard short-circuited on exactly that and said nothing, which made an
+                # unusable winget the one silent path left in this block. Measured by the
+                # reviewer: one output element, and it was $null.
+                # [int] on a non-numeric last line would also have thrown; TryParse cannot.
+                $jobState = $job.State
                 $jobOutput = @($job | Receive-Job -ErrorAction SilentlyContinue)
                 $sourceExit = if ($jobOutput.Count -gt 0) { $jobOutput[-1] } else { $null }
-                if ($null -ne $sourceExit -and 0 -ne [int]$sourceExit) {
-                    Write-Log "Winget source update failed (exit code $sourceExit) - package list may be stale" -Level WARNING
+                $exitValue = 0
+                $exitKnown = $null -ne $sourceExit -and [int]::TryParse([string]$sourceExit, [ref]$exitValue)
+
+                if ($jobState -ne 'Completed' -or -not $exitKnown) {
+                    Write-Log "Winget source update produced no usable exit code (job state: $jobState) - package list may be stale" -Level WARNING
+                    $script:Stats.WarningsCount++
+                } elseif ($exitValue -ne 0) {
+                    Write-Log "Winget source update failed (exit code $exitValue) - package list may be stale" -Level WARNING
                     $script:Stats.WarningsCount++
                 }
             }
@@ -2533,9 +2566,6 @@ function Clear-BrowserCaches {
         # Get browser names for logging
         $browserNames = ($allPaths | Select-Object -ExpandProperty Browser -Unique) -join ', '
 
-        # Measure size before cleanup
-        $sizeBefore = ($allPaths | ForEach-Object { Get-FolderSize -Path $_.Path } | Measure-Object -Sum).Sum
-
         if ($ReportOnly) {
             # v2.18: $sizeBefore comes from Get-FolderSize, which returns 0 for BOTH an
             # empty cache and an unreadable one, so "Would clean ... - 0 B" announced a
@@ -2553,6 +2583,15 @@ function Clear-BrowserCaches {
                 }
             }
         } else {
+            # v2.20, corrected in review: both sides are now measured PER PATH with the
+            # SAME function. "Before" used Get-FolderSize (raw enumerator, inaccessible
+            # files silently skipped, reparse points excluded) while "after" used
+            # Get-FolderSizeChecked, so the two numbers did not describe the same set of
+            # files and a genuine deletion could be subtracted into the "nothing freed"
+            # branch. Measuring before only in this branch also stops ReportOnly from
+            # walking every cache twice.
+            $beforeMeasurements = @($allPaths | ForEach-Object { Get-FolderSizeChecked -Path $_.Path })
+
             # Actual cleanup
             $allPaths | ForEach-Object -Parallel {
                 $item = $_
@@ -2576,22 +2615,43 @@ function Clear-BrowserCaches {
             # every folder answered; otherwise the bytes stay unattributed instead of being
             # invented.
             $afterMeasurements = @($allPaths | ForEach-Object { Get-FolderSizeChecked -Path $_.Path })
-            $afterUnmeasured = @($afterMeasurements | Where-Object { $null -eq $_ }).Count
-            $sizeAfter = [long](($afterMeasurements | Where-Object { $null -ne $_ } | Measure-Object -Sum).Sum ?? 0)
 
-            # Protect against negative values (can happen if browser recreates files during cleanup)
-            $freedSpace = [math]::Max(0, $sizeBefore - $sizeAfter)
+            # Pair the two sides path by path. The previous rule discarded the delta for
+            # ALL caches when a single one of ~30 could not be measured; only the paths
+            # that actually failed are dropped now.
+            $measuredBefore = [long]0
+            $measuredAfter = [long]0
+            $afterUnmeasured = 0
+            for ($i = 0; $i -lt $allPaths.Count; $i++) {
+                $beforeOne = $beforeMeasurements[$i]
+                $afterOne = $afterMeasurements[$i]
+                if ($null -eq $beforeOne -or $null -eq $afterOne) {
+                    $afterUnmeasured++
+                    continue
+                }
+                $measuredBefore += $beforeOne
+                $measuredAfter += $afterOne
+            }
+
+            # Clamped once over the total, not per path (raised in review). TotalFreedBytes
+            # means net space reclaimed, so clamping each path separately would report
+            # 100 MB when one cache shrank by 100 MB while another was recreated and grew
+            # by 80 MB - inventing 80 MB of "freed" space the disk never got back.
+            $freedSpace = [math]::Max(0, $measuredBefore - $measuredAfter)
 
             # Update statistics with actual freed space (not estimated)
-            if ($afterUnmeasured -gt 0) {
-                Write-Log "Browser caches ($browserNames): cleaned, but $afterUnmeasured folder(s) could not be measured afterwards - freed space not counted" -Level DETAIL
-            } elseif ($freedSpace -gt 0) {
+            if ($freedSpace -gt 0) {
                 $script:Stats.TotalFreedBytes += $freedSpace
                 if (-not $script:Stats.FreedByCategory.ContainsKey("Browser")) {
                     $script:Stats.FreedByCategory["Browser"] = 0
                 }
                 $script:Stats.FreedByCategory["Browser"] += $freedSpace
                 Write-Log "Browser caches cleaned ($browserNames) - $(Format-FileSize $freedSpace)" -Level SUCCESS
+                if ($afterUnmeasured -gt 0) {
+                    Write-Log "Browser caches: $afterUnmeasured folder(s) could not be measured - their share is not included above" -Level DETAIL
+                }
+            } elseif ($afterUnmeasured -gt 0) {
+                Write-Log "Browser caches ($browserNames): cleaned, but $afterUnmeasured folder(s) could not be measured - freed space not counted" -Level DETAIL
             } else {
                 # v2.16: was logged as SUCCESS. A running browser locks its cache, so
                 # "cleaned" with zero freed was a plain lie to the user
@@ -2989,8 +3049,14 @@ function Clear-EventLogs {
         # v2.20: keep the enumeration errors. A wholesale failure (Event Log service down,
         # WMI broken) produced an empty list, zero failed clears and therefore the success
         # branch: "Event logs cleared (0 logs)" while nothing was touched.
+        # v2.20, corrected in review: the enumeration result is kept BEFORE filtering.
+        # Deciding on the filtered list meant that 40 readable channels out of 510 with
+        # 470 enumeration errors produced a plain "Event logs cleared (40 logs)" SUCCESS,
+        # and that an empty filter result on a perfectly healthy machine was reported as
+        # a failed enumeration. Those are different states and now read differently.
         $enumErrors = $null
-        $logs = Get-WinEvent -ListLog * -ErrorAction SilentlyContinue -ErrorVariable enumErrors | Where-Object {
+        $allLogs = @(Get-WinEvent -ListLog * -ErrorAction SilentlyContinue -ErrorVariable enumErrors)
+        $logs = $allLogs | Where-Object {
             $_.RecordCount -gt 0 -and
             $_.IsEnabled -and
             $_.LogName -ne 'Security' -and  # Keep the main Security log (exact match)
@@ -3008,18 +3074,37 @@ function Clear-EventLogs {
             }
         }
 
-        if (-not $logs -and $enumErrors) {
-            # Individual unreadable channels are normal on a healthy system, so only a
-            # total failure counts: no usable channel at all AND errors while listing.
-            Write-Log "Event logs: channels could not be enumerated ($($enumErrors.Count) error(s)) - nothing was cleared" -Level WARNING
+        $enumErrorCount = @($enumErrors).Count
+
+        if ($allLogs.Count -eq 0) {
+            # Nothing could be listed at all - the Event Log service is down or the API
+            # is broken. Clearing zero channels is not a clean system.
+            Write-Log "Event logs: channels could not be enumerated ($enumErrorCount error(s)) - nothing was cleared" -Level WARNING
             $script:Stats.WarningsCount++
-        } elseif ($failedCount -gt 0) {
-            Write-Log "Event logs cleared: $clearedCount, failed: $failedCount" -Level WARNING
-            $script:Stats.WarningsCount++
-        } elseif ($clearedCount -eq 0) {
-            Write-Log "Event logs: no channel needed clearing" -Level DETAIL
         } else {
-            Write-Log "Event logs cleared ($clearedCount logs)" -Level SUCCESS
+            # Partial loss is reported separately from the clearing result, because the
+            # channels that failed to list were never even candidates and their records
+            # are still on disk.
+            #
+            # DETAIL, not WARNING (raised in review): a listing error is a gap in coverage,
+            # not the failure of an operation we claimed to perform, and this machine is
+            # not evidence about anyone else's - measured here on 25H2 it is 510 channels
+            # with zero errors, but third-party or protected channels can error out
+            # routinely elsewhere, and a warning that fires every run teaches people to
+            # ignore warnings. Total failure below stays a warning. Worded as errors rather
+            # than channels because that is what was counted.
+            if ($enumErrorCount -gt 0) {
+                Write-Log "Event logs: $enumErrorCount error(s) while listing channels - whatever they refer to was never considered for clearing" -Level DETAIL
+            }
+
+            if ($failedCount -gt 0) {
+                Write-Log "Event logs cleared: $clearedCount, failed: $failedCount" -Level WARNING
+                $script:Stats.WarningsCount++
+            } elseif ($clearedCount -eq 0) {
+                Write-Log "Event logs: no channel needed clearing" -Level DETAIL
+            } else {
+                Write-Log "Event logs cleared ($clearedCount logs)" -Level SUCCESS
+            }
         }
     } catch {
         Write-Log "Error clearing event logs: $_" -Level WARNING
@@ -3369,15 +3454,22 @@ function Clear-DeveloperCaches {
             $npm = Get-Command npm -ErrorAction SilentlyContinue
             if ($npm) {
                 try {
-                    $sizeBefore = Get-FolderSize $npmCache
+                    # v2.20, corrected in review: both sides are measured with the checked
+                    # variant. Get-FolderSize answers 0 for "empty" and for "could not
+                    # read" alike, so a cache that became unreadable after the clean - npm
+                    # recreating it, ACLs changing mid-run - produced "freed everything we
+                    # measured before" and put invented bytes into TotalFreedBytes. The
+                    # same defect was fixed for browser caches in this release; npm kept it.
+                    $sizeBefore = Get-FolderSizeChecked -Path $npmCache
                     & npm cache clean --force 2>&1 | Out-Null
                     # v2.20: npm fails without throwing (EPERM on a locked cache is the
                     # common case). The exit code was never read, so a failed clean that
                     # freed nothing landed in the "else" branch below and was logged as
                     # SUCCESS - the same lie fixed for browser caches in v2.16.
                     $npmExit = $LASTEXITCODE
-                    $sizeAfter = Get-FolderSize $npmCache
-                    $freed = $sizeBefore - $sizeAfter
+                    $sizeAfter = Get-FolderSizeChecked -Path $npmCache
+                    $npmMeasured = ($null -ne $sizeBefore -and $null -ne $sizeAfter)
+                    $freed = if ($npmMeasured) { [math]::Max(0, $sizeBefore - $sizeAfter) } else { 0 }
 
                     # Credit whatever really went, whether or not npm then failed
                     if ($freed -gt 0) {
@@ -3399,6 +3491,10 @@ function Clear-DeveloperCaches {
                         Remove-FolderContent -Path $npmCache -Category "Developer" -Description "npm cache"
                     } elseif ($freed -gt 0) {
                         Write-Log "npm cache cleaned - $(Format-FileSize $freed)" -Level SUCCESS
+                    } elseif (-not $npmMeasured) {
+                        # Cleaned, but "how much" has no honest answer - say that instead
+                        # of calling an unreadable cache an empty one.
+                        Write-Log "npm cache cleaned, but its size could not be measured - freed space not counted" -Level DETAIL
                     } else {
                         # npm succeeded and there was nothing to reclaim. Not a cleanup
                         # success worth announcing, and definitely not freed bytes.
@@ -4311,6 +4407,117 @@ function Invoke-DISMCleanup {
     }
 }
 
+function Select-StorageSenseTask {
+    <#
+    .SYNOPSIS
+        Picks the single Storage Sense task out of a lookup result
+    .DESCRIPTION
+        Pure decision, split out in v2.20 so the rule can be tested without a scheduler.
+        Windows ships exactly one task with this name; silently taking the first of
+        several means starting something nobody identified, so ambiguity yields no task
+        and says why.
+        Returns Task (the task or $null) and Reason ('ok' | 'none' | 'ambiguous').
+    #>
+    param([object[]]$Tasks)
+
+    $found = @($Tasks | Where-Object { $null -ne $_ })
+    if ($found.Count -eq 0) { return @{ Task = $null; Reason = 'none' } }
+    if ($found.Count -gt 1) { return @{ Task = $null; Reason = 'ambiguous' } }
+    return @{ Task = $found[0]; Reason = 'ok' }
+}
+
+function Get-StorageSenseVerdict {
+    <#
+    .SYNOPSIS
+        Decides whether a Storage Sense run counts as a cleanup that actually happened
+    .DESCRIPTION
+        Pure decision, split out in v2.20 so the rule can be tested. Two things must both
+        hold before Disk Cleanup is skipped: the task reported success, AND free space
+        actually grew.
+        A result of 0 on its own is not evidence. Storage Sense obeys its own settings;
+        switched off in Settings, the task still starts, does nothing it is not allowed to
+        do, and exits 0. Skipping all 23 cleanmgr handlers on that basis would free
+        nothing and report success - the defect this release exists to remove, and one
+        that only became reachable once this branch stopped being dead code.
+        $null TaskResult means "could not be read" and $null FreedBytes means "could not
+        be measured"; neither may be read as success.
+        Returns Done ($true only when cleanmgr may be skipped) and Reason
+        ('unreadable' | 'failed' | 'not-measured' | 'nothing-freed' | 'success').
+    #>
+    param(
+        [AllowNull()][object]$TaskResult,
+        [AllowNull()][object]$FreedBytes
+    )
+
+    if ($null -eq $TaskResult) { return @{ Done = $false; Reason = 'unreadable' } }
+    if (0 -ne [int]$TaskResult) { return @{ Done = $false; Reason = 'failed' } }
+    if ($null -eq $FreedBytes) { return @{ Done = $false; Reason = 'not-measured' } }
+    if ([long]$FreedBytes -le 0) { return @{ Done = $false; Reason = 'nothing-freed' } }
+    return @{ Done = $true; Reason = 'success' }
+}
+
+function Wait-StorageSenseTask {
+    <#
+    .SYNOPSIS
+        Waits for the Storage Sense task to stop running
+    .DESCRIPTION
+        Split out in v2.20 so the wait can be tested without a scheduler and without
+        actually waiting two minutes: the caller injects how to read the task, how to
+        read its info, and how to wait.
+
+        'vanished' is a distinct outcome because the loop used to break on a task that
+        disappeared while leaving its finished flag false, so the caller announced "did
+        not finish within 120 seconds" after five - a number that never happened.
+
+        Returns Outcome ('finished' | 'vanished' | 'timeout'), Elapsed seconds and the
+        last Task seen.
+    #>
+    param(
+        [scriptblock]$GetTask,
+        [scriptblock]$GetTaskInfo,
+        [AllowNull()][object]$LastRunBefore,
+        [int]$TimeoutSeconds = 120,
+        [int]$CheckInterval = 5,
+        [scriptblock]$Wait = { param($seconds) Start-Sleep -Seconds $seconds }
+    )
+
+    $elapsed = 0
+    $wasRunning = $false
+    $task = $null
+
+    while ($elapsed -lt $TimeoutSeconds) {
+        & $Wait $CheckInterval
+        $elapsed += $CheckInterval
+
+        # Task states are language-independent: Ready, Running, Disabled
+        $task = & $GetTask
+        if (-not $task) {
+            return @{ Outcome = 'vanished'; Elapsed = $elapsed; Task = $null }
+        }
+
+        if ($task.State -eq 'Running') {
+            $wasRunning = $true
+            continue
+        }
+
+        if ($wasRunning) {
+            # Was running and is not any more
+            return @{ Outcome = 'finished'; Elapsed = $elapsed; Task = $task }
+        }
+
+        if ($elapsed -ge 10) {
+            # Never observed as Running - it may simply have been quicker than the poll
+            # interval. The task's own LastRunTime moving is the evidence.
+            $infoNow = & $GetTaskInfo $task
+            if ($infoNow -and (-not $LastRunBefore -or $infoNow.LastRunTime -ne $LastRunBefore)) {
+                return @{ Outcome = 'finished'; Elapsed = $elapsed; Task = $task }
+            }
+        }
+    }
+
+    return @{ Outcome = 'timeout'; Elapsed = $elapsed; Task = $task }
+}
+
 function Invoke-StorageSense {
     <#
     .SYNOPSIS
@@ -4365,12 +4572,23 @@ function Invoke-StorageSense {
     # Windows ships exactly one. If a machine somehow has more, say so and take none:
     # silently picking the first of several tasks with the same name means starting
     # something nobody identified (raised in review).
-    if ($ssTasks.Count -gt 1) {
+    $ssSelection = Select-StorageSenseTask -Tasks $ssTasks
+    if ($ssSelection.Reason -eq 'ambiguous') {
         Write-Log "Storage Sense: $($ssTasks.Count) tasks with that name ($(($ssTasks | ForEach-Object { $_.TaskPath }) -join ', ')) - not guessing, using Disk Cleanup" -Level INFO
-        $task = $null
-    } else {
-        $task = $ssTasks | Select-Object -First 1
     }
+    $task = $ssSelection.Task
+
+    # v2.20, corrected in review: pin the exact task. Later lookups searched by name only
+    # and took the first hit, which quietly undid the refusal-to-guess rule above the
+    # moment a second same-named task appeared while we were waiting.
+    $ssTaskPath = if ($task) { $task.TaskPath } else { $null }
+
+    # Raised in review, then measured: -TaskPath rejects $null with a binding error that
+    # -ErrorAction SilentlyContinue does NOT suppress, so a task object without a path
+    # would turn every later lookup into an exception - and the wait would read that as
+    # "the task vanished". The path is only passed when there is one.
+    $ssLookup = @{ TaskName = $ssTaskName; ErrorAction = 'SilentlyContinue' }
+    if ($ssTaskPath) { $ssLookup['TaskPath'] = $ssTaskPath }
 
     # Verified below; only a task that demonstrably ran successfully skips cleanmgr
     $storageSenseDone = $false
@@ -4404,44 +4622,19 @@ function Invoke-StorageSense {
         }
 
         if ($started) {
-            # Wait for task to complete with timeout
             $timeout = 120  # 2 minutes max
-            $elapsed = 0
-            $checkInterval = 5
-            $wasRunning = $false
-            $finished = $false
+            $waitResult = Wait-StorageSenseTask `
+                -GetTask { @(Get-ScheduledTask @ssLookup) | Select-Object -First 1 } `
+                -GetTaskInfo { param($t) $t | Get-ScheduledTaskInfo -ErrorAction SilentlyContinue } `
+                -LastRunBefore $lastRunBefore `
+                -TimeoutSeconds $timeout `
+                -CheckInterval 5
+            # Only overwrite when the wait actually saw a task: on 'vanished' the original
+            # selection is kept, so the fallback below does not also announce "task not
+            # found" for something that was found and then disappeared.
+            if ($waitResult.Task) { $task = $waitResult.Task }
 
-            while ($elapsed -lt $timeout) {
-                Start-Sleep -Seconds $checkInterval
-                $elapsed += $checkInterval
-
-                # Get current task state (language-independent: Ready, Running, Disabled)
-                $task = @(Get-ScheduledTask -TaskName $ssTaskName -ErrorAction SilentlyContinue) | Select-Object -First 1
-                if (-not $task) { break }
-
-                if ($task.State -eq 'Running') {
-                    $wasRunning = $true
-                    continue
-                }
-
-                if ($wasRunning) {
-                    # Was running and is not any more
-                    $finished = $true
-                    break
-                }
-
-                if ($elapsed -ge 10) {
-                    # Never observed as Running - it may simply have been quicker than the
-                    # poll interval. The task's own LastRunTime moving is the evidence.
-                    $infoNow = $task | Get-ScheduledTaskInfo -ErrorAction SilentlyContinue
-                    if ($infoNow -and (-not $lastRunBefore -or $infoNow.LastRunTime -ne $lastRunBefore)) {
-                        $finished = $true
-                        break
-                    }
-                }
-            }
-
-            if ($finished) {
+            if ($waitResult.Outcome -eq 'finished') {
                 # v2.20 fail-closed: a task that ran and FAILED used to be logged as
                 # "Storage Sense completed" and cleanmgr was skipped - a silent failure that
                 # would have left the machine uncleaned while the run reported success.
@@ -4449,34 +4642,34 @@ function Invoke-StorageSense {
                 $infoAfter = $task | Get-ScheduledTaskInfo -ErrorAction SilentlyContinue
                 $taskResult = if ($infoAfter) { $infoAfter.LastTaskResult } else { $null }
 
-                if ($null -eq $taskResult) {
-                    Write-Log "Storage Sense ran but its result could not be read - using Disk Cleanup as well" -Level INFO
-                } elseif ($taskResult -eq 0) {
-                    # v2.20, corrected in review: exit code 0 is not evidence of cleanup.
-                    # Storage Sense obeys its own settings, and when it is switched off in
-                    # Settings the task still starts, does nothing it is not allowed to do,
-                    # and exits 0. Skipping the fallback on that basis would suppress all
-                    # 23 cleanmgr handlers and free nothing - the exact "reported success
-                    # while doing nothing" this release exists to remove, and newly
-                    # reachable now that this branch is no longer dead code.
-                    $freedBySense = 0
-                    try {
-                        $freeAfter = (Get-PSDrive -Name $sysDriveLetter -ErrorAction Stop).Free
-                        if ($null -ne $freeBefore) { $freedBySense = $freeAfter - $freeBefore }
-                    } catch { $freedBySense = 0 }
+                # $null means "could not be measured", which is not the same answer as
+                # "freed nothing" - the old code collapsed both into 0.
+                $freedBySense = $null
+                try {
+                    $freeAfter = (Get-PSDrive -Name $sysDriveLetter -ErrorAction Stop).Free
+                    if ($null -ne $freeBefore) { $freedBySense = $freeAfter - $freeBefore }
+                } catch { $freedBySense = $null }
 
-                    if ($freedBySense -gt 0) {
-                        Write-Log "Storage Sense completed - $(Format-FileSize $freedBySense)" -Level SUCCESS
-                        $storageSenseDone = $true
-                    } else {
-                        Write-Log "Storage Sense reported success but freed nothing measurable - running Disk Cleanup as well" -Level INFO
-                    }
-                } else {
-                    Write-Log ("Storage Sense failed (task result 0x{0:X8}) - using Disk Cleanup instead" -f $taskResult) -Level INFO
+                $verdict = Get-StorageSenseVerdict -TaskResult $taskResult -FreedBytes $freedBySense
+                $storageSenseDone = $verdict.Done
+
+                switch ($verdict.Reason) {
+                    'success'      { Write-Log "Storage Sense completed - $(Format-FileSize $freedBySense)" -Level SUCCESS }
+                    'unreadable'   { Write-Log "Storage Sense ran but its result could not be read - using Disk Cleanup as well" -Level INFO }
+                    'failed'       { Write-Log ("Storage Sense failed (task result 0x{0:X8}) - using Disk Cleanup instead" -f $taskResult) -Level INFO }
+                    'not-measured' { Write-Log "Storage Sense reported success but free space could not be measured - running Disk Cleanup as well" -Level INFO }
+                    'nothing-freed' { Write-Log "Storage Sense reported success but freed nothing measurable - running Disk Cleanup as well" -Level INFO }
+                    default        { Write-Log "Storage Sense verdict '$($verdict.Reason)' not recognised - running Disk Cleanup as well" -Level INFO }
                 }
+            } elseif ($waitResult.Outcome -eq 'vanished') {
+                # v2.20, corrected in review: this path used to fall into the timeout
+                # message below, so a task that disappeared after five seconds was
+                # reported as having failed to finish within 120 - a number that never
+                # happened on that run.
+                Write-Log "Storage Sense task disappeared while being watched - using Disk Cleanup instead" -Level INFO
             } else {
                 Write-Log "Storage Sense did not finish within $timeout seconds - using Disk Cleanup instead" -Level INFO
-                $task = @(Get-ScheduledTask -TaskName $ssTaskName -ErrorAction SilentlyContinue) | Select-Object -First 1
+                $task = @(Get-ScheduledTask @ssLookup) | Select-Object -First 1
                 if ($task -and $task.State -eq 'Running') {
                     $task | Stop-ScheduledTask -ErrorAction SilentlyContinue
                     Write-Log "Storage Sense task stopped" -Level INFO

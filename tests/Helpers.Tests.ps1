@@ -1082,4 +1082,153 @@ Describe "Show-Banner" -Tag "Unit", "Helper", "V219" {
     }
 }
 
+# The Storage Sense decision logic. Until v2.20 this branch was unreachable (it looked
+# the task up under a folder it does not live in), so the whole of it shipped for six
+# versions without a single test - and the first defect found in it after it came alive
+# was "exit code 0 counted as proof that a cleanup happened". These cover the rules that
+# decide whether all 23 cleanmgr handlers get skipped.
+
+Describe "Select-StorageSenseTask" -Tag "Unit", "Helper", "V220" {
+
+    It "returns the single task when exactly one was found" {
+        $one = [pscustomobject]@{ TaskName = 'StorageSense'; TaskPath = '\Microsoft\Windows\DiskFootprint\' }
+        $result = Select-StorageSenseTask -Tasks @($one)
+        $result.Reason | Should -Be 'ok'
+        $result.Task.TaskPath | Should -Be '\Microsoft\Windows\DiskFootprint\'
+    }
+
+    It "reports 'none' and no task when nothing was found" {
+        $result = Select-StorageSenseTask -Tasks @()
+        $result.Reason | Should -Be 'none'
+        $result.Task | Should -BeNullOrEmpty
+    }
+
+    It "refuses to guess when several tasks share the name" {
+        # Starting the first of several same-named tasks means starting something nobody
+        # identified. The rule is "take none", not "take one".
+        $tasks = @(
+            [pscustomobject]@{ TaskName = 'StorageSense'; TaskPath = '\Microsoft\Windows\DiskFootprint\' }
+            [pscustomobject]@{ TaskName = 'StorageSense'; TaskPath = '\Custom\' }
+        )
+        $result = Select-StorageSenseTask -Tasks $tasks
+        $result.Reason | Should -Be 'ambiguous'
+        $result.Task | Should -BeNullOrEmpty
+    }
+
+    It "ignores null entries in the lookup result" {
+        $one = [pscustomobject]@{ TaskName = 'StorageSense'; TaskPath = '\Microsoft\Windows\DiskFootprint\' }
+        $result = Select-StorageSenseTask -Tasks @($null, $one, $null)
+        $result.Reason | Should -Be 'ok'
+    }
+}
+
+Describe "Get-StorageSenseVerdict" -Tag "Unit", "Helper", "V220" {
+
+    It "does NOT accept a successful exit code as proof that anything was cleaned" {
+        # The defect this whole rule exists for: Storage Sense obeys its own settings, so
+        # when it is switched off in Settings the task starts, does nothing and exits 0.
+        # Treating that as done suppresses every cleanmgr handler and frees nothing.
+        $verdict = Get-StorageSenseVerdict -TaskResult 0 -FreedBytes 0
+        $verdict.Done | Should -BeFalse
+        $verdict.Reason | Should -Be 'nothing-freed'
+    }
+
+    It "accepts success only when free space actually grew" {
+        $verdict = Get-StorageSenseVerdict -TaskResult 0 -FreedBytes ([long]5MB)
+        $verdict.Done | Should -BeTrue
+        $verdict.Reason | Should -Be 'success'
+    }
+
+    It "is fail-closed on a non-zero task result" {
+        # 0x80040154 is what this task actually returns on the maintainer's workstation
+        $verdict = Get-StorageSenseVerdict -TaskResult 0x80040154 -FreedBytes ([long]5MB)
+        $verdict.Done | Should -BeFalse
+        $verdict.Reason | Should -Be 'failed'
+    }
+
+    It "is fail-closed when the task result could not be read" {
+        $verdict = Get-StorageSenseVerdict -TaskResult $null -FreedBytes ([long]5MB)
+        $verdict.Done | Should -BeFalse
+        $verdict.Reason | Should -Be 'unreadable'
+    }
+
+    It "distinguishes 'could not measure' from 'freed nothing'" {
+        $verdict = Get-StorageSenseVerdict -TaskResult 0 -FreedBytes $null
+        $verdict.Done | Should -BeFalse
+        $verdict.Reason | Should -Be 'not-measured'
+    }
+
+    It "treats a shrinking drive as no cleanup rather than as success" {
+        $verdict = Get-StorageSenseVerdict -TaskResult 0 -FreedBytes ([long](-1MB))
+        $verdict.Done | Should -BeFalse
+        $verdict.Reason | Should -Be 'nothing-freed'
+    }
+}
+
+Describe "Wait-StorageSenseTask" -Tag "Unit", "Helper", "V220" {
+
+    # No real waiting: the wait itself is injected, which is the reason this loop was
+    # split out of Invoke-StorageSense at all.
+    BeforeEach {
+        $script:wssCalls = 0
+        $script:noWait = { }
+    }
+
+    It "reports 'finished' once a running task stops" {
+        $getTask = {
+            $script:wssCalls++
+            if ($script:wssCalls -lt 3) {
+                [pscustomobject]@{ State = 'Running' }
+            } else {
+                [pscustomobject]@{ State = 'Ready' }
+            }
+        }
+        $result = Wait-StorageSenseTask -GetTask $getTask -GetTaskInfo { param($t) $null } `
+            -LastRunBefore ([datetime]'2026-07-22 10:00') -TimeoutSeconds 60 -CheckInterval 5 -Wait $script:noWait
+        $result.Outcome | Should -Be 'finished'
+        $result.Elapsed | Should -Be 15
+    }
+
+    It "reports 'vanished' with the real elapsed time, not the full timeout" {
+        # The bug this covers: the loop used to break on a disappearing task while leaving
+        # its finished flag false, so the caller announced "did not finish within 120
+        # seconds" after ten - a number that never happened on that run.
+        $getTask = {
+            $script:wssCalls++
+            if ($script:wssCalls -eq 1) { [pscustomobject]@{ State = 'Running' } } else { $null }
+        }
+        $result = Wait-StorageSenseTask -GetTask $getTask -GetTaskInfo { param($t) $null } `
+            -LastRunBefore $null -TimeoutSeconds 120 -CheckInterval 5 -Wait $script:noWait
+        $result.Outcome | Should -Be 'vanished'
+        $result.Elapsed | Should -Be 10
+        $result.Task | Should -BeNullOrEmpty
+    }
+
+    It "reports 'timeout' when the task never stops running" {
+        $result = Wait-StorageSenseTask -GetTask { [pscustomobject]@{ State = 'Running' } } `
+            -GetTaskInfo { param($t) $null } -LastRunBefore $null `
+            -TimeoutSeconds 20 -CheckInterval 5 -Wait $script:noWait
+        $result.Outcome | Should -Be 'timeout'
+        $result.Elapsed | Should -Be 20
+    }
+
+    It "accepts a moved LastRunTime as evidence for a task too quick to be seen running" {
+        $result = Wait-StorageSenseTask -GetTask { [pscustomobject]@{ State = 'Ready' } } `
+            -GetTaskInfo { param($t) [pscustomobject]@{ LastRunTime = [datetime]'2026-07-22 11:00' } } `
+            -LastRunBefore ([datetime]'2026-07-22 10:00') -TimeoutSeconds 60 -CheckInterval 5 -Wait $script:noWait
+        $result.Outcome | Should -Be 'finished'
+        # Not before the 10-second mark: a task that was never seen running needs the
+        # evidence, and the first poll is too early to distinguish it from a slow start
+        $result.Elapsed | Should -Be 10
+    }
+
+    It "does not call a task finished when LastRunTime never moved" {
+        $sameTime = [datetime]'2026-07-22 10:00'
+        $result = Wait-StorageSenseTask -GetTask { [pscustomobject]@{ State = 'Ready' } } `
+            -GetTaskInfo { param($t) [pscustomobject]@{ LastRunTime = $sameTime } } `
+            -LastRunBefore $sameTime -TimeoutSeconds 20 -CheckInterval 5 -Wait $script:noWait
+        $result.Outcome | Should -Be 'timeout'
+    }
+}
+
 #endregion

@@ -1192,3 +1192,123 @@ Describe "v2.20: an operation that did nothing does not report success" -Tag "Fi
 }
 
 #endregion
+
+#region V220R: findings from the pre-release review of v2.20
+
+Describe "v2.20 review: measurements and failures answer honestly" -Tag "Fix", "V220R" {
+    <#
+    These cover the defects an independent review found in the v2.20 fixes themselves.
+    Behavioural coverage for the Storage Sense decisions lives in Helpers.Tests.ps1
+    (Select-StorageSenseTask / Get-StorageSenseVerdict / Wait-StorageSenseTask); what is
+    left here is code that cannot be reached without a real scheduler, browser or winget.
+    #>
+
+    Context "Browser caches: both sides of the subtraction describe the same files" {
+        It "Does not measure 'before' with the raw walker and 'after' with the checked one" {
+            $body = Get-FunctionBody -Name 'Clear-BrowserCaches'
+            # Get-FolderSize skips inaccessible files silently; Get-FolderSizeChecked
+            # refuses to answer at all. Mixing them subtracted two different file sets.
+            $body | Should -Not -Match 'sizeBefore\s*=.*Get-FolderSize\s'
+        }
+
+        It "Pairs the measurements per path instead of discarding the whole delta" {
+            $body = Get-FunctionBody -Name 'Clear-BrowserCaches'
+            $body | Should -Match '\$beforeMeasurements'
+            $body | Should -Match '\$afterUnmeasured\+\+'
+        }
+    }
+
+    Context "npm cache: an unreadable cache is not an emptied one" {
+        It "Measures both sides with the checked variant" {
+            $body = Get-FunctionBody -Name 'Clear-DeveloperCaches'
+            $body | Should -Match '\$sizeBefore = Get-FolderSizeChecked'
+            $body | Should -Match '\$sizeAfter = Get-FolderSizeChecked'
+        }
+
+        It "Says so instead of calling it empty when the size is unknown" {
+            $body = Get-FunctionBody -Name 'Clear-DeveloperCaches'
+            $body | Should -Match '\$npmMeasured'
+        }
+    }
+
+    Context "Event logs: a partial enumeration failure is not a success" {
+        It "Decides on the unfiltered channel list" {
+            $body = Get-FunctionBody -Name 'Clear-EventLogs'
+            $body | Should -Match '\$allLogs\.Count -eq 0'
+            # The old discriminator read the FILTERED list, so 40 readable channels out of
+            # 510 with 470 errors produced a plain success line
+            $body | Should -Not -Match 'if \(-not \$logs -and \$enumErrors\)'
+        }
+
+        It "Reports channels that could not be listed separately from clearing failures" {
+            $body = Get-FunctionBody -Name 'Clear-EventLogs'
+            $body | Should -Match '\$enumErrorCount'
+        }
+    }
+
+    Context "winget: an unusable executable is reported, not passed over" {
+        It "Treats a missing exit code as a failure rather than short-circuiting on null" {
+            $body = Get-FunctionBody -Name 'Update-Applications'
+            $body | Should -Match '\[int\]::TryParse'
+            $body | Should -Match '\$jobState'
+            # The old guard: a null exit code silently satisfied it
+            $body | Should -Not -Match '0 -ne \[int\]\$sourceExit'
+        }
+    }
+
+    Context "Restore point: the killed child is gone before the registry is judged" {
+        It "Waits for the process to actually exit after Kill" {
+            $body = Get-FunctionBody -Name 'New-SystemRestorePoint'
+            # Ordering, not proximity: a distance-bounded regex would break the next time
+            # the comment between the two lines grows.
+            $killAt = $body.IndexOf('Kill($true)')
+            $waitAt = $body.IndexOf('WaitForExit(5000)')
+            $killAt | Should -BeGreaterOrEqual 0
+            $waitAt | Should -BeGreaterThan $killAt
+        }
+    }
+
+    Context "Storage Sense: the task is pinned and the decisions are delegated" {
+        It "Looks the task up by name alone exactly once - the initial discovery" {
+            $body = Get-FunctionBody -Name 'Invoke-StorageSense'
+            $byNameOnly = [regex]::Matches($body, 'Get-ScheduledTask -TaskName \$ssTaskName').Count
+            $byNameOnly | Should -Be 1
+            # Every later lookup goes through the pinned parameter set
+            [regex]::Matches($body, 'Get-ScheduledTask @ssLookup').Count | Should -BeGreaterThan 1
+        }
+
+        It "Never passes a null TaskPath, which throws a binding error -ErrorAction cannot suppress" {
+            $body = Get-FunctionBody -Name 'Invoke-StorageSense'
+            $body | Should -Match "if \(\`$ssTaskPath\) \{ \`$ssLookup\['TaskPath'\] = \`$ssTaskPath \}"
+        }
+
+        It "Uses the helpers that carry the tested rules" {
+            $body = Get-FunctionBody -Name 'Invoke-StorageSense'
+            $body | Should -Match 'Select-StorageSenseTask'
+            $body | Should -Match 'Get-StorageSenseVerdict'
+            $body | Should -Match 'Wait-StorageSenseTask'
+        }
+
+        It "Distinguishes a task that disappeared from one that ran out of time" {
+            $body = Get-FunctionBody -Name 'Invoke-StorageSense'
+            $body | Should -Match "'vanished'"
+        }
+    }
+
+    Context "A test file that fails to load cannot slip past green" {
+        It "Invoke-Tests fails the run on a container that never produced tests" {
+            # Measured on Pester 5.7.1: a parse error gives Result=Failed and
+            # FailedContainersCount=1 while Failed/Skipped/NotRun are all 0
+            $text = Get-Content (Join-Path $PSScriptRoot '..' 'tools' 'Invoke-Tests.ps1') -Raw
+            $text | Should -Match 'FailedContainersCount'
+            $text | Should -Match '\$failedContainers -gt 0'
+        }
+
+        It "The release gate applies the same rule as CI" {
+            $text = Get-Content (Join-Path $PSScriptRoot '..' 'tools' 'Invoke-ReleaseCheck.ps1') -Raw
+            $text | Should -Match 'FailedContainersCount'
+        }
+    }
+}
+
+#endregion
