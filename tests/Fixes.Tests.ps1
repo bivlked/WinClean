@@ -1390,6 +1390,16 @@ Describe "v2.20: an operation that did nothing does not report success" -Tag "Fi
             $retAt | Should -BeGreaterThan $setAt -Because 'the caller must see the marker already set'
         }
 
+        It "A deliberate skip is not reported as an abort" {
+            # -SkipCleanup suppresses the whole DeepSystemCleanup phase, so Invoke-StorageSense
+            # never runs and never assigns a status - leaving the 'not-run' default, which the
+            # schema documents as "the run aborted before reaching it". Raised in review; the
+            # round-trip test cannot see this because it assigns values by hand.
+            $body = Get-FunctionBody -Name 'Start-WinClean'
+            $code = ($body -split "`n" | Where-Object { $_ -notmatch '^\s*#' }) -join "`n"
+            $code | Should -Match "if \(\`$SkipCleanup\) \{ \`$script:Stats\.DiskCleanupStatus = 'skipped-cleanup-group' \}"
+        }
+
         It "The completion latch is reset for every run" {
             # Deleting the reset survived: a second Start-WinClean in one session would
             # then silently produce no result JSON, no summary and no handle release,

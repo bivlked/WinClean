@@ -384,8 +384,10 @@ function New-RunStats {
     # 'unknown' must not be mistaken for a verified state by consumers of the JSON
     ControlledFolderAccess = 'unknown'
     Aborted              = $null     # v2.17: set when the run stops before finishing
-    # v2.20: cleanmgr outlived its timeout and is still deleting in the background. The
-    # totals reported by this run are partial, and a consumer must not read them as final.
+    # v2.20: the wait expired without cleanmgr either exiting or being seen to go idle,
+    # so it was left running. The totals may be partial and must not be read as final.
+    # Note this does NOT assert it was observed working - the same branch catches a
+    # machine where activity could not be measured at all (raised in review).
     DiskCleanupPending   = $false
     # v2.22: how the Storage Sense / Disk Cleanup step actually ended. DiskCleanupPending
     # alone could not tell "still visibly deleting" from "resident but doing nothing", and
@@ -393,8 +395,9 @@ function New-RunStats {
     # published as partial.
     # Same shape and reasoning as AppUpdatesStatus (v2.21): when a boolean starts covering
     # two different truths, the fix is a status, not a cleverer boolean.
-    # 'not-run' | 'skipped-parameter' | 'storage-sense' | 'completed' |
-    # 'idle-resident' | 'timeout' | 'failed'
+    # 'not-run' | 'skipped-parameter' | 'skipped-cleanup-group' | 'skipped-report-only' |
+    # 'storage-sense' | 'running' | 'completed' | 'idle-resident' | 'timeout' |
+    # 'not-armed' | 'start-failed' | 'exit-nonzero'
     DiskCleanupStatus    = 'not-run'
     # v2.17 (p.11 of the audit): which top-level phases ran to completion vs threw.
     # Before this, one exception anywhere in the run silently skipped every phase
@@ -6146,7 +6149,7 @@ function Invoke-StorageSense {
             # deliberately leaves it working in the background, and this sweep then pulled
             # its configuration out from under it. Whether cleanmgr re-reads the flags per
             # handler or only once at startup is not something to guess at while it holds
-            # an elevated deletion loop. The flags are swept by the next run's own sweep,
+            # an elevated deletion loop. The flags are swept by the first later run that
             # which is exactly the leftover case v2.16 added it for.
             if ($cleanmgr -and -not $cleanmgr.HasExited) {
                 # No promise about WHEN (raised in review). The next run's sweep is gated on
@@ -6765,6 +6768,11 @@ function Start-WinClean {
         # stops the phase from dispatching at all, so the branch that sets this inside the
         # function is unreachable in production and the status stayed 'not-run'.
         if ($SkipUpdates) { $script:Stats.AppUpdatesStatus = 'skipped-parameter' }
+        # Same reason, for the same reason (raised in review): -SkipCleanup suppresses
+        # the whole DeepSystemCleanup phase, so Invoke-StorageSense never runs and never
+        # assigns a status - leaving the 'not-run' default, which the schema documents as
+        # "the run aborted before reaching it". A deliberate skip is not an abort.
+        if ($SkipCleanup) { $script:Stats.DiskCleanupStatus = 'skipped-cleanup-group' }
 
         Invoke-Phase -Name 'Updates' -Skip:$SkipUpdates -Action {
             Update-WindowsSystem

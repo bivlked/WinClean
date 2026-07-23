@@ -76,18 +76,21 @@ the installer accepted a PowerShell whose version it had failed to read.
 
 ### Added
 
-- `DiskCleanupStatus` in the result JSON: `completed`, `idle-resident`, `timeout`,
-  `storage-sense`, `failed`, `skipped-parameter` or `not-run`. `DiskCleanupPending` was a
-  boolean covering two different truths. `idle-resident` is named after what is measured -
-  a process that was seen working and then went completely still - rather than after the
-  conclusion drawn from it, because that conclusion can be wrong and nothing downstream
-  is built to depend on it.
+- `DiskCleanupStatus` in the result JSON - twelve values covering every way that step can
+  end, replacing a boolean that covered two different truths. `idle-resident` is named
+  after what is measured (a process seen working, then completely still) rather than after
+  the conclusion drawn from it, because that conclusion can be wrong and nothing downstream
+  is built to depend on it. `running`, `skipped-report-only` and `skipped-cleanup-group`
+  exist because "not-run" is documented as "the run aborted before reaching it", which is
+  untrue of a healthy preview, a deliberate skip, or a cleanup still in flight. The old
+  `failed` was split into `not-armed`, `start-failed` and `exit-nonzero` - only the last
+  means the machine may be partially cleaned.
 - `SUPPORT.md`, a release-notes template in `docs/release-process.md`, and a section in
   `CONTRIBUTING.md` describing what gets accepted and on what criteria.
 
 ### Tests
 
-- 573 -> 700. Four mutation runs over the new logic (79 mutations); every one is caught.
+- 573 -> 702. Four mutation runs over the new logic (79 mutations); every one is caught.
   Eight of them survived at first and each exposed a real gap rather than a wrong fix -
   among them that `Should -Invoke -Times N` means *at least* N and cannot see a duplicate,
   that the "unreadable activity" branch was never exercised, and that nothing pinned the

@@ -2481,6 +2481,7 @@ Describe "DiskCleanupStatus is actually produced and published" -Tag "Unit", "He
         @{ Value = 'storage-sense' }, @{ Value = 'running' }, @{ Value = 'completed' }
         @{ Value = 'idle-resident' }, @{ Value = 'timeout' }
         @{ Value = 'not-armed' }, @{ Value = 'start-failed' }, @{ Value = 'exit-nonzero' }
+        @{ Value = 'skipped-cleanup-group' }
     ) {
         # Pins the vocabulary itself: docs/result-json.md documents exactly these, and a
         # value that only exists in the code is a contract nobody can consume.
@@ -3276,11 +3277,17 @@ Describe "Update-Applications when winget is absent" -Tag "Unit", "Helper", "V22
         # -Skip stops the dispatch, so the in-function branch is unreachable there and the
         # status would stay 'not-run'. This pins the assignment that Start-WinClean makes
         # before the phase, which no behavioural test in this suite can reach.
+        # Ordering, not proximity (v2.22): this used to look inside a 400-character window
+        # before the dispatch, and adding one more pre-phase assignment next to it pushed
+        # the line out of that window and failed a test about something else entirely.
+        # What matters is that the assignment happens BEFORE the phase is dispatched.
         $source = Get-Content $script:WinCleanPath -Raw
         $dispatch = $source.IndexOf("Invoke-Phase -Name 'Updates'")
+        $assign   = $source.IndexOf("AppUpdatesStatus = 'skipped-parameter'`n", [StringComparison]::Ordinal)
+        if ($assign -lt 0) { $assign = $source.IndexOf("AppUpdatesStatus = 'skipped-parameter' }", [StringComparison]::Ordinal) }
         $dispatch | Should -BeGreaterThan 0
-        $preamble = $source.Substring([math]::Max(0, $dispatch - 400), [math]::Min(400, $dispatch))
-        $preamble.Contains("AppUpdatesStatus = 'skipped-parameter'") | Should -BeTrue
+        $assign   | Should -BeGreaterThan 0
+        $assign   | Should -BeLessThan $dispatch -Because 'the status must be set before the phase is dispatched, not merely somewhere near it'
     }
 
     It "keeps a present-but-failing winget an ERROR, and does not call that check 'checked'" {

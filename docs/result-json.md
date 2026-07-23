@@ -29,7 +29,7 @@ This page documents every field, gives a full sample, and explains how to consum
 | `RebootRequired` | bool | `true` when a change (a Windows update, an app update finishing on reboot) needs a restart to take effect. |
 | `LoggingDegraded` | bool | v2.20. `true` when writing the log file failed at some point during the run. The run itself still completed, but `LogPath` points at an incomplete file: do not read that log as the full record of what happened. |
 | `DiskCleanupPending` | bool | v2.20. `true` when Disk Cleanup was still **visibly working** when its timeout expired and was left running in the background; `TotalFreedBytes` is then a lower bound. Note `false` is not a proof that nothing more will ever be deleted - see `DiskCleanupStatus`, which is the field to read when that distinction matters. |
-| `DiskCleanupStatus` | string | v2.22. How the Storage Sense / Disk Cleanup step actually ended - eleven values, listed below. The boolean above could not tell a cleanup that had stopped doing anything from one still deleting, and reported both as pending. |
+| `DiskCleanupStatus` | string | v2.22. How the Storage Sense / Disk Cleanup step actually ended - twelve values, listed below. The boolean above could not tell a cleanup that had stopped doing anything from one still deleting, and reported both as pending. |
 | `ControlledFolderAccess` | string | Tri-state, see below. Reflects whether Defender's Controlled Folder Access may have silently blocked deletions. |
 | `Aborted` | string or null | `null` unless the run stopped early for a known reason: `"PendingRebootDeclined"` (the user declined to continue with a reboot pending) or `"UpdatedAndExited"` (v2.21 - the script updated itself and exited so the new version runs next time). When set, the phase arrays below are incomplete by design. Note `null` does not by itself prove every phase ran - see the invariant note below. |
 | `PhasesCompleted` | array of string | Phases whose action ran to completion without an uncaught exception. |
@@ -106,6 +106,7 @@ than the conclusion.
 | `start-failed` | cleanmgr.exe could not be started at all (missing, or blocked by AppLocker/WDAC). Nothing was attempted. |
 | `exit-nonzero` | cleanmgr started and exited with a non-zero code. Unlike the two above, it **ran**: the machine may be partially cleaned. |
 | `skipped-parameter` | `-SkipDiskCleanup` was passed. |
+| `skipped-cleanup-group` | `-SkipCleanup` was passed, which suppresses the whole cleanup group before this step is dispatched. |
 | `skipped-report-only` | `-ReportOnly` was passed. This is what every preview run, the smoke test and the `Report`/`ReportNoCleanup` stand modes produce. |
 | `not-run` | The step never executed - the run aborted before reaching it. |
 
