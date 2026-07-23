@@ -84,7 +84,23 @@ if (-not (Test-Path $pwshPath)) {
 # had established. That is the same fail-open shape as the SHA256 verification that hid
 # inside `if ($hashAsset)` until v2.17: a check that cannot run becomes a check that
 # passes. Absence of evidence is not evidence of compatibility.
-$pwshVersion = try { [version](((Get-Item $pwshPath).VersionInfo.ProductVersion -split '-')[0]) } catch { $null }
+#
+# Read the NUMERIC version fields rather than parsing the display string. pwsh.exe reports
+# ProductVersion as "7.6.4 SHA: 929d27f4...+929d27f4..." - the commit hash is appended after
+# a SPACE, so stripping a "-suffix" (which only covers preview builds like "7.7.0-preview.2")
+# left the hash in place and the [version] cast threw on every released PowerShell 7. Making
+# the check fail-closed above is what surfaced it: the parse had never worked, and the old
+# form skipped the comparison instead of reporting it, so the failure was invisible for three
+# releases. ProductMajorPart/MinorPart/BuildPart are integers taken straight from the version
+# resource - there is no string to misparse.
+$pwshVersion = try {
+    $vi = (Get-Item $pwshPath).VersionInfo
+    # A genuine PowerShell 7 binary never reports major 0; that value means the version
+    # resource is missing or unreadable, which must stay fail-closed.
+    if ($vi.ProductMajorPart -gt 0) {
+        [version]::new($vi.ProductMajorPart, $vi.ProductMinorPart, $vi.ProductBuildPart)
+    } else { $null }
+} catch { $null }
 if (-not $pwshVersion) {
     # Deliberately a different message from "your version is too old": the user needs to
     # know the file is there but unreadable, which points at a damaged or substituted

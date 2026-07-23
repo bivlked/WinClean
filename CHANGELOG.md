@@ -9,6 +9,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **`install.ps1` refused to run on every released PowerShell 7, saying it could not read
+  the version.** Reported from a user machine running 7.6.4. `pwsh.exe` reports
+  `ProductVersion` as `7.6.4 SHA: <hash>+<hash>` - the commit hash follows a **space**,
+  while the code stripped a `-suffix` (which only covers preview builds), so the `[version]`
+  cast threw and the version came out `$null`. The numeric `ProductMajorPart` /
+  `ProductMinorPart` / `ProductBuildPart` fields are read instead; there is no string to
+  misparse. The parse had been broken since the check was written - the pre-2.22 form
+  `if ($pwshVersion -and ...)` skipped the comparison instead of reporting it, so the
+  installer silently ran with **no version check at all** for three releases. Making the
+  check fail-closed in 2.22 is what made it visible. This fix is live as soon as it reaches
+  `main`: the one-liner fetches `install.ps1` from the branch, not from a release asset, so
+  no new release is required. `get.ps1` was never affected - it runs inside PowerShell and
+  reads `$PSVersionTable`.
+- The only guard on that check was a **grep test**: it asserted the shape of the code and
+  never evaluated it, which is why 702 green tests did not notice. It is now joined by a
+  behavioural test that executes `install.ps1`'s own expression against the real `pwsh.exe`
+  on the test machine and asserts the result clears 7.1. Verified by mutation: with the old
+  expression restored, the behavioural test fails while the grep test beside it still
+  passes. 702 -> 704 tests.
+
 Planned for a later release: quick system health section (SMART, image integrity, WinRE),
 Windows Update driver listing, run-to-run delta and HTML report. See CLAUDE.md.
 
