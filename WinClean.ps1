@@ -1,5 +1,5 @@
 <#PSScriptInfo
-.VERSION 2.21
+.VERSION 2.22
 .GUID 8f7c3b2a-1d4e-5f6a-9b8c-0d1e2f3a4b5c
 .AUTHOR bivlked
 .COMPANYNAME
@@ -12,6 +12,7 @@
 .REQUIREDSCRIPTS
 .EXTERNALSCRIPTDEPENDENCIES
 .RELEASENOTES
+    v2.22: Honest completion and adaptive output - a finished Disk Cleanup is no longer reported as partial, a bad log path can no longer kill a run, every run now ends through one path, and the console output follows the window width
     v2.21: Self-update targeting and honest exit codes - the update could change a file that was not the one running and still report success; a missing winget or no connectivity no longer fails the run
     v2.20: Correctness and honesty round - a junction could bypass protected-path checks, four operations reported success while doing nothing, Storage Sense was unreachable so on machines where it works the slow Disk Cleanup no longer runs; where it fails, the new -SkipDiskCleanup is what removes the wait
     v2.19: Contract and documentation round - -SkipCleanup now skips ALL cleanup categories, result JSON gains a tri-state PhasesSkipped, AppUpdatesCount renamed to AppUpdatesOffered (offered, not installed), full docs overhaul
@@ -30,7 +31,7 @@
 
 <#
 .SYNOPSIS
-    WinClean - Ultimate Windows 11 Maintenance Script v2.21
+    WinClean - Ultimate Windows 11 Maintenance Script v2.22
 .DESCRIPTION
     Комплексный скрипт для обновления и очистки Windows 11:
     - Обновление Windows (включая драйверы)
@@ -44,8 +45,21 @@
     - Подробный цветной вывод + лог-файл
 .NOTES
     Author: biv
-    Version: 2.21
+    Version: 2.22
     Requires: PowerShell 7.1+, Windows 11, Administrator rights
+    Changes in 2.22:
+    - A Disk Cleanup that stops doing anything but never exits is no longer waited out
+      for the full 15-minute timeout, nor reported as still deleting: the wait now also
+      ends when the process has shown no CPU or I/O activity for two minutes
+    - An unusable -LogPath can no longer kill the run before it starts - the log header
+      is written through the same fault-tolerant path as every other log line
+    - Every run now ends through one code path, so the result JSON, the summary and the
+      log handle release cannot drift apart between normal and self-update exits
+    - Console output adapts to the window width: the window is widened best-effort at
+      startup and the frames follow it, so winget's table stops wrapping into them
+    - install.ps1 refuses a PowerShell 7 whose version it cannot read, instead of
+      treating "could not check" as "good enough"
+
     Changes in 2.21:
     - The self-update could update a DIFFERENT copy than the one running and report
       success - it asked whether a Gallery copy existed anywhere, not whether the
@@ -370,9 +384,21 @@ function New-RunStats {
     # 'unknown' must not be mistaken for a verified state by consumers of the JSON
     ControlledFolderAccess = 'unknown'
     Aborted              = $null     # v2.17: set when the run stops before finishing
-    # v2.20: cleanmgr outlived its timeout and is still deleting in the background. The
-    # totals reported by this run are partial, and a consumer must not read them as final.
+    # v2.20: the wait expired without cleanmgr either exiting or being seen to go idle,
+    # so it was left running. The totals may be partial and must not be read as final.
+    # Note this does NOT assert it was observed working - the same branch catches a
+    # machine where activity could not be measured at all (raised in review).
     DiskCleanupPending   = $false
+    # v2.22: how the Storage Sense / Disk Cleanup step actually ended. DiskCleanupPending
+    # alone could not tell "still visibly deleting" from "resident but doing nothing", and
+    # reported both as pending - so a cleanup nothing had been observed to be doing was
+    # published as partial.
+    # Same shape and reasoning as AppUpdatesStatus (v2.21): when a boolean starts covering
+    # two different truths, the fix is a status, not a cleverer boolean.
+    # 'not-run' | 'skipped-parameter' | 'skipped-cleanup-group' | 'skipped-report-only' |
+    # 'storage-sense' | 'running' | 'completed' | 'idle-resident' | 'timeout' |
+    # 'not-armed' | 'start-failed' | 'exit-nonzero'
+    DiskCleanupStatus    = 'not-run'
     # v2.17 (p.11 of the audit): which top-level phases ran to completion vs threw.
     # Before this, one exception anywhere in the run silently skipped every phase
     # after it - Developer Cleanup, Docker/WSL, Visual Studio, Deep System Cleanup,
@@ -403,6 +429,11 @@ $script:InternetConnectionCache = $null
 # once instead of on every call - and surfaces in the result JSON as LoggingDegraded
 $script:LogWriteFailed = $false
 
+# Inner width of every framed section. v2.22: was the literal 70 repeated in four places;
+# Start-WinClean now derives it once from the actual console. 70 stays the default so a
+# host whose width cannot be read looks exactly as it always did.
+$script:BoxWidth = 70
+
 # Initialize log path (script scope for access in functions)
 if (-not $LogPath) {
     $script:LogPath = Join-Path $env:TEMP "WinClean_$((Get-Date).ToString('yyyyMMdd_HHmmss')).log"
@@ -416,7 +447,7 @@ if (-not $LogPath) {
 }
 
 # Script version (single source of truth for version checking)
-$script:Version = "2.21"
+$script:Version = "2.22"
 
 # Protected paths that should never be deleted
 $script:ProtectedPaths = @(
@@ -435,6 +466,81 @@ $script:ProtectedPaths = @(
 #region ═══════════════════════════════════════════════════════════════════════
 #                              LOGGING FUNCTIONS
 #═══════════════════════════════════════════════════════════════════════════════
+
+function Write-LogFileLine {
+    <#
+    .SYNOPSIS
+        Appends one line to the log file, degrading instead of throwing
+    .DESCRIPTION
+        v2.22, raised in external review: extracted from Write-Log so that EVERY write to
+        the log file - including the header, which Start-WinClean emits before its main
+        try/finally exists - degrades the same way instead of each caller inventing its
+        own fault tolerance.
+
+        The header used to be two bare Out-File calls. Measured, not assumed: six of seven
+        bad log paths make Out-File throw a TERMINATING error even though the script leaves
+        ErrorActionPreference at Continue (missing directory, path is a directory, invalid
+        characters, colon in the name, over-long path, unreachable UNC; only a reserved
+        device name did not). Thrown there, before the safety net, the exception escaped
+        Start-WinClean entirely: no result JSON, no final summary, no exit-code accounting,
+        and none of the maintenance the run was started for - all because of the log.
+
+        A log that cannot be written is a degraded run, never a failed one.
+    #>
+    param(
+        [Parameter(Mandatory)]
+        [AllowEmptyString()]
+        [string]$Line,
+
+        # The header line starts a fresh file. The Out-File call this replaced had no
+        # -Append, so it truncated on every run; preserved deliberately rather than lost
+        # in the refactor, or a custom -LogPath reused across runs would accumulate them
+        # all into one file and the log would no longer describe a single run.
+        [switch]$StartNewFile
+    )
+
+    # v2.17 (p.7 of the audit): Out-File used to open, seek to end, write and close the
+    # file on every single call - Write-Log fires hundreds of times per run. A StreamWriter
+    # kept open for the run avoids that, with AutoFlush so each line still lands on disk
+    # immediately (same durability as before, just cheaper). FileShare.Delete matters for
+    # tests: they Remove-Item the log path in AfterAll while this writer may still be the
+    # last one that touched it.
+    try {
+        if ($StartNewFile -or -not $script:LogWriter -or $script:LogWriterPath -ne $script:LogPath) {
+            if ($script:LogWriter) { $script:LogWriter.Dispose() }
+            $mode = if ($StartNewFile) { [System.IO.FileMode]::Create } else { [System.IO.FileMode]::Append }
+            $fileStream = [System.IO.File]::Open(
+                $script:LogPath, $mode, [System.IO.FileAccess]::Write,
+                ([System.IO.FileShare]::ReadWrite -bor [System.IO.FileShare]::Delete))
+            $script:LogWriter = [System.IO.StreamWriter]::new($fileStream, [System.Text.Encoding]::UTF8)
+            $script:LogWriter.AutoFlush = $true
+            $script:LogWriterPath = $script:LogPath
+        }
+        $script:LogWriter.WriteLine($Line)
+    } catch {
+        # v2.20: this used to be an empty catch, so a log that stopped being written
+        # (full volume, revoked permissions, the v2.14 case where cleanup deleted the
+        # log out from under us) was invisible: destructive work carried on, the final
+        # JSON said ErrorsCount=0, and LogPath pointed at a truncated file.
+        #
+        # Latched: one console line, not one per call - Write-Log fires hundreds of
+        # times per run. Deliberately Write-Host and not Write-Log, which would
+        # recurse straight back into this catch.
+        # v2.20, corrected in review: drop the writer so the NEXT call reopens it.
+        # Without this the guard above stays satisfied by a dead writer object and
+        # every later line is silently discarded for the rest of the run - the empty
+        # catch would simply have moved from the first failure to all the others.
+        try { if ($script:LogWriter) { $script:LogWriter.Dispose() } } catch { }
+        $script:LogWriter = $null
+        $script:LogWriterPath = $null
+
+        if (-not $script:LogWriteFailed) {
+            $script:LogWriteFailed = $true
+            $script:Stats.WarningsCount++
+            Write-Host "  [WARN]  Log file could not be written ($($_.Exception.Message)) - the run continues, but $($script:LogPath) may be incomplete" -ForegroundColor Yellow
+        }
+    }
+}
 
 function Write-Log {
     <#
@@ -456,52 +562,13 @@ function Write-Log {
 
     # Consistent left indent for all output (matches banner style)
     $indent = "  "
-    $boxWidth = 70  # Inner width for framed sections
+    $boxWidth = $script:BoxWidth  # Inner width for framed sections (v2.22: adaptive)
 
     $timestamp = (Get-Date).ToString('HH:mm:ss')
     $logMessage = "[$timestamp] [$Level] $Message"
 
-    # Write to log file. v2.17 (p.7 of the audit): Out-File used to open, seek to end,
-    # write and close the file on every single call - Write-Log fires hundreds of times
-    # per run. A StreamWriter kept open for the run avoids that, with AutoFlush so each
-    # line still lands on disk immediately (same durability as before, just cheaper).
-    # FileShare.Delete matters for tests: they Remove-Item the log path in AfterAll while
-    # this writer may still be the last one that touched it.
     if (-not $NoLog) {
-        try {
-            if (-not $script:LogWriter -or $script:LogWriterPath -ne $script:LogPath) {
-                if ($script:LogWriter) { $script:LogWriter.Dispose() }
-                $fileStream = [System.IO.File]::Open(
-                    $script:LogPath, [System.IO.FileMode]::Append, [System.IO.FileAccess]::Write,
-                    ([System.IO.FileShare]::ReadWrite -bor [System.IO.FileShare]::Delete))
-                $script:LogWriter = [System.IO.StreamWriter]::new($fileStream, [System.Text.Encoding]::UTF8)
-                $script:LogWriter.AutoFlush = $true
-                $script:LogWriterPath = $script:LogPath
-            }
-            $script:LogWriter.WriteLine($logMessage)
-        } catch {
-            # v2.20: this used to be an empty catch, so a log that stopped being written
-            # (full volume, revoked permissions, the v2.14 case where cleanup deleted the
-            # log out from under us) was invisible: destructive work carried on, the final
-            # JSON said ErrorsCount=0, and LogPath pointed at a truncated file.
-            #
-            # Latched: one console line, not one per call - Write-Log fires hundreds of
-            # times per run. Deliberately Write-Host and not Write-Log, which would
-            # recurse straight back into this catch.
-            # v2.20, corrected in review: drop the writer so the NEXT call reopens it.
-            # Without this the guard above stays satisfied by a dead writer object and
-            # every later line is silently discarded for the rest of the run - the empty
-            # catch would simply have moved from the first failure to all the others.
-            try { if ($script:LogWriter) { $script:LogWriter.Dispose() } } catch { }
-            $script:LogWriter = $null
-            $script:LogWriterPath = $null
-
-            if (-not $script:LogWriteFailed) {
-                $script:LogWriteFailed = $true
-                $script:Stats.WarningsCount++
-                Write-Host "  [WARN]  Log file could not be written ($($_.Exception.Message)) - the run continues, but $($script:LogPath) may be incomplete" -ForegroundColor Yellow
-            }
-        }
+        Write-LogFileLine -Line $logMessage
     }
 
     # Console output with colors
@@ -536,7 +603,7 @@ function Write-Log {
             Write-Host ""
             Write-Host "$indent┌─ " -NoNewline -ForegroundColor DarkGray
             Write-Host $Message -ForegroundColor $tagColors.Message
-            Write-Host "$indent└$("─" * 70)" -ForegroundColor DarkGray
+            Write-Host "$indent└$("─" * $boxWidth)" -ForegroundColor DarkGray
         }
         'DETAIL' {
             # Detail line with vertical bar
@@ -765,6 +832,96 @@ function Test-InteractiveConsole {
         return $true
     } catch {
         return $false
+    }
+}
+
+function Get-ConsoleWidth {
+    <#
+    .SYNOPSIS
+        The console width in columns, or 0 when it cannot be determined
+    .DESCRIPTION
+        v2.22. Returns 0 when there is no console to measure - a scheduled task, a service,
+        or any host without one - and the caller then falls back to the historical fixed
+        width rather than laying out against a guess.
+
+        Measured, because the obvious assumption is wrong: REDIRECTING output does NOT make
+        this return 0. $Host.UI.RawUI reads the attached console, not stdout, so
+        `pwsh -File script.ps1 *> out.txt` from a terminal still reports that terminal's
+        width. The smoke test therefore exercises the adaptive width, not the 70 fallback.
+    #>
+    try {
+        $width = $Host.UI.RawUI.WindowSize.Width
+        if ($width -gt 0) { return [int]$width }
+    } catch { }
+    return 0
+}
+
+function Get-BoxWidth {
+    <#
+    .SYNOPSIS
+        Inner width for framed sections, derived from the console width
+    .DESCRIPTION
+        v2.22, pure so the bounds are testable. A box is printed as two spaces of indent,
+        a border character, the inner width, and a closing border character - so it needs
+        ConsoleWidth-4 at the very most, and 6 is subtracted to keep a margin away from
+        the wrap column.
+
+        Bounded both ways on purpose:
+        - never below 70, the width every previous version used. A narrow console cannot
+          be laid out well either way, and shrinking below 70 would change how WinClean
+          looks for everyone who has been reading it at 70 for ten releases.
+        - never above 90. Raising the ceiling further makes the frames span the screen on
+          a wide monitor, which reads worse rather than better - the user asked for
+          "somewhat wider", not "as wide as it goes".
+    #>
+    param([int]$ConsoleWidth)
+
+    if ($ConsoleWidth -le 0) { return 70 }
+    return [math]::Max(70, [math]::Min(90, $ConsoleWidth - 6))
+}
+
+function Expand-ConsoleWindow {
+    <#
+    .SYNOPSIS
+        Best-effort widening of the console window at startup
+    .DESCRIPTION
+        v2.22. The desktop shortcut opens conhost at its 120-column default, and winget's
+        upgrade table needs about 140 on a localised system - so it wrapped, and every
+        wrapped row landed across the script's own output. Measured on the reporting
+        machine: window 120x30, buffer 120x9001, maximum physical window 3824 columns.
+        There was room; nobody had asked for it.
+
+        Deliberately done here rather than by writing console properties into the .lnk:
+        the shortcut route only fixes the shortcut (and NT_CONSOLE_PROPS is a binary blob
+        WScript.Shell will not write), while this helps every way of starting the script.
+
+        Best-effort by design. Windows Terminal ignores or refuses programmatic resizing,
+        redirected hosts throw - none of that is worth a warning, let alone a failed run.
+        The buffer is grown before the window because a window may never exceed its
+        buffer; the reverse order fails.
+    #>
+    param([int]$DesiredWidth = 140)
+
+    try {
+        $raw = $Host.UI.RawUI
+        $current = $raw.WindowSize
+        if ($current.Width -le 0 -or $current.Width -ge $DesiredWidth) { return }
+
+        # Never ask for more than the screen can physically show
+        $target = [math]::Min($DesiredWidth, $raw.MaxPhysicalWindowSize.Width)
+        if ($target -le $current.Width) { return }
+
+        $buffer = $raw.BufferSize
+        if ($buffer.Width -lt $target) {
+            $buffer.Width = $target
+            $raw.BufferSize = $buffer
+        }
+
+        $window = $raw.WindowSize
+        $window.Width = $target
+        $raw.WindowSize = $window
+    } catch {
+        # Host refused; the run continues at whatever width it already had
     }
 }
 
@@ -1450,7 +1607,7 @@ function Invoke-ScriptUpdate {
 
     # Dynamically centered title in a 70-char box (matches the rest of the UI; v2.14
     # fixes a misaligned right border caused by hardcoded padding)
-    $boxWidth = 70
+    $boxWidth = $script:BoxWidth
     $updateTitle = "UPDATE AVAILABLE"
     $titlePadding = [math]::Max(0, $boxWidth - $updateTitle.Length)
     $titleLeftPad = [math]::Floor($titlePadding / 2)
@@ -1486,7 +1643,7 @@ function Invoke-ScriptUpdate {
             Write-Host $line -ForegroundColor Gray
         }
         Write-Host ""
-        return
+        return $false
     }
 
     # Check if interactive console is available
@@ -1500,7 +1657,7 @@ function Invoke-ScriptUpdate {
             Write-Host $line -ForegroundColor Gray
         }
         Write-Host ""
-        return
+        return $false
     }
 
     if ($UpdateInfo.Channel -ne 'gallery') {
@@ -1525,7 +1682,7 @@ function Invoke-ScriptUpdate {
         Write-Host "  Press any key to continue with current version..." -ForegroundColor DarkGray
         Wait-ForKeyPress
         Write-Host ""
-        return
+        return $false
     }
 
     # The running file is the Gallery copy, so updating it updates what runs next
@@ -1538,7 +1695,7 @@ function Invoke-ScriptUpdate {
         Write-Log "Update skipped by user" -Level INFO
         Write-Host "  Update skipped. Continuing with current version..." -ForegroundColor DarkGray
         Write-Host ""
-        return
+        return $false
     }
 
     Write-Host ""
@@ -1547,7 +1704,12 @@ function Invoke-ScriptUpdate {
     try {
         # PowerShellGet ships with PowerShell today and PSResourceGet is its replacement;
         # either can be the one present, and the one that answered discovery goes first
-        switch (Select-UpdateCommand -Provider $UpdateInfo.Provider) {
+        # $null = ... deliberately: v2.22 made this function's return value meaningful
+        # ("the run is over"), and a bare switch emits whatever the update provider writes
+        # to the pipeline. A provider that returned an object would turn $true into an
+        # array, and `if (Invoke-ScriptUpdate ...)` would then be deciding on the array's
+        # truthiness rather than on the answer this function meant to give.
+        $null = switch (Select-UpdateCommand -Provider $UpdateInfo.Provider) {
             'Update-Script'     { Update-Script -Name WinClean -Force -ErrorAction Stop }
             'Update-PSResource' { Update-PSResource -Name WinClean -Force -TrustRepository -ErrorAction Stop }
             default { throw "no update command available (neither Update-Script nor Update-PSResource)" }
@@ -1562,7 +1724,7 @@ function Invoke-ScriptUpdate {
         Write-Host "  ✗ Update failed: $_" -ForegroundColor Red
         Write-Host "  Continuing with current version..." -ForegroundColor Yellow
         Write-Host ""
-        return
+        return $false
     }
 
     # v2.21: verify against the file being executed. A provider that reports success
@@ -1587,7 +1749,7 @@ function Invoke-ScriptUpdate {
             Write-Host $line -ForegroundColor Gray
         }
         Write-Host ""
-        return
+        return $false
     }
 
     Write-Log "Update successful" -Level SUCCESS
@@ -1595,22 +1757,21 @@ function Invoke-ScriptUpdate {
     Write-Host "  ✓ Update complete!" -ForegroundColor Green
     Write-Host "  Please run WinClean again to use the new version." -ForegroundColor Gray
     Write-Host ""
-    Write-Host "  Press any key to exit..." -ForegroundColor DarkGray
 
-    # This exit bypasses the finally in Start-WinClean, so the result JSON has to be
-    # written here (raised in review). Start-WinClean deletes any previous file before the
-    # update check, so without this a consumer saw exit code 0 and NO artefact at all -
-    # indistinguishable from a crash, and identical to a run that did nothing. Same shape
-    # as the PendingRebootDeclined path, which already does this.
+    # v2.22: this used to call exit here, which bypassed the finally in Start-WinClean and
+    # therefore had to hand-copy the result JSON write and the exit-code rule alongside it.
+    # The caller now owns ending the run, through the one path that does it (raised in
+    # external review). The exit code is unchanged: the entry point already derives it from
+    # ErrorsCount, which is what the copied lines here were re-deriving.
+    #
+    # The "press any key" pause deliberately does NOT happen here (raised in the second
+    # review pass): it blocks indefinitely, and in v2.21 the result JSON was already on
+    # disk before it. Pausing here would put an unbounded wait between the update and the
+    # artefacts, so a window closed or interrupted at that prompt would leave the run with
+    # no result JSON and an unreleased log handle - a regression introduced by this very
+    # refactor. The caller pauses after the run is complete.
     $script:Stats.Aborted = 'UpdatedAndExited'
-    Write-ResultJson -Path $ResultJsonPath
-
-    Wait-ForKeyPress
-    # Not an unconditional 0 (raised in review): Write-ResultJson reports its own failure by
-    # counting an error rather than throwing, and exiting 0 anyway would rebuild the exact
-    # "success with no artefact" state the JSON write was added here to prevent.
-    if ($script:Stats.ErrorsCount -gt 0) { exit 1 }
-    exit 0
+    return $true
 }
 
 function Install-ModuleWithTimeout {
@@ -5175,6 +5336,210 @@ function Invoke-DISMCleanup {
     }
 }
 
+function Get-DiskCleanupActivityFingerprint {
+    <#
+    .SYNOPSIS
+        Activity fingerprint of the whole cleanmgr family, not just the process we started
+    .DESCRIPTION
+        v2.22, raised in review, then narrowed in the round after that.
+
+        The concern is real: the handle we hold is not necessarily the only process doing
+        the work - cleanmgr was started with -WindowStyle Hidden and a Disk Cleanup window
+        appeared anyway. If a worker does the deleting while the process we started merely
+        waits, fingerprinting our PID alone would show a frozen parent and call a live
+        cleanup finished.
+
+        The first attempt aggregated over every cleanmgr.exe on the machine, and that was
+        WORSE: a Disk Cleanup the user opens by hand is also called cleanmgr.exe, so an
+        unrelated process could both satisfy "activity was observed" for our run and, by
+        staying busy, keep our run waiting the full fifteen minutes after our own cleanup
+        had finished. It made the verdict depend on a process we know nothing about.
+
+        So: our process and its descendants, and nothing else. Same protection against a
+        worker doing the deleting, no dependence on strangers. Children are matched by
+        parent PID regardless of name, since a worker need not be called cleanmgr.exe.
+
+        Counters are summed as [long] rather than through Measure-Object, which returns a
+        Double and would silently lose integer precision past 2^53 (raised in review).
+
+        $null when nothing can be read; the caller must treat that as "cannot tell".
+
+        ACCEPTED LIMITS, stated rather than implied (raised in review). Process identity on
+        Windows is not exact: a process whose parent died and whose parent's PID was later
+        reused by our cleanmgr would be counted as family, and a worker started through a
+        service or COM rather than as a child would be missed. No process-tree scheme
+        avoids both. This is why the outcome is reported as observed idleness rather than
+        as proven completion, and why the registry sweep still refuses to touch a cleanmgr
+        that has not exited: every consumer of this signal is built to tolerate it being
+        wrong, which is the property that actually matters.
+    #>
+    param([int]$ProcessId)
+
+    try {
+        $all = @(Get-CimInstance -ClassName Win32_Process `
+                                 -Property ProcessId, ParentProcessId, KernelModeTime, UserModeTime,
+                                           ReadOperationCount, WriteOperationCount, OtherOperationCount `
+                                 -ErrorAction Stop)
+        if (-not $all) { return $null }
+
+        # Walk down from our PID. The seen-set both prevents rework and makes a cyclic
+        # parent chain (possible after PID reuse) terminate instead of spinning.
+        $byParent = @{}
+        foreach ($p in $all) {
+            $parent = [int]$p.ParentProcessId
+            if (-not $byParent.ContainsKey($parent)) { $byParent[$parent] = [System.Collections.Generic.List[object]]::new() }
+            $byParent[$parent].Add($p)
+        }
+
+        $family  = [System.Collections.Generic.List[object]]::new()
+        $seen    = [System.Collections.Generic.HashSet[int]]::new()
+        $pending = [System.Collections.Generic.Queue[int]]::new()
+        $pending.Enqueue($ProcessId)
+
+        while ($pending.Count -gt 0) {
+            $current = $pending.Dequeue()
+            if (-not $seen.Add($current)) { continue }
+
+            $proc = $all | Where-Object { [int]$_.ProcessId -eq $current } | Select-Object -First 1
+            if ($proc) { $family.Add($proc) }
+
+            if ($byParent.ContainsKey($current)) {
+                foreach ($child in $byParent[$current]) { $pending.Enqueue([int]$child.ProcessId) }
+            }
+        }
+
+        if ($family.Count -eq 0) {
+            # Our process is gone. The caller detects the exit on its own; "cannot tell"
+            # is the honest answer here, never "idle".
+            return $null
+        }
+
+        [long]$kernel = 0; [long]$user = 0; [long]$read = 0; [long]$write = 0; [long]$other = 0
+        foreach ($p in $family) {
+            $kernel += [long]$p.KernelModeTime
+            $user   += [long]$p.UserModeTime
+            $read   += [long]$p.ReadOperationCount
+            $write  += [long]$p.WriteOperationCount
+            $other  += [long]$p.OtherOperationCount
+        }
+        $pids = (($family | ForEach-Object { [int]$_.ProcessId } | Sort-Object) -join ',')
+
+        # Two segments separated by '#': the ACTIVITY part (counters) and the IDENTITY
+        # part (how many processes, and which). Raised in review: identity belongs in the
+        # fingerprint - a child appearing or exiting is a state change and must reset the
+        # idle streak - but it is NOT work. Letting it satisfy "activity was observed"
+        # would qualify a cleanmgr that merely spawned a helper and then blocked forever.
+        # The caller compares the whole string for stillness, the activity part alone for
+        # "did it ever do anything".
+        return '{0}|{1}|{2}|{3}|{4}#{5}|{6}' -f $kernel, $user, $read, $write, $other, $family.Count, $pids
+    } catch {
+        return $null
+    }
+}
+
+function Update-IdleStreak {
+    <#
+    .SYNOPSIS
+        Counts consecutive checks in which a process did nothing at all
+    .DESCRIPTION
+        v2.22, pure so the rule is testable without a process. Returns the new streak
+        length: one longer when the two fingerprints match, zero otherwise.
+
+        An unreadable fingerprint on either side resets the streak. That is the whole
+        safety property: "I could not measure it" must never accumulate towards "it has
+        finished", or a machine with broken WMI would cut every Disk Cleanup short.
+    #>
+    param(
+        [AllowNull()][string]$Previous,
+        [AllowNull()][string]$Current,
+        [int]$Streak
+    )
+
+    if ([string]::IsNullOrEmpty($Previous) -or [string]::IsNullOrEmpty($Current)) { return 0 }
+    if ($Current -ceq $Previous) { return $Streak + 1 }
+    return 0
+}
+
+function Wait-CleanmgrCompletion {
+    <#
+    .SYNOPSIS
+        Waits for Disk Cleanup to finish its work, which is not the same as exiting
+    .DESCRIPTION
+        v2.22, split out in the style of Wait-StorageSenseTask so the wait can be tested
+        without a process and without waiting fifteen minutes: the caller injects how to
+        tell whether the process exited, how to read its activity, and how to wait.
+
+        Two signals for "is there still something to wait for", because HasExited alone
+        was the wrong model of it. Note the distinction that matters throughout this
+        function: the MEASURED case below is described as what it was on that machine,
+        while what this code can PROVE in general is only the absence of observable
+        activity. The first is history, the second is the contract.
+        Measured on a live workstation: cleanmgr /sagerun did its work in about ten
+        seconds, closed its window, then stayed resident with CPU and all three I/O
+        counters frozen and every thread in Wait. The run sat out the remaining ~890
+        seconds and then published the finished cleanup as partial.
+
+        Returns Outcome ('exited' | 'idle-resident' | 'timeout') and Elapsed seconds.
+        'idle-resident' names what was OBSERVED - the process was seen working and then
+        did nothing at all for long enough - not the conclusion drawn from it. That the
+        work is therefore over is an inference, and a process blocked on something
+        external would look identical, so nothing is built to depend on it being right.
+        'timeout' means it was still visibly working when time ran out.
+
+        'idle-resident' additionally requires that activity was OBSERVED at least once
+        (raised in review). Without that, "it has finished" and "it has not started yet"
+        are the same observation - a process that is suspended, or waiting on something
+        before it begins, would be declared complete after two minutes of a stillness that
+        never followed any work. Since the first fingerprint is taken the moment cleanmgr
+        starts, a run that does anything at all changes it within the first interval.
+    #>
+    param(
+        [scriptblock]$HasExited,
+        [scriptblock]$GetFingerprint,
+        [int]$MaxWaitSeconds = 900,
+        [int]$CheckInterval = 10,
+        [int]$IdleChecksRequired = 12,
+        [scriptblock]$OnProgress = { param($seconds) },
+        [scriptblock]$Wait = { param($seconds) Start-Sleep -Seconds $seconds }
+    )
+
+    $elapsed = 0
+    $idleStreak = 0
+    $sawActivity = $false
+    $fingerprint = & $GetFingerprint
+
+    while (-not (& $HasExited) -and $elapsed -lt $MaxWaitSeconds) {
+        & $Wait $CheckInterval
+        $elapsed += $CheckInterval
+
+        $previousFingerprint = $fingerprint
+        $fingerprint = & $GetFingerprint
+        $idleStreak = Update-IdleStreak -Previous $previousFingerprint -Current $fingerprint -Streak $idleStreak
+
+        # Real work, and only real work, opens the gate (raised in review). Two readable
+        # fingerprints differing is not enough: they also differ when a child process
+        # appears or exits, which is a state change but not work. Compare the activity
+        # segment (before '#') alone, so a cleanmgr that spawns a helper and then blocks
+        # forever cannot qualify for the early verdict. An unreadable sample never counts.
+        if ($previousFingerprint -and $fingerprint) {
+            $previousWork = ($previousFingerprint -split '#')[0]
+            $currentWork  = ($fingerprint -split '#')[0]
+            if ($currentWork -cne $previousWork) { $sawActivity = $true }
+        }
+
+        if ($sawActivity -and $idleStreak -ge $IdleChecksRequired) {
+            return @{ Outcome = 'idle-resident'; Elapsed = $elapsed }
+        }
+
+        if ($elapsed % 60 -eq 0) { & $OnProgress $elapsed }
+    }
+
+    # Re-read rather than assume: the process may have exited during the last interval,
+    # and that is a cleaner answer than "timeout" for the same instant.
+    if (& $HasExited) { return @{ Outcome = 'exited'; Elapsed = $elapsed } }
+    return @{ Outcome = 'timeout'; Elapsed = $elapsed }
+}
+
 function Select-StorageSenseTask {
     <#
     .SYNOPSIS
@@ -5192,6 +5557,31 @@ function Select-StorageSenseTask {
     if ($found.Count -eq 0) { return @{ Task = $null; Reason = 'none' } }
     if ($found.Count -gt 1) { return @{ Task = $null; Reason = 'ambiguous' } }
     return @{ Task = $found[0]; Reason = 'ok' }
+}
+
+function Test-StorageSenseEnabled {
+    <#
+    .SYNOPSIS
+        Whether Storage Sense is switched on in Settings
+    .DESCRIPTION
+        v2.22. Tri-state on purpose: $true / $false / $null for "cannot tell". Used ONLY
+        to explain what happened, never to decide whether Disk Cleanup runs - see the note
+        in Invoke-StorageSense for why that distinction matters.
+
+        Verified on a live Windows 11 25H2 (build 26200): the value is still
+        HKCU\...\StorageSense\Parameters\StoragePolicy\01, and it was not renamed.
+
+        HKCU is the user's hive, so a run under SYSTEM (a scheduled task) reads a
+        different one and gets nothing - which is exactly why the answer must be allowed
+        to be $null instead of defaulting to "off".
+    #>
+    try {
+        $policy = Get-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\StorageSense\Parameters\StoragePolicy' `
+                                   -Name '01' -ErrorAction Stop
+        return [bool][int]$policy.'01'
+    } catch {
+        return $null
+    }
 }
 
 function Get-StorageSenseVerdict {
@@ -5336,6 +5726,11 @@ function Invoke-StorageSense {
     # Docker/WSL, Visual Studio and the driver store - everything, to avoid one step.
     if ($ReportOnly) {
         Write-Log "Would run: Storage Sense" -Level DETAIL
+        # Its own value, not the 'not-run' default (raised in review): a preview is the
+        # most common way to reach this function - every smoke run and two of the stand
+        # modes use it - and 'not-run' is documented as "the step never executed, for
+        # example the run aborted earlier", which describes something else entirely.
+        $script:Stats.DiskCleanupStatus = 'skipped-report-only'
         return
     }
 
@@ -5367,6 +5762,7 @@ function Invoke-StorageSense {
     # was added for.
     if ($SkipDiskCleanup) {
         Write-Log "Storage Sense / Disk Cleanup skipped (parameter)" -Level INFO
+        $script:Stats.DiskCleanupStatus = 'skipped-parameter'
         return
     }
 
@@ -5478,7 +5874,25 @@ function Invoke-StorageSense {
                     'unreadable'   { Write-Log "Storage Sense ran but its result could not be read - using Disk Cleanup as well" -Level INFO }
                     'failed'       { Write-Log ("Storage Sense failed (task result 0x{0:X8}) - using Disk Cleanup instead" -f $taskResult) -Level INFO }
                     'not-measured' { Write-Log "Storage Sense reported success but free space could not be measured - running Disk Cleanup as well" -Level INFO }
-                    'nothing-freed' { Write-Log "Storage Sense reported success but freed nothing measurable - running Disk Cleanup as well" -Level INFO }
+                    'nothing-freed' {
+                        # v2.22 (MyAI-1qtn): say WHICH of the two states this is. "Returned
+                        # 0 and freed nothing" covers both "switched off, so it did nothing"
+                        # and "switched on, ran, and there was nothing left to free" - and
+                        # on a regularly maintained machine the second happens every time,
+                        # which looked like a malfunction to the person reading the log.
+                        #
+                        # Reported, NOT acted on. The proposal was to trust an enabled
+                        # Storage Sense and skip Disk Cleanup, and checking what that would
+                        # cost settled it: the categories armed below include Update
+                        # Cleanup, memory dumps, Language Pack, old ChkDsk files and Windows
+                        # Error Reporting - none of which Storage Sense touches at all. A
+                        # maintained machine would silently stop having them cleaned.
+                        switch (Test-StorageSenseEnabled) {
+                            $true   { Write-Log "Storage Sense is enabled and ran, but there was nothing left for it to free - running Disk Cleanup as well for the categories it does not cover" -Level INFO }
+                            $false  { Write-Log "Storage Sense is switched off in Settings, so its run freed nothing - using Disk Cleanup instead" -Level INFO }
+                            default { Write-Log "Storage Sense reported success but freed nothing measurable, and its setting could not be read - running Disk Cleanup as well" -Level INFO }
+                        }
+                    }
                     default        { Write-Log "Storage Sense verdict '$($verdict.Reason)' not recognised - running Disk Cleanup as well" -Level INFO }
                 }
             } elseif ($waitResult.Outcome -eq 'vanished') {
@@ -5519,6 +5933,13 @@ function Invoke-StorageSense {
             # Every branch above has stated its own reason
             $ssExplained = $true
         }
+    }
+
+    if ($storageSenseDone) {
+        # Storage Sense demonstrably did the work, so cleanmgr is not run at all. Recorded
+        # so the JSON distinguishes this from "Disk Cleanup ran and completed" - they free
+        # different things, and a consumer comparing runs needs to know which one happened.
+        $script:Stats.DiskCleanupStatus = 'storage-sense'
     }
 
     if (-not $storageSenseDone) {
@@ -5598,6 +6019,9 @@ function Invoke-StorageSense {
             if ($armed -eq 0) {
                 Write-Log "No Disk Cleanup handlers could be armed - skipping cleanmgr" -Level WARNING
                 $script:Stats.WarningsCount++
+                # Distinct from a cleanmgr that started and failed (raised in review):
+                # nothing was attempted here, so nothing is half-done on the machine.
+                $script:Stats.DiskCleanupStatus = 'not-armed'
                 return
             }
 
@@ -5620,43 +6044,100 @@ function Invoke-StorageSense {
             if (-not $cleanmgr) {
                 Write-Log "Disk Cleanup could not be started (cleanmgr.exe is missing or blocked) - it cleaned nothing" -Level WARNING
                 $script:Stats.WarningsCount++
+                $script:Stats.DiskCleanupStatus = 'start-failed'
                 return
             }
+
+            # Recorded BEFORE the wait (raised in review): the status was only assigned
+            # after Wait-CleanmgrCompletion returned, leaving a window of up to fifteen
+            # minutes in which the JSON still said 'not-run'. If the run was interrupted
+            # there - Ctrl+C, or a throw anywhere in this block - a consumer read "the step
+            # never executed" while an elevated cleanmgr was actively deleting. The wrong
+            # answer on an abnormal exit is now "started, and we cannot account for it".
+            $script:Stats.DiskCleanupStatus = 'running'
 
             # v2.16: raised from 420s. cleanmgr regularly needs longer on a workstation
             # with a large component store, and killing it produced a warning on every
             # single run while cleanmgr kept working in the background anyway.
+            #
+            # v2.22: waiting on HasExited alone was the wrong model of "there is still
+            # something to wait for". Measured on a live workstation: cleanmgr /sagerun did
+            # its work in about ten seconds, closed its window and then simply stayed
+            # resident - CPU, all three I/O counters and its six threads frozen, every
+            # thread in Wait. The run sat here for the remaining ~890 seconds and then
+            # declared the cleanup partial. Both halves of that are wrong, and the second
+            # is the worse one: it is the same class of dishonest report v2.20 and v2.21
+            # were spent removing, only inverted - not success that never happened, but
+            # incompleteness that was never observed either.
+            #
+            # So a second, independent signal to stop waiting: total stillness. If the
+            # process has done no CPU work and no I/O at all across $idleChecksRequired
+            # consecutive checks, there is nothing left to wait for that we can observe.
+            # That is weaker than "it has finished", and is reported as such.
             $maxWait = 900  # 15 minutes
-            $elapsed = 0
             $checkInterval = 10
+            # Two full minutes of absolute stillness. Deliberately far longer than needed
+            # to observe the measured case: a process mid-delete moves at least the "other
+            # operations" counter, so this is not a race with slow work - it is a margin
+            # against a pause nobody has observed yet. The cost of being wrong is bounded
+            # anyway: the registry sweep below still refuses to touch a process that has
+            # not exited, so a premature verdict cannot pull configuration out from under
+            # a cleanmgr that turns out to be working after all.
+            $idleChecksRequired = 12
 
-            while (-not $cleanmgr.HasExited -and $elapsed -lt $maxWait) {
-                Start-Sleep -Seconds $checkInterval
-                $elapsed += $checkInterval
+            $waitOutcome = Wait-CleanmgrCompletion `
+                -HasExited { $cleanmgr.HasExited } `
+                -GetFingerprint { Get-DiskCleanupActivityFingerprint -ProcessId $cleanmgr.Id } `
+                -MaxWaitSeconds $maxWait -CheckInterval $checkInterval -IdleChecksRequired $idleChecksRequired `
+                -OnProgress { param($seconds) Write-Log "Disk Cleanup still running... ($seconds seconds)" -Level INFO }
 
-                # Log progress every minute
-                if ($elapsed % 60 -eq 0) {
-                    Write-Log "Disk Cleanup still running... ($elapsed seconds)" -Level INFO
-                }
-            }
+            $elapsed = $waitOutcome.Elapsed
+            $wentIdleWhileResident = $waitOutcome.Outcome -eq 'idle-resident'
 
-            if (-not $cleanmgr.HasExited) {
-                # Still killing it would be worse - cleanmgr keeps working after a kill and
-                # the deletion is mid-flight (v2.16). But this is not an informational
-                # event either: everything measured after this point is partial, the run
-                # is about to print a total and write its JSON while an elevated process
-                # is still deleting, and the freed bytes it goes on to reclaim are counted
-                # by nobody.
-                $script:Stats.DiskCleanupPending = $true
-                Write-Log "Disk Cleanup exceeded $maxWait seconds and is still running - it continues in the background, so the freed figures below are partial" -Level WARNING
-                $script:Stats.WarningsCount++
-            } elseif ($cleanmgr.ExitCode -ne 0) {
+            if ($cleanmgr.HasExited -and $cleanmgr.ExitCode -ne 0) {
                 # v2.16: the exit code used to be ignored entirely, so a crash one second
                 # in was still logged as a success
                 Write-Log "Disk Cleanup exited with code $($cleanmgr.ExitCode) - results unverified" -Level WARNING
                 $script:Stats.WarningsCount++
-            } else {
+                # Unlike the two above, this one RAN: the machine may be partially
+                # cleaned, which is a different thing for a consumer to know.
+                $script:Stats.DiskCleanupStatus = 'exit-nonzero'
+            } elseif ($cleanmgr.HasExited) {
                 Write-Log "Disk Cleanup completed ($armed categories)" -Level SUCCESS
+                $script:Stats.DiskCleanupStatus = 'completed'
+            } elseif ($wentIdleWhileResident) {
+                # Deliberately worded as an OBSERVATION, not a conclusion (raised in the
+                # third review pass). What was measured is that cleanmgr and its children
+                # did nothing at all for two minutes after having been seen working; that
+                # they FINISHED is the inference, and the earlier wording ("completed")
+                # stated the inference as fact. This project has spent three releases
+                # removing exactly that habit, so the status is 'idle-resident' and the log
+                # says what was seen.
+                #
+                # DiskCleanupPending stays false, which is the best available estimate: a
+                # process performing no CPU work and no I/O is not deleting anything. It is
+                # an estimate rather than a certainty, and that is why it is not called
+                # completion. Not a warning either - on the machine where this was measured
+                # it is the normal ending, and warning on every run would be noise.
+                Write-Log "Disk Cleanup ($armed categories): worked, then stopped doing anything for $($idleChecksRequired * $checkInterval) seconds" -Level SUCCESS
+                Write-Log "cleanmgr.exe is still in the process list but shows no CPU or I/O activity - treating its work as over and not waiting out the remaining $($maxWait - $elapsed) seconds" -Level DETAIL
+                $script:Stats.DiskCleanupStatus = 'idle-resident'
+            } else {
+                # Genuinely still working when the timeout expired. Killing it would be
+                # worse - cleanmgr keeps working after a kill and the deletion is
+                # mid-flight (v2.16). But this is not an informational event either:
+                # everything measured after this point is partial, the run is about to
+                # print a total and write its JSON while an elevated process is still
+                # deleting, and the freed bytes it goes on to reclaim are counted by nobody.
+                # Worded for what is actually known (raised in review): this branch is the
+                # fall-through for "neither signal fired", which also catches the cases
+                # where activity could NEVER be measured (broken WMI) or was never observed
+                # at all. Claiming it "is still working" would be the same inference stated
+                # as observation that the idle branch above was reworded to avoid.
+                $script:Stats.DiskCleanupPending = $true
+                Write-Log "Disk Cleanup did not finish within $maxWait seconds and was not observed to stop - it is left running, so the freed figures below may be incomplete" -Level WARNING
+                $script:Stats.WarningsCount++
+                $script:Stats.DiskCleanupStatus = 'timeout'
             }
         } finally {
             # Remove StateFlags to avoid leaving traces in the registry.
@@ -5668,10 +6149,18 @@ function Invoke-StorageSense {
             # deliberately leaves it working in the background, and this sweep then pulled
             # its configuration out from under it. Whether cleanmgr re-reads the flags per
             # handler or only once at startup is not something to guess at while it holds
-            # an elevated deletion loop. The flags are swept by the next run's own sweep,
+            # an elevated deletion loop. The flags are swept by the first later run that
             # which is exactly the leftover case v2.16 added it for.
             if ($cleanmgr -and -not $cleanmgr.HasExited) {
-                Write-Log "Disk Cleanup is still running - its registry configuration will be swept by the next run" -Level DETAIL
+                # No promise about WHEN (raised in review). The next run's sweep is gated on
+                # no cleanmgr being present, and an idle-resident one typically lives until
+                # logoff or reboot - so on exactly the machines where that ending is normal,
+                # the next run would skip the sweep too. Sweeping here instead was rejected:
+                # if the idleness inference is wrong, pulling the flags could truncate a live
+                # cleanup, and v2.20 deliberately refused to guess whether cleanmgr re-reads
+                # them. Leaving stale flags is the cheaper of the two errors, but it must not
+                # be described as a cleanup that is going to happen.
+                Write-Log "cleanmgr.exe is still present, so its registry flags are left in place - they are swept by the first run that starts with no cleanmgr running" -Level DETAIL
             } else {
                 Get-ChildItem -Path $regPath -ErrorAction SilentlyContinue | ForEach-Object {
                     Remove-ItemProperty -Path $_.PSPath -Name "StateFlags$sageset" -Force -ErrorAction SilentlyContinue
@@ -5690,24 +6179,49 @@ function Invoke-StorageSense {
 function Show-Banner {
     try { Clear-Host } catch { }
 
-    $banner = @"
+    # v2.22: composed instead of pasted. As one literal here-string its padding was
+    # hand-counted for a four-character version - the title row measured 70 columns only
+    # because "2.21" happens to be four characters, and a version like 2.5 or 2.100 would
+    # have pushed that row's right border out of line with the rest of the box. Composing
+    # it fixes that and lets the frame follow the console width like every other box.
+    $inner = $script:BoxWidth
 
-  ╔══════════════════════════════════════════════════════════════════════╗
-  ║                                                                      ║
-  ║      ██████╗██╗     ███████╗ █████╗ ███╗   ██╗                       ║
-  ║     ██╔════╝██║     ██╔════╝██╔══██╗████╗  ██║                       ║
-  ║     ██║     ██║     █████╗  ███████║██╔██╗ ██║                       ║
-  ║     ██║     ██║     ██╔══╝  ██╔══██║██║╚██╗██║                       ║
-  ║     ╚██████╗███████╗███████╗██║  ██║██║ ╚████║                       ║
-  ║      ╚═════╝╚══════╝╚══════╝╚═╝  ╚═╝╚═╝  ╚═══╝                       ║
-  ║                                                                      ║
-  ║            Ultimate Windows 11 Maintenance Script v$($script:Version)              ║
-  ║                                                                      ║
-  ╚══════════════════════════════════════════════════════════════════════╝
+    # Centred as a BLOCK, never line by line: the rows have different lengths by design
+    # and centring each one would shear the letters apart. 70 is the block's historical
+    # width, so at the default width the banner is drawn exactly where it always was.
+    $artBlockWidth = 70
+    $art = @(
+        ''
+        '      ██████╗██╗     ███████╗ █████╗ ███╗   ██╗'
+        '     ██╔════╝██║     ██╔════╝██╔══██╗████╗  ██║'
+        '     ██║     ██║     █████╗  ███████║██╔██╗ ██║'
+        '     ██║     ██║     ██╔══╝  ██╔══██║██║╚██╗██║'
+        '     ╚██████╗███████╗███████╗██║  ██║██║ ╚████║'
+        '      ╚═════╝╚══════╝╚══════╝╚═╝  ╚═╝╚═╝  ╚═══╝'
+        ''
+    )
+    $artPad = [math]::Max(0, [math]::Floor(($inner - $artBlockWidth) / 2))
 
-"@
+    $title = "Ultimate Windows 11 Maintenance Script v$($script:Version)"
+    $titlePad = [math]::Max(0, [math]::Floor(($inner - $title.Length) / 2))
 
-    Write-Host $banner -ForegroundColor Cyan
+    $rows = foreach ($line in $art) { (' ' * $artPad) + $line.PadRight($artBlockWidth) }
+    $rows = @($rows) + @((' ' * $titlePad) + $title) + @('')
+
+    $bannerLines = @("  ╔$('═' * $inner)╗")
+    foreach ($row in $rows) {
+        # Pad, then truncate: a row must fill the frame exactly. Anything longer would
+        # push the right border out, which is the defect this rewrite removes - so a row
+        # that cannot fit is cut rather than allowed to break the box.
+        $cell = $row.PadRight($inner)
+        if ($cell.Length -gt $inner) { $cell = $cell.Substring(0, $inner) }
+        $bannerLines += "  ║$cell║"
+    }
+    $bannerLines += "  ╚$('═' * $inner)╝"
+
+    Write-Host ""
+    Write-Host ($bannerLines -join [Environment]::NewLine) -ForegroundColor Cyan
+    Write-Host ""
 
     # System info
     $os = Get-CimInstance -ClassName Win32_OperatingSystem
@@ -5759,7 +6273,7 @@ function Show-FinalStatisticsBody {
     Clear-AllProgress
 
     # Box dimensions
-    $boxWidth = 70    # Inner width (matches banner)
+    $boxWidth = $script:BoxWidth    # Inner width (matches banner)
     $labelWidth = 18  # Width for label column (e.g., "Space freed:")
 
     # Determine overall status
@@ -5955,6 +6469,11 @@ function Write-ResultJson {
             # v2.20: true when Disk Cleanup outlived its timeout and was left running.
             # TotalFreedBytes is then a lower bound, not the final figure.
             DiskCleanupPending  = [bool]$script:Stats.DiskCleanupPending
+            # v2.22: how that step ended, because the boolean above conflated two states.
+            # 'idle-resident' is the measured case: cleanmgr was seen working, then went
+            # completely still without exiting. 'timeout' is the genuine overrun the
+            # boolean was added for - still visibly working when time ran out.
+            DiskCleanupStatus   = [string]$script:Stats.DiskCleanupStatus
             # 'enabled' means cleanup figures are understated (Defender blocked some
             # deletions without reporting an error); 'unknown' means the check itself
             # failed, so the figures are unverified rather than confirmed good
@@ -5987,6 +6506,52 @@ function Write-ResultJson {
         # result. The user asked for this file: not producing it is a failure of the run.
         Write-Log "Failed to write result JSON: $_" -Level ERROR
         $script:Stats.ErrorsCount++
+    }
+}
+
+function Complete-WinCleanRun {
+    <#
+    .SYNOPSIS
+        The single end-of-run path: result JSON, final summary, log handle release
+    .DESCRIPTION
+        v2.22, raised in external review. Three paths ended a run - the normal finally, a
+        successful self-update, and a declined pending-reboot prompt - and only the first
+        released the log handle or showed a summary. The other two hand-copied whichever
+        parts someone had remembered at the time, which is exactly how v2.21 came to ship
+        two separate fixes to the same few lines (first a missing result JSON, then an
+        unconditional exit 0 over a run that had errors). The defect was never any one
+        omission; it was that the list existed in three places. Anything added here from
+        now on reaches every exit.
+
+        Latched, so a path that completes the run explicitly and then unwinds through a
+        finally does not write the artefacts twice.
+    #>
+    param([string]$ResultPath)
+
+    if ($script:RunCompleted) { return }
+    $script:RunCompleted = $true
+
+    # JSON goes first: Show-FinalStatistics may block on a keypress in interactive
+    # mode, and automated runs must get the result regardless.
+    Write-ResultJson -Path $ResultPath
+
+    # An aborted run has no maintenance to summarise, and the summary header would
+    # announce "COMPLETED SUCCESSFULLY" over a run that deliberately did nothing.
+    # Preserved behaviour: neither abort path ever showed it.
+    if (-not $script:Stats.Aborted) {
+        Show-FinalStatistics
+    }
+
+    # Release the log file handle (v2.17, p.7): a stand or the user may want to move or
+    # zip the log right after the run finishes.
+    # v2.20: guarded. Dispose on a writer whose stream already failed throws, and this
+    # used to be the last statement of the outer finally - the exception escaped
+    # Start-WinClean and the entry point never reached its exit-code check, so a run with
+    # errors could still exit 0 (raised in review).
+    if ($script:LogWriter) {
+        try { $script:LogWriter.Dispose() } catch { }
+        $script:LogWriter = $null
+        $script:LogWriterPath = $null
     }
 }
 
@@ -6047,10 +6612,25 @@ function Start-WinClean {
     $script:ProgressActivities = @()
     $script:InternetConnectionCache = $null
     $script:LogWriteFailed = $false
+    # v2.22: the latch on Complete-WinCleanRun, reset with everything else - a second
+    # call in the same session must produce its own artefacts, not silently skip them
+    # because the first run already completed.
+    $script:RunCompleted = $false
 
-    # Initialize log
-    "WinClean v$($script:Version) - Started at $(Get-Date)" | Out-File -FilePath $script:LogPath -Encoding utf8
-    "=" * 70 | Out-File -FilePath $script:LogPath -Append -Encoding utf8
+    # v2.22: ask for a wider window, then lay out against whatever the host actually
+    # gave us. In this order deliberately - measuring first would size every frame for
+    # the old width. Both steps are best-effort and silent: a host that refuses to
+    # resize, or whose width cannot be read, simply keeps the historical 70.
+    Expand-ConsoleWindow
+    $script:BoxWidth = Get-BoxWidth -ConsoleWidth (Get-ConsoleWidth)
+
+    # Initialize log. v2.22 (raised in external review): these two lines were bare Out-File
+    # calls, and this runs BEFORE the main try/finally below. A log path that cannot be
+    # opened throws there - measured on six of seven bad paths - and the exception escaped
+    # Start-WinClean before any safety net existed: no result JSON, no summary, and none of
+    # the maintenance, because of the log. Now they degrade like every other log write.
+    Write-LogFileLine -Line "WinClean v$($script:Version) - Started at $(Get-Date)" -StartNewFile
+    Write-LogFileLine -Line ("=" * $script:BoxWidth)
 
     # v2.17 (p.13 of the audit): recover from a hard-killed previous run before doing
     # anything else - not in ReportOnly, which promises no changes
@@ -6101,8 +6681,11 @@ function Start-WinClean {
                 Write-Host "  Operation cancelled. Please reboot and run again." -ForegroundColor Yellow
                 Write-Host ""
                 # Record the abort so automation does not mistake it for a completed run
+                # v2.22: through the shared end-of-run path. This branch used to write the
+                # JSON by hand and return, so it released no log handle - one of the three
+                # divergent endings that made the same fix necessary twice (external review).
                 $script:Stats.Aborted = 'PendingRebootDeclined'
-                Write-ResultJson -Path $ResultJsonPath
+                Complete-WinCleanRun -ResultPath $ResultJsonPath
                 return
             }
         } else {
@@ -6122,7 +6705,20 @@ function Start-WinClean {
         try {
             $updateInfo = Test-ScriptUpdate
             if ($updateInfo) {
-                Invoke-ScriptUpdate -UpdateInfo $updateInfo
+                # v2.22: Invoke-ScriptUpdate reports whether the run is over instead of
+                # calling exit itself. A successful self-update replaced the running file,
+                # so continuing would perform maintenance with the old code still loaded -
+                # the run ends here, but it ends the same way every other run does.
+                if (Invoke-ScriptUpdate -UpdateInfo $updateInfo) {
+                    # Artefacts first, then the pause. The prompt blocks until a key is
+                    # pressed and a double-clicked shortcut may simply be closed there;
+                    # writing the JSON afterwards would mean an abandoned window produced
+                    # no result file at all (raised in the second review pass).
+                    Complete-WinCleanRun -ResultPath $ResultJsonPath
+                    Write-Host "  Press any key to exit..." -ForegroundColor DarkGray
+                    Wait-ForKeyPress
+                    return
+                }
             }
         } catch {
             Write-Log "Update check could not be completed: $_" -Level WARNING
@@ -6172,6 +6768,11 @@ function Start-WinClean {
         # stops the phase from dispatching at all, so the branch that sets this inside the
         # function is unreachable in production and the status stayed 'not-run'.
         if ($SkipUpdates) { $script:Stats.AppUpdatesStatus = 'skipped-parameter' }
+        # Same reason, for the same reason (raised in review): -SkipCleanup suppresses
+        # the whole DeepSystemCleanup phase, so Invoke-StorageSense never runs and never
+        # assigns a status - leaving the 'not-run' default, which the schema documents as
+        # "the run aborted before reaching it". A deliberate skip is not an abort.
+        if ($SkipCleanup) { $script:Stats.DiskCleanupStatus = 'skipped-cleanup-group' }
 
         Invoke-Phase -Name 'Updates' -Skip:$SkipUpdates -Action {
             Update-WindowsSystem
@@ -6241,21 +6842,10 @@ function Start-WinClean {
         Write-Log "Critical error outside any phase: $_" -Level ERROR
         $script:Stats.ErrorsCount++
     } finally {
-        # JSON goes first: Show-FinalStatistics may block on a keypress in
-        # interactive mode, and automated runs must get the result regardless
-        Write-ResultJson -Path $ResultJsonPath
-        Show-FinalStatistics
-        # Release the log file handle (v2.17, p.7): a stand or the user may want to
-        # move/zip the log right after the run finishes.
-        # v2.20: guarded. Dispose on a writer whose stream already failed throws, and this
-        # is the last statement of the outer finally - the exception escaped Start-WinClean
-        # and the entry point never reached its exit-code check, so a run with errors could
-        # still exit 0 (raised in review).
-        if ($script:LogWriter) {
-            try { $script:LogWriter.Dispose() } catch { }
-            $script:LogWriter = $null
-            $script:LogWriterPath = $null
-        }
+        # v2.22: the whole end-of-run sequence now lives in one function, shared with the
+        # two abort paths that used to hand-copy parts of it. Ordering, the aborted-run
+        # rule and the guarded Dispose are documented there.
+        Complete-WinCleanRun -ResultPath $ResultJsonPath
     }
 }
 

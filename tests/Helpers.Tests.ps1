@@ -962,6 +962,125 @@ Describe "Write-Log" -Tag "Unit", "Helper" {
 
 #endregion
 
+#region Write-LogFileLine Tests (v2.22 - log init must never kill the run)
+
+Describe "Write-LogFileLine" -Tag "Unit", "Helper", "V222" {
+
+    BeforeEach {
+        $script:prevLogPath  = $script:LogPath
+        $script:prevWarnings = $script:Stats.WarningsCount
+        $script:prevFailed   = $script:LogWriteFailed
+        if ($script:LogWriter) { $script:LogWriter.Dispose(); $script:LogWriter = $null; $script:LogWriterPath = $null }
+        $script:LogWriteFailed = $false
+        $script:testLog = Join-Path ([System.IO.Path]::GetTempPath()) "WinCleanLogLine_$(Get-Random).log"
+        $script:LogPath = $script:testLog
+    }
+
+    AfterEach {
+        if ($script:LogWriter) { $script:LogWriter.Dispose(); $script:LogWriter = $null; $script:LogWriterPath = $null }
+        Remove-Item -LiteralPath $script:testLog -Force -ErrorAction SilentlyContinue
+        $script:LogPath              = $script:prevLogPath
+        $script:Stats.WarningsCount  = $script:prevWarnings
+        $script:LogWriteFailed       = $script:prevFailed
+    }
+
+    It "Writes the line verbatim, without adding a timestamp or level" {
+        # The header is not a log entry: it must land exactly as composed. Write-Log's
+        # "[HH:mm:ss] [LEVEL] " prefix belongs to Write-Log, not to this primitive.
+        Write-LogFileLine -Line 'WinClean v9.99 - Started at whenever' -StartNewFile
+        (Get-Content -LiteralPath $script:testLog -Raw) | Should -Match ([regex]::Escape('WinClean v9.99 - Started at whenever'))
+        (Get-Content -LiteralPath $script:testLog -Raw) | Should -Not -Match '^\['
+    }
+
+    It "Appends by default and truncates only with -StartNewFile" {
+        # -StartNewFile preserves what the replaced Out-File (no -Append) did. Losing it
+        # would silently merge every run sharing a custom -LogPath into one file.
+        Write-LogFileLine -Line 'first run'  -StartNewFile
+        Write-LogFileLine -Line 'same run'
+        (Get-Content -LiteralPath $script:testLog -Raw) | Should -Match 'first run'
+        (Get-Content -LiteralPath $script:testLog -Raw) | Should -Match 'same run'
+
+        Write-LogFileLine -Line 'second run' -StartNewFile
+        $after = Get-Content -LiteralPath $script:testLog -Raw
+        $after | Should -Match 'second run'
+        $after | Should -Not -Match 'first run' -Because '-StartNewFile must truncate, matching the Out-File it replaced'
+    }
+
+    # The defect this whole function exists for. Measured in review: six of seven bad log
+    # paths make Out-File throw a TERMINATING error even at ErrorActionPreference=Continue,
+    # and the header is written before Start-WinClean's try/finally exists - so the run
+    # died with no result JSON and no maintenance because of the log file.
+    It "Never throws on a log path that cannot be opened - <Case>" -ForEach @(
+        @{ Case = 'missing directory';    Path = { Join-Path ([System.IO.Path]::GetTempPath()) "nope_$(Get-Random)\sub\a.log" } }
+        @{ Case = 'path is a directory';  Path = { [System.IO.Path]::GetTempPath() } }
+        @{ Case = 'invalid characters';   Path = { Join-Path ([System.IO.Path]::GetTempPath()) 'a:b:c.log' } }
+        @{ Case = 'over-long path';       Path = { Join-Path ([System.IO.Path]::GetTempPath()) (('x' * 300) + '.log') } }
+        # An unreachable UNC path was measured too (IOException, same as the two above) but
+        # is deliberately not a case here: it is the only one that depends on network
+        # resolution, took 8.3s locally, and would be this suite's one flake-prone test.
+    ) {
+        $script:LogPath = & $Path
+        { Write-LogFileLine -Line 'header' -StartNewFile } | Should -Not -Throw -Because 'a log that cannot be written is a degraded run, never a failed one'
+    }
+
+    It "Reports the failure instead of swallowing it - LoggingDegraded reaches the result JSON" {
+        # Not throwing must not become not telling. LogWriteFailed is what surfaces as
+        # LoggingDegraded in the result JSON, so an automated consumer can see the run's
+        # log is incomplete rather than trusting a silent success.
+        $script:LogPath = Join-Path ([System.IO.Path]::GetTempPath()) "nope_$(Get-Random)\sub\a.log"
+        $before = $script:Stats.WarningsCount
+
+        Write-LogFileLine -Line 'header' -StartNewFile 3>$null 6>$null
+
+        $script:LogWriteFailed          | Should -BeTrue -Because 'LoggingDegraded in the result JSON is driven by this flag'
+        $script:Stats.WarningsCount     | Should -Be ($before + 1)
+    }
+
+    It "Latches the warning - a failing log costs one warning, not one per line" {
+        $script:LogPath = Join-Path ([System.IO.Path]::GetTempPath()) "nope_$(Get-Random)\sub\a.log"
+        $before = $script:Stats.WarningsCount
+
+        1..5 | ForEach-Object { Write-LogFileLine -Line "line $_" 3>$null 6>$null }
+
+        $script:Stats.WarningsCount | Should -Be ($before + 1) -Because 'Write-Log fires hundreds of times per run'
+    }
+
+    It "Recovers when the path becomes writable again" {
+        # The v2.20 lesson kept: drop the dead writer so a later call reopens it, instead
+        # of leaving the guard satisfied by a broken object and discarding the rest.
+        $script:LogPath = Join-Path ([System.IO.Path]::GetTempPath()) "nope_$(Get-Random)\sub\a.log"
+        Write-LogFileLine -Line 'lost' -StartNewFile 3>$null 6>$null
+        $script:LogWriter | Should -BeNullOrEmpty -Because 'a failed writer must not be reused'
+
+        $script:LogPath = $script:testLog
+        Write-LogFileLine -Line 'recovered' -StartNewFile
+        (Get-Content -LiteralPath $script:testLog -Raw) | Should -Match 'recovered'
+    }
+
+    It "Drops a writer whose stream broke mid-run, so later lines are not discarded" {
+        # Added after a mutation survived: the test above only covers a writer that never
+        # opened, and in that case the field is already $null - so deleting the reset would
+        # not have failed anything. This covers the case the reset actually exists for: an
+        # open writer whose stream dies later (the v2.14 shape, where the run's own temp
+        # cleanup deleted the log out from under it). Without the reset, the guard stays
+        # satisfied by a dead object and every remaining line is silently thrown away.
+        Write-LogFileLine -Line 'opened fine' -StartNewFile
+        $script:LogWriter | Should -Not -BeNullOrEmpty
+
+        # Break the stream underneath the writer without touching the script's bookkeeping
+        $script:LogWriter.BaseStream.Dispose()
+
+        Write-LogFileLine -Line 'this write fails' 3>$null 6>$null
+        $script:LogWriter | Should -BeNullOrEmpty -Because 'a broken writer must be dropped, not kept and reused'
+
+        # And the very next line must actually reach the file again
+        Write-LogFileLine -Line 'back in business'
+        (Get-Content -LiteralPath $script:testLog -Raw) | Should -Match 'back in business'
+    }
+}
+
+#endregion
+
 #region Get-RecycleBinSize Tests
 
 Describe "Get-RecycleBinSize" -Tag "Unit", "Helper" {
@@ -2014,7 +2133,10 @@ Describe "Test-ScriptUpdate" -Tag "Unit", "Helper", "V221" {
 Describe "Invoke-ScriptUpdate branches" -Tag "Unit", "Helper", "V221" {
     # These branches were unreachable by the helper tests, which only proved that the
     # instruction TEXT exists - not that Invoke-ScriptUpdate ever prints it (raised in
-    # review). Every branch here returns instead of reaching `exit 0`, so the suite is safe.
+    # review). Every branch here returns rather than completing an update.
+    # v2.22: the function no longer calls exit at all, so the successful path is testable
+    # too - it is covered in the V222 region below, which is why this note no longer says
+    # the suite is only safe because that path is never reached.
 
     BeforeEach {
         $script:Stats.WarningsCount = 0
@@ -2103,24 +2225,23 @@ Describe "Invoke-ScriptUpdate branches" -Tag "Unit", "Helper", "V221" {
         $script:askedPath | Should -Be $script:WinCleanPath
     }
 
-    It "writes the result JSON before exiting on a verified update" {
-        # The success path ends in `exit 0`, which bypasses the finally in Start-WinClean -
-        # and Start-WinClean has already deleted any previous result file by then, so
-        # without this a consumer saw exit code 0 and no artefact, indistinguishable from a
-        # crash. Wait-ForKeyPress is the last statement before the exit, so throwing from it
-        # proves the end of the path was reached without letting the suite exit
+    It "does not block on a keypress before the run's artefacts exist" {
+        # Rewritten twice. It first asserted that this function wrote the result JSON,
+        # which was only true because its own `exit` bypassed the finally that should
+        # have. Then it asserted the pause happened here - and the second review pass
+        # showed that was the regression: the pause blocks indefinitely, so in v2.21 the
+        # JSON was already on disk before it, while pausing here puts an unbounded wait
+        # BEFORE the artefacts. A window closed at that prompt would leave no result file.
+        # The pause now belongs to the caller, after Complete-WinCleanRun.
         Mock Test-InteractiveConsole { $true }
         Mock Read-Host { 'y' }
         Mock Update-Script { }
         Mock Get-ScriptFileVersion { '2.21' }
-        Mock Write-ResultJson { }
-        Mock Wait-ForKeyPress { throw 'REACHED_EXIT' }
 
-        { Invoke-ScriptUpdate -UpdateInfo @{ CurrentVersion = '2.20'; LatestVersion = '2.21'
-                                             Channel = 'gallery'; Provider = 'PowerShellGet' } } |
-            Should -Throw -ExpectedMessage 'REACHED_EXIT'
+        $null = Invoke-ScriptUpdate -UpdateInfo @{ CurrentVersion = '2.20'; LatestVersion = '2.21'
+                                                   Channel = 'gallery'; Provider = 'PowerShellGet' }
 
-        Should -Invoke Write-ResultJson -Times 1
+        Should -Invoke Wait-ForKeyPress -Exactly -Times 0 -Because 'nothing may block between the update and the result JSON'
         $script:Stats.Aborted | Should -Be 'UpdatedAndExited'
         ($script:printed -join "`n").Contains('Update complete') | Should -BeTrue
     }
@@ -2295,6 +2416,820 @@ Describe "Invoke-ScriptUpdate branches" -Tag "Unit", "Helper", "V221" {
     }
 }
 
+#region v2.22 Storage Sense setting is reported, not acted on
+
+Describe "Test-StorageSenseEnabled" -Tag "Unit", "Helper", "V222" {
+    # Explains which of two states produced "returned 0 and freed nothing". Deliberately
+    # NOT wired into the skip decision - see the comment at its call site.
+
+    It "reports enabled when the policy value says so" {
+        Mock Get-ItemProperty { [pscustomobject]@{ '01' = 1 } }
+        Test-StorageSenseEnabled | Should -BeTrue
+    }
+
+    It "reports disabled when the policy value says so" {
+        Mock Get-ItemProperty { [pscustomobject]@{ '01' = 0 } }
+        Test-StorageSenseEnabled | Should -BeFalse
+    }
+
+    It "answers null - not false - when the setting cannot be read" {
+        # Under SYSTEM (a scheduled task) HKCU is a different hive and the key is absent.
+        # Reporting "switched off" there would state a fact nobody established.
+        Mock Get-ItemProperty { throw 'no such key' }
+        Test-StorageSenseEnabled | Should -BeNullOrEmpty
+    }
+
+}
+
+#endregion
+
+#region v2.22 DiskCleanupStatus reaches the result JSON
+
+Describe "DiskCleanupStatus is actually produced and published" -Tag "Unit", "Helper", "V222" {
+    # Added after a mutation run: the headline field of this release had NO behavioural
+    # coverage at all. Deleting five of its seven assignments, changing the default, or
+    # removing the field from the result JSON entirely all left 679 tests green. Only two
+    # comment-stripped greps existed, and a grep cannot see a value that is never set.
+
+    BeforeEach {
+        $script:Stats = New-RunStats
+        $script:resultFile = Join-Path ([System.IO.Path]::GetTempPath()) "WinCleanStatus_$(Get-Random).json"
+    }
+
+    AfterEach {
+        Remove-Item -LiteralPath $script:resultFile -Force -ErrorAction SilentlyContinue
+    }
+
+    It "starts as 'not-run' so an aborted run cannot look like a completed cleanup" {
+        (New-RunStats).DiskCleanupStatus | Should -Be 'not-run'
+    }
+
+    It "is written to the result JSON, with the value the run actually reached" {
+        # The mutation that deleted the field from Write-ResultJson survived; this is the
+        # assertion that kills it. A consumer reading the documented schema must find it.
+        $script:Stats.DiskCleanupStatus = 'idle-resident'
+
+        Write-ResultJson -Path $script:resultFile
+
+        $json = Get-Content -LiteralPath $script:resultFile -Raw | ConvertFrom-Json
+        $json.PSObject.Properties.Name | Should -Contain 'DiskCleanupStatus'
+        $json.DiskCleanupStatus | Should -Be 'idle-resident'
+    }
+
+    It "survives the JSON round trip as a string for every documented value - <Value>" -ForEach @(
+        @{ Value = 'not-run' }, @{ Value = 'skipped-parameter' }, @{ Value = 'skipped-report-only' }
+        @{ Value = 'storage-sense' }, @{ Value = 'running' }, @{ Value = 'completed' }
+        @{ Value = 'idle-resident' }, @{ Value = 'timeout' }
+        @{ Value = 'not-armed' }, @{ Value = 'start-failed' }, @{ Value = 'exit-nonzero' }
+        @{ Value = 'skipped-cleanup-group' }
+    ) {
+        # Pins the vocabulary itself: docs/result-json.md documents exactly these, and a
+        # value that only exists in the code is a contract nobody can consume.
+        $script:Stats.DiskCleanupStatus = $Value
+        Write-ResultJson -Path $script:resultFile
+        (Get-Content -LiteralPath $script:resultFile -Raw | ConvertFrom-Json).DiskCleanupStatus | Should -Be $Value
+    }
+
+    It "records the preview as its own value, not as 'not-run'" {
+        # -ReportOnly is the most common way into this function: the smoke test and two
+        # stand modes all use it. Reporting the documented "the step never executed (for
+        # example the run aborted earlier)" for a healthy preview is simply untrue.
+        # Safe to call for real: the ReportOnly branch returns before touching anything.
+        $ReportOnly = $true
+        Mock Write-Log { }
+
+        Invoke-StorageSense
+
+        $script:Stats.DiskCleanupStatus | Should -Be 'skipped-report-only'
+    }
+}
+
+#endregion
+
+#region v2.22 adaptive console width
+
+Describe "Get-BoxWidth" -Tag "Unit", "Helper", "V222" {
+    # The frames were a literal 70 in four places. Widening them is only safe if the
+    # result is bounded at BOTH ends: too wide and the box wraps, which is the very
+    # defect being fixed (winget's table wrapping into WinClean's output).
+
+    It "keeps the historical width when the console width is unknown - <Case>" -ForEach @(
+        @{ Case = 'zero';     Width = 0 }
+        @{ Case = 'negative'; Width = -1 }
+    ) {
+        # Redirected output and scheduled tasks report no usable width. Laying out
+        # against a guess there would corrupt exactly the runs nobody is watching.
+        Get-BoxWidth -ConsoleWidth $Width | Should -Be 70
+    }
+
+    It "fits the console whenever a 70-column box can fit at all - <Width> columns" -ForEach @(
+        @{ Width = 80 }, @{ Width = 100 }, @{ Width = 120 }, @{ Width = 200 }, @{ Width = 3824 }
+    ) {
+        # A box costs 2 indent + 1 border + inner + 1 border. Anything wider than the
+        # console wraps, and a wrapped frame is worse than a narrow one.
+        # Scoped honestly (raised in review): this property holds for consoles of 74
+        # columns and up. Below that no box fits, and the case is covered separately.
+        $inner = Get-BoxWidth -ConsoleWidth $Width
+        ($inner + 4) | Should -BeLessOrEqual $Width
+    }
+
+    It "keeps the historical 70 on a console too narrow for any box - <Width> columns" -ForEach @(
+        @{ Width = 60 }, @{ Width = 40 }
+    ) {
+        # Stated as the accepted limitation it is, not hidden. Below 74 columns a framed
+        # box cannot fit, and it never could - every previous version drew 70 there too.
+        # Narrowing the frame would change how WinClean looks for everyone in order to
+        # improve a console nobody has reported using, so the old behaviour is kept and
+        # written down instead of quietly implied by a bound.
+        Get-BoxWidth -ConsoleWidth $Width | Should -Be 70
+        (Get-BoxWidth -ConsoleWidth $Width) + 4 | Should -BeGreaterThan $Width -Because 'this is the known, accepted limit - the assertion records it rather than pretending it does not exist'
+    }
+
+    It "does not grow past 90 however wide the console is" {
+        # The user asked for "somewhat wider", not "as wide as it goes": full-width
+        # frames on a 3824-column window read worse than 90.
+        Get-BoxWidth -ConsoleWidth 3824 | Should -Be 90
+        Get-BoxWidth -ConsoleWidth 200  | Should -Be 90
+    }
+
+    It "actually widens at the reported default of 120 columns" {
+        # The measured configuration on the machine that reported this: conhost 120x30.
+        # If this returned 70 the change would have achieved nothing there.
+        Get-BoxWidth -ConsoleWidth 120 | Should -BeGreaterThan 70
+    }
+
+    It "is monotonic - a wider console never yields a narrower box" {
+        $widths = 40, 60, 76, 80, 96, 120, 200
+        $previous = 0
+        foreach ($w in $widths) {
+            $inner = Get-BoxWidth -ConsoleWidth $w
+            $inner | Should -BeGreaterOrEqual $previous
+            $previous = $inner
+        }
+    }
+}
+
+Describe "Get-ConsoleWidth" -Tag "Unit", "Helper", "V222" {
+
+    It "always answers with an int and never throws" {
+        # No mock here on purpose: $Host.UI.RawUI is not resolved through any cmdlet, so
+        # a Mock would be theatre - it would intercept nothing and the test would pass
+        # for the wrong reason. The no-console path is instead covered where it actually
+        # matters, by Get-BoxWidth's contract for 0 and negative widths.
+        { Get-ConsoleWidth } | Should -Not -Throw
+        Get-ConsoleWidth | Should -BeOfType [int]
+    }
+
+    It "reports a positive width in this console session" {
+        # Pester runs in a real console here; if this ever returns 0 locally the
+        # adaptive path is silently inert and the box stays 70 forever.
+        Get-ConsoleWidth | Should -BeGreaterThan 0
+    }
+}
+
+Describe "Frames stay geometrically consistent at every adaptive width" -Tag "Unit", "Helper", "V222" {
+    # The smoke test validates geometry too, but it runs with output redirected, where
+    # the console width is unknown and the box falls back to 70 - so it can only ever
+    # check the width that existed before this change. Widening is the risky part, and
+    # this is where it gets checked.
+
+    BeforeAll {
+        . (Join-Path $PSScriptRoot '..' 'tools' 'BoxGeometry.ps1')
+        $script:savedBoxWidth = $script:BoxWidth
+    }
+
+    AfterAll {
+        $script:BoxWidth = $script:savedBoxWidth
+    }
+
+    It "renders a consistent banner and section frames at width <Width>" -ForEach @(
+        @{ Width = 70 }, @{ Width = 74 }, @{ Width = 80 }, @{ Width = 90 }
+    ) {
+        $script:BoxWidth = $Width
+
+        # Write-Host goes to the information stream in PowerShell 7, so the frames can be
+        # captured and measured rather than eyeballed.
+        $out = & {
+            Show-Banner
+            Write-Log -Message "A title that must stay centred" -Level TITLE -NoLog
+            Write-Log -Message "A section header" -Level SECTION -NoLog
+            Write-Log -Message "An ordinary line" -Level INFO -NoLog
+        } 6>&1 | ForEach-Object { [string]$_ }
+
+        $lines = ($out -join "`n") -split "`r?`n" | ForEach-Object { $_.TrimEnd() }
+        $issues = Test-BoxGeometry -Lines $lines
+        $issues | Should -BeNullOrEmpty -Because "frames must line up at $Width columns, not only at the historical 70"
+
+        # And the frames must actually follow the setting, or this test proves nothing.
+        # @() around the filter deliberately: a single match indexed with [0] yields the
+        # first CHARACTER of the string, which quietly measured 0 while looking correct.
+        $tops = @($lines | Where-Object { $_ -match '^\s*╔═+╗$' })
+        $tops | Should -Not -BeNullOrEmpty
+        [regex]::Match($tops[0], '═+').Value.Length | Should -Be $Width
+    }
+
+    It "moves the logo as one block, so the letters do not shear apart" {
+        # Added after a mutation survived: centring each art row independently keeps the
+        # frame perfectly consistent (every row is padded to the border) while wrecking
+        # the logo, so the geometry check above cannot see it. The invariant is that
+        # widening shifts every art row by the SAME amount.
+        $indentsAt = @{}
+        foreach ($width in 70, 90) {
+            $script:BoxWidth = $width
+            $out = & { Show-Banner } 6>&1 | ForEach-Object { [string]$_ }
+            $lines = ($out -join "`n") -split "`r?`n"
+            # Art rows: framed rows whose CONTENT carries logo glyphs. Matching on '█'
+            # alone finds only five - the last row of the wordmark is drawn entirely from
+            # '╚═╝' and has no block character in it at all.
+            $art = @($lines |
+                ForEach-Object { [regex]::Match($_, '^\s*║(.*)║$').Groups[1].Value } |
+                Where-Object { $_ -match '[█╚]' })
+            $art.Count | Should -Be 6 -Because 'the logo is six rows'
+            $indentsAt[$width] = $art | ForEach-Object { $_.Length - $_.TrimStart().Length }
+        }
+
+        $shifts = 0..5 | ForEach-Object { $indentsAt[90][$_] - $indentsAt[70][$_] }
+        ($shifts | Select-Object -Unique).Count |
+            Should -Be 1 -Because 'every row of the logo must shift by the same amount, or the letters no longer line up'
+        $shifts[0] | Should -BeGreaterThan 0 -Because 'a wider box must actually move the block'
+
+        # And at the default width the banner must sit exactly where ten releases of users
+        # have seen it. Added after a mutation survived the check above: centring each row
+        # independently keeps the rows in step with each other (they are all the same
+        # length) while sliding the whole logo sideways, so only an absolute anchor sees it.
+        $indentsAt[70][0] | Should -Be 6
+        $indentsAt[70][1] | Should -Be 5
+        $indentsAt[70][5] | Should -Be 6
+    }
+
+    It "centres the title rather than padding it by a fixed amount" {
+        # Added after a mutation survived: a hardcoded left pad still produces a valid box
+        # (the row is padded out to the border), so only the symmetry can catch it.
+        $script:BoxWidth = 90
+        $out = & { Show-Banner } 6>&1 | ForEach-Object { [string]$_ }
+        $lines = ($out -join "`n") -split "`r?`n"
+
+        $titleRow = @($lines | Where-Object { $_ -match 'Ultimate Windows 11 Maintenance Script' })
+        $titleRow | Should -Not -BeNullOrEmpty
+        $inner = [regex]::Match($titleRow[0], '^\s*║(.*)║$').Groups[1].Value
+        $left  = $inner.Length - $inner.TrimStart().Length
+        $right = $inner.Length - $inner.TrimEnd().Length
+
+        [math]::Abs($left - $right) | Should -BeLessOrEqual 1 -Because 'the title must sit in the middle of the frame'
+    }
+
+    It "keeps the banner square for a version string of any length - '<Version>'" -ForEach @(
+        @{ Version = '2.5' }, @{ Version = '2.21' }, @{ Version = '2.100' }, @{ Version = '10.0' }
+    ) {
+        # The banner used to be a literal here-string whose title row was padded by hand
+        # for exactly four characters of version. It measured 70 columns only because
+        # "2.21" is four characters; 2.5 or 2.100 would have shifted that row's border
+        # out of line with the rest of the box - and the next release bumps the version.
+        $script:BoxWidth = 70
+        $savedVersion = $script:Version
+        try {
+            $script:Version = $Version
+            $out = & { Show-Banner } 6>&1 | ForEach-Object { [string]$_ }
+            $lines = ($out -join "`n") -split "`r?`n" | ForEach-Object { $_.TrimEnd() }
+
+            Test-BoxGeometry -Lines $lines | Should -BeNullOrEmpty
+            ($lines -join "`n") | Should -Match ([regex]::Escape("v$Version"))
+        } finally {
+            $script:Version = $savedVersion
+        }
+    }
+}
+
+Describe "Expand-ConsoleWindow" -Tag "Unit", "Helper", "V222" {
+
+    It "never throws, whatever the host does" {
+        # Windows Terminal refuses programmatic resizing and redirected hosts throw.
+        # This runs during startup of every single run: it must not be able to fail one.
+        { Expand-ConsoleWindow -DesiredWidth 140 } | Should -Not -Throw
+    }
+
+    It "does not shrink a console that is already wider than asked" {
+        # Asking for less than the current width must be a no-op, not a resize down -
+        # a user who widened the window deliberately keeps their width.
+        $before = Get-ConsoleWidth
+        Expand-ConsoleWindow -DesiredWidth 10
+        Get-ConsoleWidth | Should -Be $before
+    }
+}
+
+#endregion
+
+#region v2.22 Disk Cleanup idle detection
+
+Describe "Update-IdleStreak" -Tag "Unit", "Helper", "V222" {
+    # The rule that decides when a resident cleanmgr is declared finished. Pure, so the
+    # decision can be exercised without a process - the measured case (finished in ~10s,
+    # then frozen for the remaining ~890) is otherwise only reproducible on a live machine.
+
+    It "counts consecutive identical fingerprints" {
+        $s = 0
+        $s = Update-IdleStreak -Previous 'a' -Current 'a' -Streak $s
+        $s | Should -Be 1
+        $s = Update-IdleStreak -Previous 'a' -Current 'a' -Streak $s
+        $s | Should -Be 2
+    }
+
+    It "resets the moment the process does anything" {
+        # One counter moving is enough: a process mid-delete is not idle.
+        Update-IdleStreak -Previous 'cpu|1|2|3|4' -Current 'cpu|1|2|3|5' -Streak 11 | Should -Be 0
+    }
+
+    It "treats an unreadable fingerprint as 'cannot tell', never as idle - <Case>" -ForEach @(
+        @{ Case = 'previous unreadable'; Prev = $null; Curr = 'a' }
+        @{ Case = 'current unreadable';  Prev = 'a';   Curr = $null }
+        @{ Case = 'both unreadable';     Prev = $null; Curr = $null }
+        @{ Case = 'previous empty';      Prev = '';    Curr = 'a' }
+        @{ Case = 'current empty';       Prev = 'a';   Curr = '' }
+    ) {
+        # The safety property. Get-DiskCleanupActivityFingerprint returns $null when WMI cannot
+        # answer, and if that accumulated towards the threshold a machine with broken WMI
+        # would cut every Disk Cleanup short after two minutes and call it complete.
+        Update-IdleStreak -Previous $Prev -Current $Curr -Streak 11 |
+            Should -Be 0 -Because 'not being able to measure work is not evidence that work finished'
+    }
+
+    It "compares case-sensitively, so counters differing only in case still count as work" {
+        # Fingerprints are numeric today, but -eq in PowerShell is case-INSENSITIVE by
+        # default and this comparison decides whether to stop waiting. Pinned deliberately.
+        Update-IdleStreak -Previous 'A|1' -Current 'a|1' -Streak 5 | Should -Be 0
+    }
+}
+
+Describe "Get-DiskCleanupActivityFingerprint" -Tag "Unit", "Helper", "V222" {
+
+    It "returns a comparable fingerprint for a live process" {
+        $fp = Get-DiskCleanupActivityFingerprint -ProcessId $PID
+        $fp | Should -Not -BeNullOrEmpty
+        # CPU kernel + CPU user + three I/O counters
+        # Five counters, then '#', then the identity segment (process count, PID list)
+        ($fp -split '[|#]').Count | Should -Be 7
+        $fp | Should -Match '#' -Because 'the activity and identity parts must stay separable'
+    }
+
+    It "changes after the process does measurable work" {
+        # Proves the fingerprint actually tracks activity. If it were built from cached or
+        # constant values, everything would look idle and every cleanmgr would be cut short
+        # at two minutes - the failure mode that matters most here.
+        $before = Get-DiskCleanupActivityFingerprint -ProcessId $PID
+        $sink = 0
+        1..200000 | ForEach-Object { $sink += $_ }
+        $null = Get-ChildItem -Path ([System.IO.Path]::GetTempPath()) -ErrorAction SilentlyContinue | Select-Object -First 50
+        $after = Get-DiskCleanupActivityFingerprint -ProcessId $PID
+
+        $after | Should -Not -Be $before
+    }
+
+    It "returns null for a process id that does not exist, rather than throwing" {
+        # cleanmgr can exit between two checks; the caller must get "cannot tell", and
+        # Update-IdleStreak turns that into a reset rather than a false completion.
+        Get-DiskCleanupActivityFingerprint -ProcessId 999999 | Should -BeNullOrEmpty
+    }
+
+    It "the Disk Cleanup fingerprint covers our own process tree, not every cleanmgr" {
+        # Raised in review, after the first attempt aggregated by process NAME. A Disk
+        # Cleanup the user opens by hand is also cleanmgr.exe, and including it made the
+        # verdict depend on a stranger: its activity could satisfy "work was observed" for
+        # our run, and its busyness could keep us waiting the full fifteen minutes after
+        # our own cleanup had finished. Descendants of our PID, and nothing else.
+        Mock Get-CimInstance {
+            @(
+                [pscustomobject]@{ ProcessId = 100; ParentProcessId = 1;   KernelModeTime = 10; UserModeTime = 1; ReadOperationCount = 1; WriteOperationCount = 1; OtherOperationCount = 1 }
+                [pscustomobject]@{ ProcessId = 200; ParentProcessId = 100; KernelModeTime = 20; UserModeTime = 2; ReadOperationCount = 2; WriteOperationCount = 2; OtherOperationCount = 2 }
+                # An unrelated cleanmgr the user started: must not appear in the fingerprint
+                [pscustomobject]@{ ProcessId = 900; ParentProcessId = 1;   KernelModeTime = 99999; UserModeTime = 99999; ReadOperationCount = 99999; WriteOperationCount = 99999; OtherOperationCount = 99999 }
+            )
+        }
+
+        $fp = Get-DiskCleanupActivityFingerprint -ProcessId 100
+
+        # our process + its child: kernel 10+20, and the PID list names exactly those two
+        $fp | Should -Be '30|3|3|3|3#2|100,200'
+        $fp | Should -Not -Match '900' -Because 'an unrelated cleanmgr must not influence our verdict'
+    }
+
+    It "the Disk Cleanup fingerprint is null when our process is gone" {
+        Mock Get-CimInstance { @([pscustomobject]@{ ProcessId = 900; ParentProcessId = 1; KernelModeTime = 1; UserModeTime = 1; ReadOperationCount = 1; WriteOperationCount = 1; OtherOperationCount = 1 }) }
+        Get-DiskCleanupActivityFingerprint -ProcessId 100 | Should -BeNullOrEmpty
+    }
+
+    It "the Disk Cleanup fingerprint terminates on a cyclic parent chain" {
+        # PID reuse can produce a cycle; the walk must end rather than spin forever inside
+        # a wait that is already holding up the run.
+        Mock Get-CimInstance {
+            @(
+                [pscustomobject]@{ ProcessId = 100; ParentProcessId = 200; KernelModeTime = 1; UserModeTime = 0; ReadOperationCount = 0; WriteOperationCount = 0; OtherOperationCount = 0 }
+                [pscustomobject]@{ ProcessId = 200; ParentProcessId = 100; KernelModeTime = 1; UserModeTime = 0; ReadOperationCount = 0; WriteOperationCount = 0; OtherOperationCount = 0 }
+            )
+        }
+        $fp = Get-DiskCleanupActivityFingerprint -ProcessId 100
+        $fp | Should -Be '2|0|0|0|0#2|100,200'
+    }
+
+    It "sums counters as integers, without the precision loss of a Double" {
+        # Measure-Object -Sum returns a Double and silently loses integer precision past
+        # 2^53, so a small counter change could vanish at large totals (raised in review).
+        $big = 9007199254740993   # 2^53 + 1, not representable as a Double
+        Mock Get-CimInstance {
+            @([pscustomobject]@{ ProcessId = 100; ParentProcessId = 1; KernelModeTime = $big; UserModeTime = 0; ReadOperationCount = 0; WriteOperationCount = 0; OtherOperationCount = 0 })
+        }
+        (Get-DiskCleanupActivityFingerprint -ProcessId 100).Split('|')[0] | Should -Be "$big"
+    }
+
+    It "returns null - never a constant - when the counters cannot be read at all" {
+        # Added after a mutation survived. The test above exercises the "no such process"
+        # branch, where Get-CimInstance returns nothing; it never reached the catch, which
+        # is where a broken WMI lands. Returning any FIXED value there would be the worst
+        # possible answer: two consecutive unreadable checks would compare equal, the idle
+        # streak would build on pure ignorance, and a machine with broken WMI would cut
+        # every Disk Cleanup short and call it finished.
+        Mock Get-CimInstance { throw 'WMI is unavailable' }
+
+        $first  = Get-DiskCleanupActivityFingerprint -ProcessId $PID
+        $second = Get-DiskCleanupActivityFingerprint -ProcessId $PID
+
+        $first | Should -BeNullOrEmpty
+        Update-IdleStreak -Previous $first -Current $second -Streak 11 |
+            Should -Be 0 -Because 'two unreadable samples must not look like two identical ones'
+
+        # The function actually used by the Disk Cleanup wait must obey the same rule.
+        # Raised in review: this guard used to exercise only the single-process helper,
+        # so a fixed value returned from the family function's catch would have survived it.
+        Get-DiskCleanupActivityFingerprint -ProcessId $PID | Should -BeNullOrEmpty
+    }
+}
+
+Describe "Wait-CleanmgrCompletion" -Tag "Unit", "Helper", "V222" {
+    # The whole wait, exercised without a process and without waiting fifteen minutes -
+    # the caller injects exit state, activity and the sleep. This is the part that could
+    # previously only be observed on a live machine, which is why the defect it fixes
+    # survived into a release: on the stand cleanmgr exits normally.
+
+    BeforeEach {
+        $script:progressAt = [System.Collections.Generic.List[int]]::new()
+        $script:noWait = { param($seconds) }
+        $script:onProgress = { param($seconds) $script:progressAt.Add($seconds) }
+    }
+
+    It "returns 'exited' as soon as the process leaves" {
+        $script:calls = 0
+        $r = Wait-CleanmgrCompletion `
+                -HasExited { $script:calls++; $script:calls -gt 3 } `
+                -GetFingerprint { "moving-$($script:calls)" } `
+                -Wait $script:noWait -OnProgress $script:onProgress
+
+        $r.Outcome | Should -Be 'exited'
+        $r.Elapsed | Should -BeLessThan 900
+    }
+
+    It "stops waiting once the process has been completely still for the threshold" {
+        # The measured case: works briefly, then never exits and never moves again. The verdict
+        # is 'nothing left to observe', not 'proven finished'. One interval of real work
+        # first, because stillness only counts after something was seen happening.
+        $script:n = 0
+        $r = Wait-CleanmgrCompletion `
+                -HasExited { $false } `
+                -GetFingerprint { $script:n++; if ($script:n -le 2) { "working-$($script:n)" } else { 'frozen' } } `
+                -CheckInterval 10 -IdleChecksRequired 12 `
+                -Wait $script:noWait -OnProgress $script:onProgress
+
+        $r.Outcome | Should -Be 'idle-resident'
+        # 20s of observed movement (working-1 -> working-2 -> frozen, two changes), then
+        # 12 identical checks of 10s each.
+        $r.Elapsed | Should -Be 140 -Because 'the streak only starts once the fingerprint stops changing'
+    }
+
+    It "waits the full timeout when the process keeps working" {
+        # Every check shows movement, so the idle streak never builds - this must still
+        # behave exactly as it did before v2.22.
+        $script:n = 0
+        $r = Wait-CleanmgrCompletion `
+                -HasExited { $false } `
+                -GetFingerprint { $script:n++; "busy-$($script:n)" } `
+                -MaxWaitSeconds 900 -CheckInterval 10 `
+                -Wait $script:noWait -OnProgress $script:onProgress
+
+        $r.Outcome | Should -Be 'timeout'
+        $r.Elapsed | Should -Be 900
+    }
+
+    It "does not call a busy process idle just because it pauses briefly" {
+        # Stillness must be CONSECUTIVE. A process that goes quiet for a while and then
+        # resumes is working, and cutting it short would truncate a real cleanup.
+        $script:n = 0
+        $r = Wait-CleanmgrCompletion `
+                -HasExited { $false } `
+                -GetFingerprint {
+                    $script:n++
+                    # quiet for 8 checks, then a burst of work, repeatedly
+                    if ($script:n % 10 -lt 8) { 'quiet-block-' + [math]::Floor($script:n / 10) } else { "work-$($script:n)" }
+                } `
+                -MaxWaitSeconds 900 -CheckInterval 10 -IdleChecksRequired 12 `
+                -Wait $script:noWait -OnProgress $script:onProgress
+
+        $r.Outcome | Should -Be 'timeout' -Because 'the streak never reached 12 consecutive still checks'
+    }
+
+    It "never declares idle when activity cannot be measured at all" {
+        # Broken WMI must not look like a finished cleanup. Without this, such a machine
+        # would silently cut every Disk Cleanup off after two minutes.
+        $r = Wait-CleanmgrCompletion `
+                -HasExited { $false } `
+                -GetFingerprint { $null } `
+                -MaxWaitSeconds 900 -CheckInterval 10 `
+                -Wait $script:noWait -OnProgress $script:onProgress
+
+        $r.Outcome | Should -Be 'timeout'
+        $r.Elapsed | Should -Be 900
+    }
+
+    It "reports progress once a minute, not on every check" {
+        $r = Wait-CleanmgrCompletion `
+                -HasExited { $false } `
+                -GetFingerprint { $script:n++; "busy-$($script:n)" } `
+                -MaxWaitSeconds 300 -CheckInterval 10 `
+                -Wait $script:noWait -OnProgress $script:onProgress
+
+        $r.Outcome | Should -Be 'timeout'
+        $script:progressAt | Should -Be @(60, 120, 180, 240, 300)
+    }
+
+    It "does not call a process finished if it was never seen doing anything" {
+        # Raised in review: without this, "it has finished" and "it has not started yet"
+        # are the same observation. A cleanmgr that is suspended, or waiting on something
+        # before it begins, would otherwise be declared complete after two minutes of a
+        # stillness that never followed any work at all.
+        $r = Wait-CleanmgrCompletion `
+                -HasExited { $false } `
+                -GetFingerprint { 'frozen-from-the-start' } `
+                -MaxWaitSeconds 900 -CheckInterval 10 -IdleChecksRequired 12 `
+                -Wait $script:noWait -OnProgress $script:onProgress
+
+        $r.Outcome | Should -Be 'timeout' -Because 'stillness is only taken as "nothing left to wait for" if work was observed first'
+        $r.Elapsed | Should -Be 900
+    }
+
+    It "does not count an unreadable sample as the activity that qualifies an early verdict" {
+        # A reset caused by "cannot tell" must not stand in for observed work: otherwise
+        # a machine with flaky WMI could satisfy the sawActivity condition without any
+        # process ever having done anything.
+        $script:n = 0
+        $r = Wait-CleanmgrCompletion `
+                -HasExited { $false } `
+                -GetFingerprint {
+                    $script:n++
+                    # one unreadable blip, then frozen for the rest of the run
+                    if ($script:n -eq 2) { $null } else { 'frozen' }
+                } `
+                -MaxWaitSeconds 900 -CheckInterval 10 -IdleChecksRequired 12 `
+                -Wait $script:noWait -OnProgress $script:onProgress
+
+        $r.Outcome | Should -Be 'timeout'
+    }
+
+    It "still ends early when real work was observed and then stopped" {
+        # The measured case, now with the stricter rule in place: it must still work.
+        $script:n = 0
+        $r = Wait-CleanmgrCompletion `
+                -HasExited { $false } `
+                -GetFingerprint {
+                    $script:n++
+                    if ($script:n -le 3) { "working-$($script:n)" } else { 'done-and-frozen' }
+                } `
+                -MaxWaitSeconds 900 -CheckInterval 10 -IdleChecksRequired 12 `
+                -Wait $script:noWait -OnProgress $script:onProgress
+
+        $r.Outcome | Should -Be 'idle-resident'
+        $r.Elapsed | Should -BeLessThan 900
+    }
+
+    It "prefers 'exited' over 'timeout' when the process leaves during the final interval" {
+        # Same instant, two possible labels; the accurate one is that it exited.
+        $script:n = 0
+        $r = Wait-CleanmgrCompletion `
+                -HasExited { $script:n -ge 30 } `
+                -GetFingerprint { $script:n++; "busy-$($script:n)" } `
+                -MaxWaitSeconds 300 -CheckInterval 10 `
+                -Wait $script:noWait -OnProgress $script:onProgress
+
+        $r.Outcome | Should -Be 'exited'
+    }
+}
+
+#endregion
+
+#region v2.22 single end-of-run path
+
+Describe "Invoke-ScriptUpdate stop/continue contract" -Tag "Unit", "Helper", "V222" {
+    # v2.22: the function used to end the process itself, so its most important branch -
+    # the successful update - could not be tested at all without killing the suite. It now
+    # answers a question ("is the run over?") and the caller ends the run. That answer is
+    # the whole contract: get it wrong in the false direction and a run continues doing
+    # maintenance with a replaced script file underneath it; wrong in the true direction
+    # and an ordinary run stops before doing any work.
+
+    BeforeEach {
+        $script:Stats.WarningsCount = 0
+        $script:Stats.ErrorsCount = 0
+        $script:Stats.Aborted = $null
+        $script:printed = [System.Collections.Generic.List[string]]::new()
+        Mock Write-Host { if ($Object) { $script:printed.Add([string]$Object) } }
+        Mock Wait-ForKeyPress { }
+    }
+
+    It "returns true after an update it verified, so the caller ends the run" {
+        Mock Test-InteractiveConsole { $true }
+        Mock Read-Host { 'y' }
+        Mock Select-UpdateCommand { 'Update-Script' }
+        Mock Update-Script { }
+        Mock Get-ScriptFileVersion { '2.21' }
+
+        $stop = Invoke-ScriptUpdate -UpdateInfo @{ CurrentVersion = '2.20'; LatestVersion = '2.21'
+                                                   Channel = 'gallery'; Provider = 'PowerShellGet' }
+
+        $stop | Should -BeOfType [bool] -Because 'a leaked pipeline object here would make the caller decide on an array'
+        $stop | Should -BeTrue
+        $script:Stats.Aborted | Should -Be 'UpdatedAndExited'
+        ($script:printed -join "`n").Contains('Update complete') | Should -BeTrue
+    }
+
+    It "stays a plain boolean even when the update provider writes to the pipeline" {
+        # Added after a mutation survived: dropping the `$null =` in front of the provider
+        # switch changed nothing, because every mock returns nothing. A real provider that
+        # emitted an object would make this function return an array, and the caller's
+        # `if (...)` would then be judging the array rather than the answer. Update-Script
+        # and Update-PSResource are documented as returning nothing, but "documented as"
+        # is not "guaranteed to", and the cost of the guard is one assignment.
+        Mock Test-InteractiveConsole { $true }
+        Mock Read-Host { 'y' }
+        Mock Select-UpdateCommand { 'Update-Script' }
+        Mock Update-Script { [pscustomobject]@{ Name = 'WinClean'; Version = '2.21' } }
+        Mock Get-ScriptFileVersion { '2.21' }
+
+        $stop = Invoke-ScriptUpdate -UpdateInfo @{ CurrentVersion = '2.20'; LatestVersion = '2.21'
+                                                   Channel = 'gallery'; Provider = 'PowerShellGet' }
+
+        @($stop).Count | Should -Be 1 -Because 'provider output must not be part of the answer'
+        $stop | Should -BeOfType [bool]
+        $stop | Should -BeTrue
+    }
+
+    It "does not write the result JSON itself - that belongs to the shared end-of-run path" {
+        # The v2.21 shape: this function hand-copied the JSON write because its own exit
+        # bypassed the finally. Copying it back would recreate two owners of one artefact.
+        Mock Test-InteractiveConsole { $true }
+        Mock Read-Host { 'y' }
+        Mock Select-UpdateCommand { 'Update-Script' }
+        Mock Update-Script { }
+        Mock Get-ScriptFileVersion { '2.21' }
+        Mock Write-ResultJson { }
+
+        $null = Invoke-ScriptUpdate -UpdateInfo @{ CurrentVersion = '2.20'; LatestVersion = '2.21'
+                                                   Channel = 'gallery'; Provider = 'PowerShellGet' }
+
+        Should -Invoke Write-ResultJson -Times 0
+    }
+
+    It "returns false in a preview, without ever attempting an update" {
+        # Rewritten (raised in review): this case used to live in the -ForEach below, whose
+        # body sets a LOCAL $ReportOnly = $false before running each Setup. PowerShell
+        # resolves variables through the dynamic scope chain, so the product saw that local
+        # and not the $script: value the Setup wrote - the case never entered the ReportOnly
+        # branch at all and merely duplicated 'non-interactive'. Proved by mutation: making
+        # the ReportOnly branch return $true survived this Describe entirely.
+        # The local assignment here is what the function actually reads.
+        $ReportOnly = $true
+        Mock Test-InteractiveConsole { $true }
+        Mock Read-Host { 'y' }
+        Mock Update-Script { }
+        Mock Update-PSResource { }
+
+        $stop = Invoke-ScriptUpdate -UpdateInfo @{ CurrentVersion = '2.20'; LatestVersion = '2.21'
+                                                   Channel = 'gallery'; Provider = 'PowerShellGet' }
+
+        $stop | Should -BeFalse
+        Should -Invoke Update-Script -Exactly -Times 0 -Because 'a preview must change nothing'
+        Should -Invoke Update-PSResource -Exactly -Times 0
+        $script:Stats.Aborted | Should -BeNullOrEmpty
+    }
+
+    It "returns false so the run continues - <Case>" -ForEach @(
+        @{ Case = 'non-interactive';    Setup = { Mock Test-InteractiveConsole { $false } } }
+        @{ Case = 'user declines';      Setup = { Mock Test-InteractiveConsole { $true }; Mock Read-Host { 'n' } } }
+        @{ Case = 'update command failed'; Setup = {
+                Mock Test-InteractiveConsole { $true }; Mock Read-Host { 'y' }
+                Mock Select-UpdateCommand { 'Update-Script' }
+                Mock Update-Script { throw 'gallery exploded' } } }
+        @{ Case = 'version did not change'; Setup = {
+                Mock Test-InteractiveConsole { $true }; Mock Read-Host { 'y' }
+                Mock Select-UpdateCommand { 'Update-Script' }
+                Mock Update-Script { }
+                Mock Get-ScriptFileVersion { '2.20' } } }
+    ) {
+        $ReportOnly = $false
+        & $Setup
+
+        $stop = Invoke-ScriptUpdate -UpdateInfo @{ CurrentVersion = '2.20'; LatestVersion = '2.21'
+                                                   Channel = 'gallery'; Provider = 'PowerShellGet' }
+
+        $stop | Should -BeFalse -Because 'the maintenance the user asked for must still run'
+        $script:Stats.Aborted | Should -BeNullOrEmpty
+    }
+
+    It "returns false for a copy it cannot aim an update at - <Channel>" -ForEach @(
+        @{ Channel = 'installer' }
+        @{ Channel = 'oneliner' }
+        @{ Channel = 'manual' }
+        @{ Channel = 'unknown' }
+        @{ Channel = 'gallery-ambiguous' }
+    ) {
+        $ReportOnly = $false
+        Mock Test-InteractiveConsole { $true }
+
+        $stop = Invoke-ScriptUpdate -UpdateInfo @{ CurrentVersion = '2.20'; LatestVersion = '2.21'
+                                                   Channel = $Channel; Provider = 'PowerShellGet' }
+
+        $stop | Should -BeFalse
+    }
+}
+
+Describe "Complete-WinCleanRun" -Tag "Unit", "Helper", "V222" {
+    # One end-of-run path for the normal finally and for both abort branches. Before this
+    # the list of things a run must do on the way out existed in three places, and v2.21
+    # shipped two separate fixes to the copies rather than one fix to the list.
+
+    BeforeEach {
+        $script:Stats.Aborted = $null
+        $script:RunCompleted = $false
+        Mock Write-ResultJson { }
+        Mock Show-FinalStatistics { }
+    }
+
+    It "writes the result JSON and shows the summary for an ordinary run" {
+        Complete-WinCleanRun -ResultPath 'C:\some\result.json'
+
+        # -Exactly throughout this block, established by experiment: Pester treats
+        # `-Times 0` as "never" but `-Times N` (N>0) as "AT LEAST N", so the plain form
+        # cannot see a duplicate. That is exactly what the latch below has to prevent, and
+        # a mutation run proved the non-exact assertion could not catch its removal.
+        Should -Invoke Write-ResultJson -Exactly -Times 1
+        Should -Invoke Show-FinalStatistics -Exactly -Times 1
+    }
+
+    It "still writes the JSON for an aborted run but shows no summary - <Aborted>" -ForEach @(
+        @{ Aborted = 'UpdatedAndExited' }
+        @{ Aborted = 'PendingRebootDeclined' }
+    ) {
+        # Automation must always get the artefact; a human must not be told
+        # "COMPLETED SUCCESSFULLY" about a run that deliberately did nothing.
+        $script:Stats.Aborted = $Aborted
+
+        Complete-WinCleanRun -ResultPath 'C:\some\result.json'
+
+        Should -Invoke Write-ResultJson -Exactly -Times 1
+        Should -Invoke Show-FinalStatistics -Exactly -Times 0
+    }
+
+    It "is latched - an abort path that also unwinds through the finally writes once" {
+        # Both abort paths call this explicitly and then return; the finally calls it again
+        # for every other run. Without the latch the JSON would be written twice and the
+        # summary shown twice for the ordinary case.
+        Complete-WinCleanRun -ResultPath 'C:\some\result.json'
+        Complete-WinCleanRun -ResultPath 'C:\some\result.json'
+        Complete-WinCleanRun -ResultPath 'C:\some\result.json'
+
+        Should -Invoke Write-ResultJson -Exactly -Times 1
+        Should -Invoke Show-FinalStatistics -Exactly -Times 1
+    }
+
+    It "releases the log handle so the log can be moved right after the run" {
+        $logFile = Join-Path ([System.IO.Path]::GetTempPath()) "WinCleanComplete_$(Get-Random).log"
+        $prevPath = $script:LogPath
+        $script:LogPath = $logFile
+        try {
+            Write-LogFileLine -Line 'held open' -StartNewFile
+            $script:LogWriter | Should -Not -BeNullOrEmpty -Because 'the test needs a real open handle to prove it gets released'
+
+            Complete-WinCleanRun -ResultPath 'C:\some\result.json'
+
+            $script:LogWriter | Should -BeNullOrEmpty
+            # The operational point of releasing it, asserted as behaviour rather than as
+            # a null check: a still-open handle would make this fail on Windows.
+            { Remove-Item -LiteralPath $logFile -Force -ErrorAction Stop } | Should -Not -Throw
+        } finally {
+            if ($script:LogWriter) { $script:LogWriter.Dispose(); $script:LogWriter = $null; $script:LogWriterPath = $null }
+            Remove-Item -LiteralPath $logFile -Force -ErrorAction SilentlyContinue
+            $script:LogPath = $prevPath
+        }
+    }
+}
+
+#endregion
+
 Describe "Update-Applications when winget is absent" -Tag "Unit", "Helper", "V221" {
 
     BeforeEach {
@@ -2342,11 +3277,17 @@ Describe "Update-Applications when winget is absent" -Tag "Unit", "Helper", "V22
         # -Skip stops the dispatch, so the in-function branch is unreachable there and the
         # status would stay 'not-run'. This pins the assignment that Start-WinClean makes
         # before the phase, which no behavioural test in this suite can reach.
+        # Ordering, not proximity (v2.22): this used to look inside a 400-character window
+        # before the dispatch, and adding one more pre-phase assignment next to it pushed
+        # the line out of that window and failed a test about something else entirely.
+        # What matters is that the assignment happens BEFORE the phase is dispatched.
         $source = Get-Content $script:WinCleanPath -Raw
         $dispatch = $source.IndexOf("Invoke-Phase -Name 'Updates'")
+        $assign   = $source.IndexOf("AppUpdatesStatus = 'skipped-parameter'`n", [StringComparison]::Ordinal)
+        if ($assign -lt 0) { $assign = $source.IndexOf("AppUpdatesStatus = 'skipped-parameter' }", [StringComparison]::Ordinal) }
         $dispatch | Should -BeGreaterThan 0
-        $preamble = $source.Substring([math]::Max(0, $dispatch - 400), [math]::Min(400, $dispatch))
-        $preamble.Contains("AppUpdatesStatus = 'skipped-parameter'") | Should -BeTrue
+        $assign   | Should -BeGreaterThan 0
+        $assign   | Should -BeLessThan $dispatch -Because 'the status must be set before the phase is dispatched, not merely somewhere near it'
     }
 
     It "keeps a present-but-failing winget an ERROR, and does not call that check 'checked'" {

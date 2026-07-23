@@ -14,6 +14,93 @@ Windows Update driver listing, run-to-run delta and HTML report. See CLAUDE.md.
 
 ---
 
+## [2.22] - 2026-07-23
+
+A release about knowing when work is finished, and about the run surviving things that
+have nothing to do with maintenance. Two of the three defects here are the same mistake in
+different places: treating "I could not observe it" as an answer. Disk Cleanup was
+declared incomplete because it had not exited, though it had demonstrably stopped working;
+the installer accepted a PowerShell whose version it had failed to read.
+
+### Fixed
+
+- **A Disk Cleanup that had stopped doing anything was reported as still deleting, and
+  cost the full timeout.** Measured on a live workstation: `cleanmgr /sagerun` did its
+  work in about ten seconds, closed its window, and then stayed resident - no CPU, no I/O
+  on any of the three counters, all six threads waiting. Because the wait was written
+  against process exit, the run sat there for the remaining ~890 seconds and then set
+  `DiskCleanupPending` and warned that the figures were partial, having observed nothing
+  happening for most of that time. The wait now also ends on total stillness: no CPU and
+  no I/O across twelve consecutive checks, after activity was seen at least once. That is
+  reported as what it is - an observation, not proof of completion - so the new status is
+  called `idle-resident` and the log says what was measured. Not being able to measure
+  activity resets the counter rather than advancing it, so a machine where WMI is broken
+  keeps the old, patient behaviour instead of cutting cleanups short.
+- **An unusable `-LogPath` killed the run before any maintenance happened.** The log
+  header was written with two bare `Out-File` calls placed before the block that
+  guarantees the result JSON and the summary. Six of seven bad paths make `Out-File` throw
+  a terminating error even at the default `ErrorActionPreference` (missing directory, path
+  is a directory, invalid characters, a colon in the name, an over-long path, an
+  unreachable UNC share), and the exception escaped the whole function. A log that cannot
+  be written is now a degraded run, as it always was everywhere else - never a failed one.
+- **`install.ps1` accepted a PowerShell 7 whose version it could not read.** The check was
+  `if ($pwshVersion -and $pwshVersion -lt '7.1')`, so an unreadable version left the
+  comparison unevaluated and the installer carried on to pin an elevated desktop shortcut
+  to a binary nobody had established was suitable. This is the same fail-open shape as the
+  SHA256 verification that hid inside `if ($hashAsset)` until v2.17.
+- **The banner's frame depended on the version being four characters long.** It was a
+  single literal block whose padding had been counted by hand; the title row measured 70
+  columns only because "2.21" happens to be four characters, so a version like 2.5 or
+  2.100 would have pushed its border out of line. The banner is now composed.
+
+### Changed
+
+- **Console output follows the window.** The desktop shortcut opens conhost at its
+  120-column default while winget's upgrade table needs about 140 on a localised system,
+  so the table wrapped and every wrapped row landed across WinClean's own output. The
+  window is now widened best-effort at startup (never beyond what the screen can show,
+  never failing the run if the host refuses - Windows Terminal does), and the frames are
+  derived from the actual console width instead of a literal 70 repeated in four places.
+  Bounded at both ends: never narrower than the historical 70, never wider than 90.
+- **Every run ends through one code path.** A successful self-update used to call `exit`
+  itself, bypassing the block that writes the result JSON, shows the summary and releases
+  the log handle - so it hand-copied the parts someone remembered at the time. That is how
+  v2.21 came to ship two separate fixes to the same few lines. The list now exists once.
+  Exit codes are unchanged.
+- **Storage Sense: the log now says which of two things happened** when it returns success
+  having freed nothing measurable - it is switched off, or it ran and there was simply
+  nothing left. On a regularly maintained machine the second happens every time and looked
+  like a malfunction. Deliberately reported rather than acted on: skipping Disk Cleanup on
+  that basis would silently stop cleaning Update Cleanup, memory dumps, Language Pack, old
+  ChkDsk files and Windows Error Reporting, none of which Storage Sense touches.
+
+### Added
+
+- `DiskCleanupStatus` in the result JSON - twelve values covering every way that step can
+  end, replacing a boolean that covered two different truths. `idle-resident` is named
+  after what is measured (a process seen working, then completely still) rather than after
+  the conclusion drawn from it, because that conclusion can be wrong and nothing downstream
+  is built to depend on it. `running`, `skipped-report-only` and `skipped-cleanup-group`
+  exist because "not-run" is documented as "the run aborted before reaching it", which is
+  untrue of a healthy preview, a deliberate skip, or a cleanup still in flight. The old
+  `failed` was split into `not-armed`, `start-failed` and `exit-nonzero` - only the last
+  means the machine may be partially cleaned.
+- `SUPPORT.md`, a release-notes template in `docs/release-process.md`, and a section in
+  `CONTRIBUTING.md` describing what gets accepted and on what criteria.
+
+### Tests
+
+- 573 -> 702. Four mutation runs over the new logic (79 mutations); every one is caught.
+  Eight of them survived at first and each exposed a real gap rather than a wrong fix -
+  among them that `Should -Invoke -Times N` means *at least* N and cannot see a duplicate,
+  that the "unreadable activity" branch was never exercised, and that nothing pinned the
+  logo's alignment or the title's centring.
+- Frame geometry is now checked at 70, 74, 80 and 90 columns. The smoke test runs with
+  output redirected, where the width is unknown and the frame falls back to 70 - so on its
+  own it could only ever have verified the width that existed before this release.
+
+---
+
 ## [2.21] - 2026-07-23
 
 A release about telling the truth on the way out. The self-update could change a file

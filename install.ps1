@@ -77,8 +77,23 @@ if (-not (Test-Path $pwshPath)) {
     return
 }
 
+# The version has to be PROVEN, not merely "not disproven" (raised in external review).
+# The previous form was `if ($pwshVersion -and $pwshVersion -lt '7.1')`, so a version that
+# could not be read left $pwshVersion $null, skipped the comparison and continued - the
+# installer then pinned an elevated desktop shortcut to a binary whose suitability nobody
+# had established. That is the same fail-open shape as the SHA256 verification that hid
+# inside `if ($hashAsset)` until v2.17: a check that cannot run becomes a check that
+# passes. Absence of evidence is not evidence of compatibility.
 $pwshVersion = try { [version](((Get-Item $pwshPath).VersionInfo.ProductVersion -split '-')[0]) } catch { $null }
-if ($pwshVersion -and $pwshVersion -lt [version]'7.1') {
+if (-not $pwshVersion) {
+    # Deliberately a different message from "your version is too old": the user needs to
+    # know the file is there but unreadable, which points at a damaged or substituted
+    # install rather than at an outdated one.
+    Stop-Install "PowerShell 7 was found at $pwshPath, but its version could not be read - WinClean requires 7.1+ and will not assume it." `
+                 "Repair or reinstall PowerShell 7:  winget install --id Microsoft.PowerShell --force"
+    return
+}
+if ($pwshVersion -lt [version]'7.1') {
     Stop-Install "PowerShell $pwshVersion found at $pwshPath, but WinClean requires 7.1+." `
                  "Update it with:  winget upgrade --id Microsoft.PowerShell"
     return

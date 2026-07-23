@@ -115,3 +115,49 @@ Describe "Test-ResultSupportsPhaseBuckets (version gate for stand assertions)" -
         Test-ResultSupportsPhaseBuckets ([string]$r.Version) | Should -BeTrue
     }
 }
+
+Describe "Stand report-mode guard truth table" -Tag "Unit", "Stand", "V222" {
+    <#
+        An external reviewer read the guard in Invoke-StandTest.ps1
+
+            if ($Mode -in 'Report', 'ReportNoCleanup' -and -not $result.ReportOnly)
+
+        as ambiguous, and suspected ReportNoCleanup might fall outside it - which would
+        let a report-mode run that silently performed real changes pass as correct (the
+        18.07 incident). It was a false alarm: PowerShell binds -in tighter than -and, so
+        the grouping was already ($Mode -in @(...)) -and (-not ...), confirmed by the AST.
+
+        The expression is parenthesised now for readability, and pinned here so the
+        question is settled by a test rather than re-argued from precedence rules.
+    #>
+    BeforeAll {
+        # Pester 5 runs a Describe body during discovery only, so a bare `function`
+        # statement there is gone by the time the tests execute (the same trap is
+        # documented in Helpers.Tests.ps1).
+        function Test-ReportModeGuard {
+            param($Mode, $ReportOnly)
+            if (($Mode -in 'Report', 'ReportNoCleanup') -and (-not $ReportOnly)) { 'flagged' } else { 'accepted' }
+        }
+    }
+
+    It "flags <Mode> when the result JSON does not confirm ReportOnly" -ForEach @(
+        @{ Mode = 'Report' }
+        @{ Mode = 'ReportNoCleanup' }
+    ) {
+        Test-ReportModeGuard -Mode $Mode -ReportOnly $false | Should -Be 'flagged'
+    }
+
+    It "accepts <Mode> when ReportOnly is confirmed" -ForEach @(
+        @{ Mode = 'Report' }
+        @{ Mode = 'ReportNoCleanup' }
+    ) {
+        Test-ReportModeGuard -Mode $Mode -ReportOnly $true | Should -Be 'accepted'
+    }
+
+    It "does not apply to <Mode>, which is expected to change things" -ForEach @(
+        @{ Mode = 'Full' }
+        @{ Mode = 'FullWithUpdates' }
+    ) {
+        Test-ReportModeGuard -Mode $Mode -ReportOnly $false | Should -Be 'accepted'
+    }
+}
