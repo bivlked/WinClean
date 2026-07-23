@@ -1181,6 +1181,35 @@ Describe "v2.20: an operation that did nothing does not report success" -Tag "Fi
         }
     }
 
+    Context "Console widening is bounded and cannot fail a run (v2.22)" {
+        # Structural, and deliberately so: $Host.UI.RawUI is not reachable through any
+        # cmdlet, so there is nothing to mock and no way to drive these branches from a
+        # test. Both properties matter enough to pin somehow rather than not at all.
+        BeforeAll {
+            $script:expandBody = Get-FunctionBody -Name 'Expand-ConsoleWindow'
+        }
+
+        It "never asks for a window wider than the screen can show" {
+            # Asking for more than the physical maximum throws; the catch would swallow it
+            # and the window would silently stay narrow - the defect, unfixed and unreported.
+            $script:expandBody | Should -Match 'MaxPhysicalWindowSize'
+        }
+
+        It "grows the buffer before the window, which is the only order that works" {
+            $bufferAt = $script:expandBody.IndexOf('$raw.BufferSize =')
+            $windowAt = $script:expandBody.IndexOf('$raw.WindowSize =')
+            $bufferAt | Should -BeGreaterThan 0
+            $windowAt | Should -BeGreaterThan $bufferAt -Because 'a window may never exceed its buffer'
+        }
+
+        It "swallows a refusing host instead of failing the run" {
+            # Windows Terminal refuses programmatic resizing. This runs at the start of
+            # every run: cosmetics must never be able to stop maintenance.
+            $script:expandBody | Should -Match '(?s)\} catch \{'
+            $script:expandBody | Should -Not -Match '(?s)catch \{[^}]*throw'
+        }
+    }
+
     Context "Disk Cleanup that finished but never exited (v2.22)" {
         # Wait-CleanmgrCompletion is covered behaviourally in Helpers.Tests.ps1. What is
         # not reachable without a live cleanmgr is how Invoke-StorageSense REPORTS the

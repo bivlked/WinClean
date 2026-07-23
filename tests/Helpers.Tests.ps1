@@ -2415,6 +2415,212 @@ Describe "Invoke-ScriptUpdate branches" -Tag "Unit", "Helper", "V221" {
     }
 }
 
+#region v2.22 adaptive console width
+
+Describe "Get-BoxWidth" -Tag "Unit", "Helper", "V222" {
+    # The frames were a literal 70 in four places. Widening them is only safe if the
+    # result is bounded at BOTH ends: too wide and the box wraps, which is the very
+    # defect being fixed (winget's table wrapping into WinClean's output).
+
+    It "keeps the historical width when the console width is unknown - <Case>" -ForEach @(
+        @{ Case = 'zero';     Width = 0 }
+        @{ Case = 'negative'; Width = -1 }
+    ) {
+        # Redirected output and scheduled tasks report no usable width. Laying out
+        # against a guess there would corrupt exactly the runs nobody is watching.
+        Get-BoxWidth -ConsoleWidth $Width | Should -Be 70
+    }
+
+    It "never returns a box that cannot fit the console - <Width> columns" -ForEach @(
+        @{ Width = 80 }, @{ Width = 100 }, @{ Width = 120 }, @{ Width = 200 }, @{ Width = 3824 }
+    ) {
+        # A box costs 2 indent + 1 border + inner + 1 border. Anything wider than the
+        # console wraps, and a wrapped frame is worse than a narrow one.
+        $inner = Get-BoxWidth -ConsoleWidth $Width
+        ($inner + 4) | Should -BeLessOrEqual $Width
+    }
+
+    It "does not shrink below 70 on a narrow console" {
+        # 60 columns cannot fit a 70-wide box, but every previous version had the same
+        # problem there. Shrinking would change the look for everyone to fix nobody.
+        Get-BoxWidth -ConsoleWidth 60 | Should -Be 70
+        Get-BoxWidth -ConsoleWidth 40 | Should -Be 70
+    }
+
+    It "does not grow past 90 however wide the console is" {
+        # The user asked for "somewhat wider", not "as wide as it goes": full-width
+        # frames on a 3824-column window read worse than 90.
+        Get-BoxWidth -ConsoleWidth 3824 | Should -Be 90
+        Get-BoxWidth -ConsoleWidth 200  | Should -Be 90
+    }
+
+    It "actually widens at the reported default of 120 columns" {
+        # The measured configuration on the machine that reported this: conhost 120x30.
+        # If this returned 70 the change would have achieved nothing there.
+        Get-BoxWidth -ConsoleWidth 120 | Should -BeGreaterThan 70
+    }
+
+    It "is monotonic - a wider console never yields a narrower box" {
+        $widths = 40, 60, 76, 80, 96, 120, 200
+        $previous = 0
+        foreach ($w in $widths) {
+            $inner = Get-BoxWidth -ConsoleWidth $w
+            $inner | Should -BeGreaterOrEqual $previous
+            $previous = $inner
+        }
+    }
+}
+
+Describe "Get-ConsoleWidth" -Tag "Unit", "Helper", "V222" {
+
+    It "always answers with an int and never throws" {
+        # No mock here on purpose: $Host.UI.RawUI is not resolved through any cmdlet, so
+        # a Mock would be theatre - it would intercept nothing and the test would pass
+        # for the wrong reason. The no-console path is instead covered where it actually
+        # matters, by Get-BoxWidth's contract for 0 and negative widths.
+        { Get-ConsoleWidth } | Should -Not -Throw
+        Get-ConsoleWidth | Should -BeOfType [int]
+    }
+
+    It "reports a positive width in this console session" {
+        # Pester runs in a real console here; if this ever returns 0 locally the
+        # adaptive path is silently inert and the box stays 70 forever.
+        Get-ConsoleWidth | Should -BeGreaterThan 0
+    }
+}
+
+Describe "Frames stay geometrically consistent at every adaptive width" -Tag "Unit", "Helper", "V222" {
+    # The smoke test validates geometry too, but it runs with output redirected, where
+    # the console width is unknown and the box falls back to 70 - so it can only ever
+    # check the width that existed before this change. Widening is the risky part, and
+    # this is where it gets checked.
+
+    BeforeAll {
+        . (Join-Path $PSScriptRoot '..' 'tools' 'BoxGeometry.ps1')
+        $script:savedBoxWidth = $script:BoxWidth
+    }
+
+    AfterAll {
+        $script:BoxWidth = $script:savedBoxWidth
+    }
+
+    It "renders a consistent banner and section frames at width <Width>" -ForEach @(
+        @{ Width = 70 }, @{ Width = 74 }, @{ Width = 80 }, @{ Width = 90 }
+    ) {
+        $script:BoxWidth = $Width
+
+        # Write-Host goes to the information stream in PowerShell 7, so the frames can be
+        # captured and measured rather than eyeballed.
+        $out = & {
+            Show-Banner
+            Write-Log -Message "A title that must stay centred" -Level TITLE -NoLog
+            Write-Log -Message "A section header" -Level SECTION -NoLog
+            Write-Log -Message "An ordinary line" -Level INFO -NoLog
+        } 6>&1 | ForEach-Object { [string]$_ }
+
+        $lines = ($out -join "`n") -split "`r?`n" | ForEach-Object { $_.TrimEnd() }
+        $issues = Test-BoxGeometry -Lines $lines
+        $issues | Should -BeNullOrEmpty -Because "frames must line up at $Width columns, not only at the historical 70"
+
+        # And the frames must actually follow the setting, or this test proves nothing.
+        # @() around the filter deliberately: a single match indexed with [0] yields the
+        # first CHARACTER of the string, which quietly measured 0 while looking correct.
+        $tops = @($lines | Where-Object { $_ -match '^\s*╔═+╗$' })
+        $tops | Should -Not -BeNullOrEmpty
+        [regex]::Match($tops[0], '═+').Value.Length | Should -Be $Width
+    }
+
+    It "moves the logo as one block, so the letters do not shear apart" {
+        # Added after a mutation survived: centring each art row independently keeps the
+        # frame perfectly consistent (every row is padded to the border) while wrecking
+        # the logo, so the geometry check above cannot see it. The invariant is that
+        # widening shifts every art row by the SAME amount.
+        $indentsAt = @{}
+        foreach ($width in 70, 90) {
+            $script:BoxWidth = $width
+            $out = & { Show-Banner } 6>&1 | ForEach-Object { [string]$_ }
+            $lines = ($out -join "`n") -split "`r?`n"
+            # Art rows: framed rows whose CONTENT carries logo glyphs. Matching on '█'
+            # alone finds only five - the last row of the wordmark is drawn entirely from
+            # '╚═╝' and has no block character in it at all.
+            $art = @($lines |
+                ForEach-Object { [regex]::Match($_, '^\s*║(.*)║$').Groups[1].Value } |
+                Where-Object { $_ -match '[█╚]' })
+            $art.Count | Should -Be 6 -Because 'the logo is six rows'
+            $indentsAt[$width] = $art | ForEach-Object { $_.Length - $_.TrimStart().Length }
+        }
+
+        $shifts = 0..5 | ForEach-Object { $indentsAt[90][$_] - $indentsAt[70][$_] }
+        ($shifts | Select-Object -Unique).Count |
+            Should -Be 1 -Because 'every row of the logo must shift by the same amount, or the letters no longer line up'
+        $shifts[0] | Should -BeGreaterThan 0 -Because 'a wider box must actually move the block'
+
+        # And at the default width the banner must sit exactly where ten releases of users
+        # have seen it. Added after a mutation survived the check above: centring each row
+        # independently keeps the rows in step with each other (they are all the same
+        # length) while sliding the whole logo sideways, so only an absolute anchor sees it.
+        $indentsAt[70][0] | Should -Be 6
+        $indentsAt[70][1] | Should -Be 5
+        $indentsAt[70][5] | Should -Be 6
+    }
+
+    It "centres the title rather than padding it by a fixed amount" {
+        # Added after a mutation survived: a hardcoded left pad still produces a valid box
+        # (the row is padded out to the border), so only the symmetry can catch it.
+        $script:BoxWidth = 90
+        $out = & { Show-Banner } 6>&1 | ForEach-Object { [string]$_ }
+        $lines = ($out -join "`n") -split "`r?`n"
+
+        $titleRow = @($lines | Where-Object { $_ -match 'Ultimate Windows 11 Maintenance Script' })
+        $titleRow | Should -Not -BeNullOrEmpty
+        $inner = [regex]::Match($titleRow[0], '^\s*║(.*)║$').Groups[1].Value
+        $left  = $inner.Length - $inner.TrimStart().Length
+        $right = $inner.Length - $inner.TrimEnd().Length
+
+        [math]::Abs($left - $right) | Should -BeLessOrEqual 1 -Because 'the title must sit in the middle of the frame'
+    }
+
+    It "keeps the banner square for a version string of any length - '<Version>'" -ForEach @(
+        @{ Version = '2.5' }, @{ Version = '2.21' }, @{ Version = '2.100' }, @{ Version = '10.0' }
+    ) {
+        # The banner used to be a literal here-string whose title row was padded by hand
+        # for exactly four characters of version. It measured 70 columns only because
+        # "2.21" is four characters; 2.5 or 2.100 would have shifted that row's border
+        # out of line with the rest of the box - and the next release bumps the version.
+        $script:BoxWidth = 70
+        $savedVersion = $script:Version
+        try {
+            $script:Version = $Version
+            $out = & { Show-Banner } 6>&1 | ForEach-Object { [string]$_ }
+            $lines = ($out -join "`n") -split "`r?`n" | ForEach-Object { $_.TrimEnd() }
+
+            Test-BoxGeometry -Lines $lines | Should -BeNullOrEmpty
+            ($lines -join "`n") | Should -Match ([regex]::Escape("v$Version"))
+        } finally {
+            $script:Version = $savedVersion
+        }
+    }
+}
+
+Describe "Expand-ConsoleWindow" -Tag "Unit", "Helper", "V222" {
+
+    It "never throws, whatever the host does" {
+        # Windows Terminal refuses programmatic resizing and redirected hosts throw.
+        # This runs during startup of every single run: it must not be able to fail one.
+        { Expand-ConsoleWindow -DesiredWidth 140 } | Should -Not -Throw
+    }
+
+    It "does not shrink a console that is already wider than asked" {
+        # Asking for less than the current width must be a no-op, not a resize down -
+        # a user who widened the window deliberately keeps their width.
+        $before = Get-ConsoleWidth
+        Expand-ConsoleWindow -DesiredWidth 10
+        Get-ConsoleWidth | Should -Be $before
+    }
+}
+
+#endregion
+
 #region v2.22 Disk Cleanup idle detection
 
 Describe "Update-IdleStreak" -Tag "Unit", "Helper", "V222" {

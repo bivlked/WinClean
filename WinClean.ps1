@@ -411,6 +411,11 @@ $script:InternetConnectionCache = $null
 # once instead of on every call - and surfaces in the result JSON as LoggingDegraded
 $script:LogWriteFailed = $false
 
+# Inner width of every framed section. v2.22: was the literal 70 repeated in four places;
+# Start-WinClean now derives it once from the actual console. 70 stays the default so a
+# host whose width cannot be read looks exactly as it always did.
+$script:BoxWidth = 70
+
 # Initialize log path (script scope for access in functions)
 if (-not $LogPath) {
     $script:LogPath = Join-Path $env:TEMP "WinClean_$((Get-Date).ToString('yyyyMMdd_HHmmss')).log"
@@ -539,7 +544,7 @@ function Write-Log {
 
     # Consistent left indent for all output (matches banner style)
     $indent = "  "
-    $boxWidth = 70  # Inner width for framed sections
+    $boxWidth = $script:BoxWidth  # Inner width for framed sections (v2.22: adaptive)
 
     $timestamp = (Get-Date).ToString('HH:mm:ss')
     $logMessage = "[$timestamp] [$Level] $Message"
@@ -580,7 +585,7 @@ function Write-Log {
             Write-Host ""
             Write-Host "$indent┌─ " -NoNewline -ForegroundColor DarkGray
             Write-Host $Message -ForegroundColor $tagColors.Message
-            Write-Host "$indent└$("─" * 70)" -ForegroundColor DarkGray
+            Write-Host "$indent└$("─" * $boxWidth)" -ForegroundColor DarkGray
         }
         'DETAIL' {
             # Detail line with vertical bar
@@ -809,6 +814,91 @@ function Test-InteractiveConsole {
         return $true
     } catch {
         return $false
+    }
+}
+
+function Get-ConsoleWidth {
+    <#
+    .SYNOPSIS
+        The console width in columns, or 0 when it cannot be determined
+    .DESCRIPTION
+        v2.22. Redirected output, scheduled tasks and non-console hosts either throw here
+        or report nonsense, and 0 is the honest answer for all of them - the caller falls
+        back to the historical fixed width rather than laying out against a guess.
+    #>
+    try {
+        $width = $Host.UI.RawUI.WindowSize.Width
+        if ($width -gt 0) { return [int]$width }
+    } catch { }
+    return 0
+}
+
+function Get-BoxWidth {
+    <#
+    .SYNOPSIS
+        Inner width for framed sections, derived from the console width
+    .DESCRIPTION
+        v2.22, pure so the bounds are testable. A box is printed as two spaces of indent,
+        a border character, the inner width, and a closing border character - so it needs
+        ConsoleWidth-4 at the very most, and 6 is subtracted to keep a margin away from
+        the wrap column.
+
+        Bounded both ways on purpose:
+        - never below 70, the width every previous version used. A narrow console cannot
+          be laid out well either way, and shrinking below 70 would change how WinClean
+          looks for everyone who has been reading it at 70 for ten releases.
+        - never above 90. Raising the ceiling further makes the frames span the screen on
+          a wide monitor, which reads worse rather than better - the user asked for
+          "somewhat wider", not "as wide as it goes".
+    #>
+    param([int]$ConsoleWidth)
+
+    if ($ConsoleWidth -le 0) { return 70 }
+    return [math]::Max(70, [math]::Min(90, $ConsoleWidth - 6))
+}
+
+function Expand-ConsoleWindow {
+    <#
+    .SYNOPSIS
+        Best-effort widening of the console window at startup
+    .DESCRIPTION
+        v2.22. The desktop shortcut opens conhost at its 120-column default, and winget's
+        upgrade table needs about 140 on a localised system - so it wrapped, and every
+        wrapped row landed across the script's own output. Measured on the reporting
+        machine: window 120x30, buffer 120x9001, maximum physical window 3824 columns.
+        There was room; nobody had asked for it.
+
+        Deliberately done here rather than by writing console properties into the .lnk:
+        the shortcut route only fixes the shortcut (and NT_CONSOLE_PROPS is a binary blob
+        WScript.Shell will not write), while this helps every way of starting the script.
+
+        Best-effort by design. Windows Terminal ignores or refuses programmatic resizing,
+        redirected hosts throw - none of that is worth a warning, let alone a failed run.
+        The buffer is grown before the window because a window may never exceed its
+        buffer; the reverse order fails.
+    #>
+    param([int]$DesiredWidth = 140)
+
+    try {
+        $raw = $Host.UI.RawUI
+        $current = $raw.WindowSize
+        if ($current.Width -le 0 -or $current.Width -ge $DesiredWidth) { return }
+
+        # Never ask for more than the screen can physically show
+        $target = [math]::Min($DesiredWidth, $raw.MaxPhysicalWindowSize.Width)
+        if ($target -le $current.Width) { return }
+
+        $buffer = $raw.BufferSize
+        if ($buffer.Width -lt $target) {
+            $buffer.Width = $target
+            $raw.BufferSize = $buffer
+        }
+
+        $window = $raw.WindowSize
+        $window.Width = $target
+        $raw.WindowSize = $window
+    } catch {
+        # Host refused; the run continues at whatever width it already had
     }
 }
 
@@ -1494,7 +1584,7 @@ function Invoke-ScriptUpdate {
 
     # Dynamically centered title in a 70-char box (matches the rest of the UI; v2.14
     # fixes a misaligned right border caused by hardcoded padding)
-    $boxWidth = 70
+    $boxWidth = $script:BoxWidth
     $updateTitle = "UPDATE AVAILABLE"
     $titlePadding = [math]::Max(0, $boxWidth - $updateTitle.Length)
     $titleLeftPad = [math]::Floor($titlePadding / 2)
@@ -5884,24 +5974,49 @@ function Invoke-StorageSense {
 function Show-Banner {
     try { Clear-Host } catch { }
 
-    $banner = @"
+    # v2.22: composed instead of pasted. As one literal here-string its padding was
+    # hand-counted for a four-character version - the title row measured 70 columns only
+    # because "2.21" happens to be four characters, and a version like 2.5 or 2.100 would
+    # have pushed that row's right border out of line with the rest of the box. Composing
+    # it fixes that and lets the frame follow the console width like every other box.
+    $inner = $script:BoxWidth
 
-  ╔══════════════════════════════════════════════════════════════════════╗
-  ║                                                                      ║
-  ║      ██████╗██╗     ███████╗ █████╗ ███╗   ██╗                       ║
-  ║     ██╔════╝██║     ██╔════╝██╔══██╗████╗  ██║                       ║
-  ║     ██║     ██║     █████╗  ███████║██╔██╗ ██║                       ║
-  ║     ██║     ██║     ██╔══╝  ██╔══██║██║╚██╗██║                       ║
-  ║     ╚██████╗███████╗███████╗██║  ██║██║ ╚████║                       ║
-  ║      ╚═════╝╚══════╝╚══════╝╚═╝  ╚═╝╚═╝  ╚═══╝                       ║
-  ║                                                                      ║
-  ║            Ultimate Windows 11 Maintenance Script v$($script:Version)              ║
-  ║                                                                      ║
-  ╚══════════════════════════════════════════════════════════════════════╝
+    # Centred as a BLOCK, never line by line: the rows have different lengths by design
+    # and centring each one would shear the letters apart. 70 is the block's historical
+    # width, so at the default width the banner is drawn exactly where it always was.
+    $artBlockWidth = 70
+    $art = @(
+        ''
+        '      ██████╗██╗     ███████╗ █████╗ ███╗   ██╗'
+        '     ██╔════╝██║     ██╔════╝██╔══██╗████╗  ██║'
+        '     ██║     ██║     █████╗  ███████║██╔██╗ ██║'
+        '     ██║     ██║     ██╔══╝  ██╔══██║██║╚██╗██║'
+        '     ╚██████╗███████╗███████╗██║  ██║██║ ╚████║'
+        '      ╚═════╝╚══════╝╚══════╝╚═╝  ╚═╝╚═╝  ╚═══╝'
+        ''
+    )
+    $artPad = [math]::Max(0, [math]::Floor(($inner - $artBlockWidth) / 2))
 
-"@
+    $title = "Ultimate Windows 11 Maintenance Script v$($script:Version)"
+    $titlePad = [math]::Max(0, [math]::Floor(($inner - $title.Length) / 2))
 
-    Write-Host $banner -ForegroundColor Cyan
+    $rows = foreach ($line in $art) { (' ' * $artPad) + $line.PadRight($artBlockWidth) }
+    $rows = @($rows) + @((' ' * $titlePad) + $title) + @('')
+
+    $bannerLines = @("  ╔$('═' * $inner)╗")
+    foreach ($row in $rows) {
+        # Pad, then truncate: a row must fill the frame exactly. Anything longer would
+        # push the right border out, which is the defect this rewrite removes - so a row
+        # that cannot fit is cut rather than allowed to break the box.
+        $cell = $row.PadRight($inner)
+        if ($cell.Length -gt $inner) { $cell = $cell.Substring(0, $inner) }
+        $bannerLines += "  ║$cell║"
+    }
+    $bannerLines += "  ╚$('═' * $inner)╝"
+
+    Write-Host ""
+    Write-Host ($bannerLines -join [Environment]::NewLine) -ForegroundColor Cyan
+    Write-Host ""
 
     # System info
     $os = Get-CimInstance -ClassName Win32_OperatingSystem
@@ -5953,7 +6068,7 @@ function Show-FinalStatisticsBody {
     Clear-AllProgress
 
     # Box dimensions
-    $boxWidth = 70    # Inner width (matches banner)
+    $boxWidth = $script:BoxWidth    # Inner width (matches banner)
     $labelWidth = 18  # Width for label column (e.g., "Space freed:")
 
     # Determine overall status
@@ -6297,13 +6412,20 @@ function Start-WinClean {
     # because the first run already completed.
     $script:RunCompleted = $false
 
+    # v2.22: ask for a wider window, then lay out against whatever the host actually
+    # gave us. In this order deliberately - measuring first would size every frame for
+    # the old width. Both steps are best-effort and silent: a host that refuses to
+    # resize, or whose width cannot be read, simply keeps the historical 70.
+    Expand-ConsoleWindow
+    $script:BoxWidth = Get-BoxWidth -ConsoleWidth (Get-ConsoleWidth)
+
     # Initialize log. v2.22 (raised in external review): these two lines were bare Out-File
     # calls, and this runs BEFORE the main try/finally below. A log path that cannot be
     # opened throws there - measured on six of seven bad paths - and the exception escaped
     # Start-WinClean before any safety net existed: no result JSON, no summary, and none of
     # the maintenance, because of the log. Now they degrade like every other log write.
     Write-LogFileLine -Line "WinClean v$($script:Version) - Started at $(Get-Date)" -StartNewFile
-    Write-LogFileLine -Line ("=" * 70)
+    Write-LogFileLine -Line ("=" * $script:BoxWidth)
 
     # v2.17 (p.13 of the audit): recover from a hard-killed previous run before doing
     # anything else - not in ReportOnly, which promises no changes
