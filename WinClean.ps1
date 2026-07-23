@@ -436,6 +436,81 @@ $script:ProtectedPaths = @(
 #                              LOGGING FUNCTIONS
 #═══════════════════════════════════════════════════════════════════════════════
 
+function Write-LogFileLine {
+    <#
+    .SYNOPSIS
+        Appends one line to the log file, degrading instead of throwing
+    .DESCRIPTION
+        v2.22, raised in external review: extracted from Write-Log so that EVERY write to
+        the log file - including the header, which Start-WinClean emits before its main
+        try/finally exists - degrades the same way instead of each caller inventing its
+        own fault tolerance.
+
+        The header used to be two bare Out-File calls. Measured, not assumed: six of seven
+        bad log paths make Out-File throw a TERMINATING error even though the script leaves
+        ErrorActionPreference at Continue (missing directory, path is a directory, invalid
+        characters, colon in the name, over-long path, unreachable UNC; only a reserved
+        device name did not). Thrown there, before the safety net, the exception escaped
+        Start-WinClean entirely: no result JSON, no final summary, no exit-code accounting,
+        and none of the maintenance the run was started for - all because of the log.
+
+        A log that cannot be written is a degraded run, never a failed one.
+    #>
+    param(
+        [Parameter(Mandatory)]
+        [AllowEmptyString()]
+        [string]$Line,
+
+        # The header line starts a fresh file. The Out-File call this replaced had no
+        # -Append, so it truncated on every run; preserved deliberately rather than lost
+        # in the refactor, or a custom -LogPath reused across runs would accumulate them
+        # all into one file and the log would no longer describe a single run.
+        [switch]$StartNewFile
+    )
+
+    # v2.17 (p.7 of the audit): Out-File used to open, seek to end, write and close the
+    # file on every single call - Write-Log fires hundreds of times per run. A StreamWriter
+    # kept open for the run avoids that, with AutoFlush so each line still lands on disk
+    # immediately (same durability as before, just cheaper). FileShare.Delete matters for
+    # tests: they Remove-Item the log path in AfterAll while this writer may still be the
+    # last one that touched it.
+    try {
+        if ($StartNewFile -or -not $script:LogWriter -or $script:LogWriterPath -ne $script:LogPath) {
+            if ($script:LogWriter) { $script:LogWriter.Dispose() }
+            $mode = if ($StartNewFile) { [System.IO.FileMode]::Create } else { [System.IO.FileMode]::Append }
+            $fileStream = [System.IO.File]::Open(
+                $script:LogPath, $mode, [System.IO.FileAccess]::Write,
+                ([System.IO.FileShare]::ReadWrite -bor [System.IO.FileShare]::Delete))
+            $script:LogWriter = [System.IO.StreamWriter]::new($fileStream, [System.Text.Encoding]::UTF8)
+            $script:LogWriter.AutoFlush = $true
+            $script:LogWriterPath = $script:LogPath
+        }
+        $script:LogWriter.WriteLine($Line)
+    } catch {
+        # v2.20: this used to be an empty catch, so a log that stopped being written
+        # (full volume, revoked permissions, the v2.14 case where cleanup deleted the
+        # log out from under us) was invisible: destructive work carried on, the final
+        # JSON said ErrorsCount=0, and LogPath pointed at a truncated file.
+        #
+        # Latched: one console line, not one per call - Write-Log fires hundreds of
+        # times per run. Deliberately Write-Host and not Write-Log, which would
+        # recurse straight back into this catch.
+        # v2.20, corrected in review: drop the writer so the NEXT call reopens it.
+        # Without this the guard above stays satisfied by a dead writer object and
+        # every later line is silently discarded for the rest of the run - the empty
+        # catch would simply have moved from the first failure to all the others.
+        try { if ($script:LogWriter) { $script:LogWriter.Dispose() } } catch { }
+        $script:LogWriter = $null
+        $script:LogWriterPath = $null
+
+        if (-not $script:LogWriteFailed) {
+            $script:LogWriteFailed = $true
+            $script:Stats.WarningsCount++
+            Write-Host "  [WARN]  Log file could not be written ($($_.Exception.Message)) - the run continues, but $($script:LogPath) may be incomplete" -ForegroundColor Yellow
+        }
+    }
+}
+
 function Write-Log {
     <#
     .SYNOPSIS
@@ -461,47 +536,8 @@ function Write-Log {
     $timestamp = (Get-Date).ToString('HH:mm:ss')
     $logMessage = "[$timestamp] [$Level] $Message"
 
-    # Write to log file. v2.17 (p.7 of the audit): Out-File used to open, seek to end,
-    # write and close the file on every single call - Write-Log fires hundreds of times
-    # per run. A StreamWriter kept open for the run avoids that, with AutoFlush so each
-    # line still lands on disk immediately (same durability as before, just cheaper).
-    # FileShare.Delete matters for tests: they Remove-Item the log path in AfterAll while
-    # this writer may still be the last one that touched it.
     if (-not $NoLog) {
-        try {
-            if (-not $script:LogWriter -or $script:LogWriterPath -ne $script:LogPath) {
-                if ($script:LogWriter) { $script:LogWriter.Dispose() }
-                $fileStream = [System.IO.File]::Open(
-                    $script:LogPath, [System.IO.FileMode]::Append, [System.IO.FileAccess]::Write,
-                    ([System.IO.FileShare]::ReadWrite -bor [System.IO.FileShare]::Delete))
-                $script:LogWriter = [System.IO.StreamWriter]::new($fileStream, [System.Text.Encoding]::UTF8)
-                $script:LogWriter.AutoFlush = $true
-                $script:LogWriterPath = $script:LogPath
-            }
-            $script:LogWriter.WriteLine($logMessage)
-        } catch {
-            # v2.20: this used to be an empty catch, so a log that stopped being written
-            # (full volume, revoked permissions, the v2.14 case where cleanup deleted the
-            # log out from under us) was invisible: destructive work carried on, the final
-            # JSON said ErrorsCount=0, and LogPath pointed at a truncated file.
-            #
-            # Latched: one console line, not one per call - Write-Log fires hundreds of
-            # times per run. Deliberately Write-Host and not Write-Log, which would
-            # recurse straight back into this catch.
-            # v2.20, corrected in review: drop the writer so the NEXT call reopens it.
-            # Without this the guard above stays satisfied by a dead writer object and
-            # every later line is silently discarded for the rest of the run - the empty
-            # catch would simply have moved from the first failure to all the others.
-            try { if ($script:LogWriter) { $script:LogWriter.Dispose() } } catch { }
-            $script:LogWriter = $null
-            $script:LogWriterPath = $null
-
-            if (-not $script:LogWriteFailed) {
-                $script:LogWriteFailed = $true
-                $script:Stats.WarningsCount++
-                Write-Host "  [WARN]  Log file could not be written ($($_.Exception.Message)) - the run continues, but $($script:LogPath) may be incomplete" -ForegroundColor Yellow
-            }
-        }
+        Write-LogFileLine -Line $logMessage
     }
 
     # Console output with colors
@@ -1486,7 +1522,7 @@ function Invoke-ScriptUpdate {
             Write-Host $line -ForegroundColor Gray
         }
         Write-Host ""
-        return
+        return $false
     }
 
     # Check if interactive console is available
@@ -1500,7 +1536,7 @@ function Invoke-ScriptUpdate {
             Write-Host $line -ForegroundColor Gray
         }
         Write-Host ""
-        return
+        return $false
     }
 
     if ($UpdateInfo.Channel -ne 'gallery') {
@@ -1525,7 +1561,7 @@ function Invoke-ScriptUpdate {
         Write-Host "  Press any key to continue with current version..." -ForegroundColor DarkGray
         Wait-ForKeyPress
         Write-Host ""
-        return
+        return $false
     }
 
     # The running file is the Gallery copy, so updating it updates what runs next
@@ -1538,7 +1574,7 @@ function Invoke-ScriptUpdate {
         Write-Log "Update skipped by user" -Level INFO
         Write-Host "  Update skipped. Continuing with current version..." -ForegroundColor DarkGray
         Write-Host ""
-        return
+        return $false
     }
 
     Write-Host ""
@@ -1547,7 +1583,12 @@ function Invoke-ScriptUpdate {
     try {
         # PowerShellGet ships with PowerShell today and PSResourceGet is its replacement;
         # either can be the one present, and the one that answered discovery goes first
-        switch (Select-UpdateCommand -Provider $UpdateInfo.Provider) {
+        # $null = ... deliberately: v2.22 made this function's return value meaningful
+        # ("the run is over"), and a bare switch emits whatever the update provider writes
+        # to the pipeline. A provider that returned an object would turn $true into an
+        # array, and `if (Invoke-ScriptUpdate ...)` would then be deciding on the array's
+        # truthiness rather than on the answer this function meant to give.
+        $null = switch (Select-UpdateCommand -Provider $UpdateInfo.Provider) {
             'Update-Script'     { Update-Script -Name WinClean -Force -ErrorAction Stop }
             'Update-PSResource' { Update-PSResource -Name WinClean -Force -TrustRepository -ErrorAction Stop }
             default { throw "no update command available (neither Update-Script nor Update-PSResource)" }
@@ -1562,7 +1603,7 @@ function Invoke-ScriptUpdate {
         Write-Host "  ✗ Update failed: $_" -ForegroundColor Red
         Write-Host "  Continuing with current version..." -ForegroundColor Yellow
         Write-Host ""
-        return
+        return $false
     }
 
     # v2.21: verify against the file being executed. A provider that reports success
@@ -1587,7 +1628,7 @@ function Invoke-ScriptUpdate {
             Write-Host $line -ForegroundColor Gray
         }
         Write-Host ""
-        return
+        return $false
     }
 
     Write-Log "Update successful" -Level SUCCESS
@@ -1597,20 +1638,15 @@ function Invoke-ScriptUpdate {
     Write-Host ""
     Write-Host "  Press any key to exit..." -ForegroundColor DarkGray
 
-    # This exit bypasses the finally in Start-WinClean, so the result JSON has to be
-    # written here (raised in review). Start-WinClean deletes any previous file before the
-    # update check, so without this a consumer saw exit code 0 and NO artefact at all -
-    # indistinguishable from a crash, and identical to a run that did nothing. Same shape
-    # as the PendingRebootDeclined path, which already does this.
-    $script:Stats.Aborted = 'UpdatedAndExited'
-    Write-ResultJson -Path $ResultJsonPath
-
     Wait-ForKeyPress
-    # Not an unconditional 0 (raised in review): Write-ResultJson reports its own failure by
-    # counting an error rather than throwing, and exiting 0 anyway would rebuild the exact
-    # "success with no artefact" state the JSON write was added here to prevent.
-    if ($script:Stats.ErrorsCount -gt 0) { exit 1 }
-    exit 0
+
+    # v2.22: this used to call exit here, which bypassed the finally in Start-WinClean and
+    # therefore had to hand-copy the result JSON write and the exit-code rule alongside it.
+    # The caller now owns ending the run, through the one path that does it (raised in
+    # external review). The exit code is unchanged: the entry point already derives it from
+    # ErrorsCount, which is what the copied lines here were re-deriving.
+    $script:Stats.Aborted = 'UpdatedAndExited'
+    return $true
 }
 
 function Install-ModuleWithTimeout {
@@ -5990,6 +6026,52 @@ function Write-ResultJson {
     }
 }
 
+function Complete-WinCleanRun {
+    <#
+    .SYNOPSIS
+        The single end-of-run path: result JSON, final summary, log handle release
+    .DESCRIPTION
+        v2.22, raised in external review. Three paths ended a run - the normal finally, a
+        successful self-update, and a declined pending-reboot prompt - and only the first
+        released the log handle or showed a summary. The other two hand-copied whichever
+        parts someone had remembered at the time, which is exactly how v2.21 came to ship
+        two separate fixes to the same few lines (first a missing result JSON, then an
+        unconditional exit 0 over a run that had errors). The defect was never any one
+        omission; it was that the list existed in three places. Anything added here from
+        now on reaches every exit.
+
+        Latched, so a path that completes the run explicitly and then unwinds through a
+        finally does not write the artefacts twice.
+    #>
+    param([string]$ResultPath)
+
+    if ($script:RunCompleted) { return }
+    $script:RunCompleted = $true
+
+    # JSON goes first: Show-FinalStatistics may block on a keypress in interactive
+    # mode, and automated runs must get the result regardless.
+    Write-ResultJson -Path $ResultPath
+
+    # An aborted run has no maintenance to summarise, and the summary header would
+    # announce "COMPLETED SUCCESSFULLY" over a run that deliberately did nothing.
+    # Preserved behaviour: neither abort path ever showed it.
+    if (-not $script:Stats.Aborted) {
+        Show-FinalStatistics
+    }
+
+    # Release the log file handle (v2.17, p.7): a stand or the user may want to move or
+    # zip the log right after the run finishes.
+    # v2.20: guarded. Dispose on a writer whose stream already failed throws, and this
+    # used to be the last statement of the outer finally - the exception escaped
+    # Start-WinClean and the entry point never reached its exit-code check, so a run with
+    # errors could still exit 0 (raised in review).
+    if ($script:LogWriter) {
+        try { $script:LogWriter.Dispose() } catch { }
+        $script:LogWriter = $null
+        $script:LogWriterPath = $null
+    }
+}
+
 function Invoke-Phase {
     <#
     .SYNOPSIS
@@ -6047,10 +6129,18 @@ function Start-WinClean {
     $script:ProgressActivities = @()
     $script:InternetConnectionCache = $null
     $script:LogWriteFailed = $false
+    # v2.22: the latch on Complete-WinCleanRun, reset with everything else - a second
+    # call in the same session must produce its own artefacts, not silently skip them
+    # because the first run already completed.
+    $script:RunCompleted = $false
 
-    # Initialize log
-    "WinClean v$($script:Version) - Started at $(Get-Date)" | Out-File -FilePath $script:LogPath -Encoding utf8
-    "=" * 70 | Out-File -FilePath $script:LogPath -Append -Encoding utf8
+    # Initialize log. v2.22 (raised in external review): these two lines were bare Out-File
+    # calls, and this runs BEFORE the main try/finally below. A log path that cannot be
+    # opened throws there - measured on six of seven bad paths - and the exception escaped
+    # Start-WinClean before any safety net existed: no result JSON, no summary, and none of
+    # the maintenance, because of the log. Now they degrade like every other log write.
+    Write-LogFileLine -Line "WinClean v$($script:Version) - Started at $(Get-Date)" -StartNewFile
+    Write-LogFileLine -Line ("=" * 70)
 
     # v2.17 (p.13 of the audit): recover from a hard-killed previous run before doing
     # anything else - not in ReportOnly, which promises no changes
@@ -6101,8 +6191,11 @@ function Start-WinClean {
                 Write-Host "  Operation cancelled. Please reboot and run again." -ForegroundColor Yellow
                 Write-Host ""
                 # Record the abort so automation does not mistake it for a completed run
+                # v2.22: through the shared end-of-run path. This branch used to write the
+                # JSON by hand and return, so it released no log handle - one of the three
+                # divergent endings that made the same fix necessary twice (external review).
                 $script:Stats.Aborted = 'PendingRebootDeclined'
-                Write-ResultJson -Path $ResultJsonPath
+                Complete-WinCleanRun -ResultPath $ResultJsonPath
                 return
             }
         } else {
@@ -6122,7 +6215,14 @@ function Start-WinClean {
         try {
             $updateInfo = Test-ScriptUpdate
             if ($updateInfo) {
-                Invoke-ScriptUpdate -UpdateInfo $updateInfo
+                # v2.22: Invoke-ScriptUpdate reports whether the run is over instead of
+                # calling exit itself. A successful self-update replaced the running file,
+                # so continuing would perform maintenance with the old code still loaded -
+                # the run ends here, but it ends the same way every other run does.
+                if (Invoke-ScriptUpdate -UpdateInfo $updateInfo) {
+                    Complete-WinCleanRun -ResultPath $ResultJsonPath
+                    return
+                }
             }
         } catch {
             Write-Log "Update check could not be completed: $_" -Level WARNING
@@ -6241,21 +6341,10 @@ function Start-WinClean {
         Write-Log "Critical error outside any phase: $_" -Level ERROR
         $script:Stats.ErrorsCount++
     } finally {
-        # JSON goes first: Show-FinalStatistics may block on a keypress in
-        # interactive mode, and automated runs must get the result regardless
-        Write-ResultJson -Path $ResultJsonPath
-        Show-FinalStatistics
-        # Release the log file handle (v2.17, p.7): a stand or the user may want to
-        # move/zip the log right after the run finishes.
-        # v2.20: guarded. Dispose on a writer whose stream already failed throws, and this
-        # is the last statement of the outer finally - the exception escaped Start-WinClean
-        # and the entry point never reached its exit-code check, so a run with errors could
-        # still exit 0 (raised in review).
-        if ($script:LogWriter) {
-            try { $script:LogWriter.Dispose() } catch { }
-            $script:LogWriter = $null
-            $script:LogWriterPath = $null
-        }
+        # v2.22: the whole end-of-run sequence now lives in one function, shared with the
+        # two abort paths that used to hand-copy parts of it. Ordering, the aborted-run
+        # rule and the guarded Dispose are documented there.
+        Complete-WinCleanRun -ResultPath $ResultJsonPath
     }
 }
 

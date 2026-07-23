@@ -962,6 +962,125 @@ Describe "Write-Log" -Tag "Unit", "Helper" {
 
 #endregion
 
+#region Write-LogFileLine Tests (v2.22 - log init must never kill the run)
+
+Describe "Write-LogFileLine" -Tag "Unit", "Helper", "V222" {
+
+    BeforeEach {
+        $script:prevLogPath  = $script:LogPath
+        $script:prevWarnings = $script:Stats.WarningsCount
+        $script:prevFailed   = $script:LogWriteFailed
+        if ($script:LogWriter) { $script:LogWriter.Dispose(); $script:LogWriter = $null; $script:LogWriterPath = $null }
+        $script:LogWriteFailed = $false
+        $script:testLog = Join-Path ([System.IO.Path]::GetTempPath()) "WinCleanLogLine_$(Get-Random).log"
+        $script:LogPath = $script:testLog
+    }
+
+    AfterEach {
+        if ($script:LogWriter) { $script:LogWriter.Dispose(); $script:LogWriter = $null; $script:LogWriterPath = $null }
+        Remove-Item -LiteralPath $script:testLog -Force -ErrorAction SilentlyContinue
+        $script:LogPath              = $script:prevLogPath
+        $script:Stats.WarningsCount  = $script:prevWarnings
+        $script:LogWriteFailed       = $script:prevFailed
+    }
+
+    It "Writes the line verbatim, without adding a timestamp or level" {
+        # The header is not a log entry: it must land exactly as composed. Write-Log's
+        # "[HH:mm:ss] [LEVEL] " prefix belongs to Write-Log, not to this primitive.
+        Write-LogFileLine -Line 'WinClean v9.99 - Started at whenever' -StartNewFile
+        (Get-Content -LiteralPath $script:testLog -Raw) | Should -Match ([regex]::Escape('WinClean v9.99 - Started at whenever'))
+        (Get-Content -LiteralPath $script:testLog -Raw) | Should -Not -Match '^\['
+    }
+
+    It "Appends by default and truncates only with -StartNewFile" {
+        # -StartNewFile preserves what the replaced Out-File (no -Append) did. Losing it
+        # would silently merge every run sharing a custom -LogPath into one file.
+        Write-LogFileLine -Line 'first run'  -StartNewFile
+        Write-LogFileLine -Line 'same run'
+        (Get-Content -LiteralPath $script:testLog -Raw) | Should -Match 'first run'
+        (Get-Content -LiteralPath $script:testLog -Raw) | Should -Match 'same run'
+
+        Write-LogFileLine -Line 'second run' -StartNewFile
+        $after = Get-Content -LiteralPath $script:testLog -Raw
+        $after | Should -Match 'second run'
+        $after | Should -Not -Match 'first run' -Because '-StartNewFile must truncate, matching the Out-File it replaced'
+    }
+
+    # The defect this whole function exists for. Measured in review: six of seven bad log
+    # paths make Out-File throw a TERMINATING error even at ErrorActionPreference=Continue,
+    # and the header is written before Start-WinClean's try/finally exists - so the run
+    # died with no result JSON and no maintenance because of the log file.
+    It "Never throws on a log path that cannot be opened - <Case>" -ForEach @(
+        @{ Case = 'missing directory';    Path = { Join-Path ([System.IO.Path]::GetTempPath()) "nope_$(Get-Random)\sub\a.log" } }
+        @{ Case = 'path is a directory';  Path = { [System.IO.Path]::GetTempPath() } }
+        @{ Case = 'invalid characters';   Path = { Join-Path ([System.IO.Path]::GetTempPath()) 'a:b:c.log' } }
+        @{ Case = 'over-long path';       Path = { Join-Path ([System.IO.Path]::GetTempPath()) (('x' * 300) + '.log') } }
+        # An unreachable UNC path was measured too (IOException, same as the two above) but
+        # is deliberately not a case here: it is the only one that depends on network
+        # resolution, took 8.3s locally, and would be this suite's one flake-prone test.
+    ) {
+        $script:LogPath = & $Path
+        { Write-LogFileLine -Line 'header' -StartNewFile } | Should -Not -Throw -Because 'a log that cannot be written is a degraded run, never a failed one'
+    }
+
+    It "Reports the failure instead of swallowing it - LoggingDegraded reaches the result JSON" {
+        # Not throwing must not become not telling. LogWriteFailed is what surfaces as
+        # LoggingDegraded in the result JSON, so an automated consumer can see the run's
+        # log is incomplete rather than trusting a silent success.
+        $script:LogPath = Join-Path ([System.IO.Path]::GetTempPath()) "nope_$(Get-Random)\sub\a.log"
+        $before = $script:Stats.WarningsCount
+
+        Write-LogFileLine -Line 'header' -StartNewFile 3>$null 6>$null
+
+        $script:LogWriteFailed          | Should -BeTrue -Because 'LoggingDegraded in the result JSON is driven by this flag'
+        $script:Stats.WarningsCount     | Should -Be ($before + 1)
+    }
+
+    It "Latches the warning - a failing log costs one warning, not one per line" {
+        $script:LogPath = Join-Path ([System.IO.Path]::GetTempPath()) "nope_$(Get-Random)\sub\a.log"
+        $before = $script:Stats.WarningsCount
+
+        1..5 | ForEach-Object { Write-LogFileLine -Line "line $_" 3>$null 6>$null }
+
+        $script:Stats.WarningsCount | Should -Be ($before + 1) -Because 'Write-Log fires hundreds of times per run'
+    }
+
+    It "Recovers when the path becomes writable again" {
+        # The v2.20 lesson kept: drop the dead writer so a later call reopens it, instead
+        # of leaving the guard satisfied by a broken object and discarding the rest.
+        $script:LogPath = Join-Path ([System.IO.Path]::GetTempPath()) "nope_$(Get-Random)\sub\a.log"
+        Write-LogFileLine -Line 'lost' -StartNewFile 3>$null 6>$null
+        $script:LogWriter | Should -BeNullOrEmpty -Because 'a failed writer must not be reused'
+
+        $script:LogPath = $script:testLog
+        Write-LogFileLine -Line 'recovered' -StartNewFile
+        (Get-Content -LiteralPath $script:testLog -Raw) | Should -Match 'recovered'
+    }
+
+    It "Drops a writer whose stream broke mid-run, so later lines are not discarded" {
+        # Added after a mutation survived: the test above only covers a writer that never
+        # opened, and in that case the field is already $null - so deleting the reset would
+        # not have failed anything. This covers the case the reset actually exists for: an
+        # open writer whose stream dies later (the v2.14 shape, where the run's own temp
+        # cleanup deleted the log out from under it). Without the reset, the guard stays
+        # satisfied by a dead object and every remaining line is silently thrown away.
+        Write-LogFileLine -Line 'opened fine' -StartNewFile
+        $script:LogWriter | Should -Not -BeNullOrEmpty
+
+        # Break the stream underneath the writer without touching the script's bookkeeping
+        $script:LogWriter.BaseStream.Dispose()
+
+        Write-LogFileLine -Line 'this write fails' 3>$null 6>$null
+        $script:LogWriter | Should -BeNullOrEmpty -Because 'a broken writer must be dropped, not kept and reused'
+
+        # And the very next line must actually reach the file again
+        Write-LogFileLine -Line 'back in business'
+        (Get-Content -LiteralPath $script:testLog -Raw) | Should -Match 'back in business'
+    }
+}
+
+#endregion
+
 #region Get-RecycleBinSize Tests
 
 Describe "Get-RecycleBinSize" -Tag "Unit", "Helper" {
@@ -2014,7 +2133,10 @@ Describe "Test-ScriptUpdate" -Tag "Unit", "Helper", "V221" {
 Describe "Invoke-ScriptUpdate branches" -Tag "Unit", "Helper", "V221" {
     # These branches were unreachable by the helper tests, which only proved that the
     # instruction TEXT exists - not that Invoke-ScriptUpdate ever prints it (raised in
-    # review). Every branch here returns instead of reaching `exit 0`, so the suite is safe.
+    # review). Every branch here returns rather than completing an update.
+    # v2.22: the function no longer calls exit at all, so the successful path is testable
+    # too - it is covered in the V222 region below, which is why this note no longer says
+    # the suite is only safe because that path is never reached.
 
     BeforeEach {
         $script:Stats.WarningsCount = 0
@@ -2103,24 +2225,22 @@ Describe "Invoke-ScriptUpdate branches" -Tag "Unit", "Helper", "V221" {
         $script:askedPath | Should -Be $script:WinCleanPath
     }
 
-    It "writes the result JSON before exiting on a verified update" {
-        # The success path ends in `exit 0`, which bypasses the finally in Start-WinClean -
-        # and Start-WinClean has already deleted any previous result file by then, so
-        # without this a consumer saw exit code 0 and no artefact, indistinguishable from a
-        # crash. Wait-ForKeyPress is the last statement before the exit, so throwing from it
-        # proves the end of the path was reached without letting the suite exit
+    It "pauses before handing the run back, so the user reads the outcome" {
+        # v2.22 rewrote this test. It used to assert that the function wrote the result
+        # JSON itself, which was only ever true because its own `exit` bypassed the
+        # finally that should have done it. That workaround is gone: the artefact is now
+        # the caller's job (covered in the V222 region), and what is worth pinning here is
+        # the interactive behaviour that survived - the pause. Without it the window of a
+        # double-clicked shortcut closes on "Update complete" before it can be read.
         Mock Test-InteractiveConsole { $true }
         Mock Read-Host { 'y' }
         Mock Update-Script { }
         Mock Get-ScriptFileVersion { '2.21' }
-        Mock Write-ResultJson { }
-        Mock Wait-ForKeyPress { throw 'REACHED_EXIT' }
 
-        { Invoke-ScriptUpdate -UpdateInfo @{ CurrentVersion = '2.20'; LatestVersion = '2.21'
-                                             Channel = 'gallery'; Provider = 'PowerShellGet' } } |
-            Should -Throw -ExpectedMessage 'REACHED_EXIT'
+        $null = Invoke-ScriptUpdate -UpdateInfo @{ CurrentVersion = '2.20'; LatestVersion = '2.21'
+                                                   Channel = 'gallery'; Provider = 'PowerShellGet' }
 
-        Should -Invoke Write-ResultJson -Times 1
+        Should -Invoke Wait-ForKeyPress -Times 1
         $script:Stats.Aborted | Should -Be 'UpdatedAndExited'
         ($script:printed -join "`n").Contains('Update complete') | Should -BeTrue
     }
@@ -2294,6 +2414,192 @@ Describe "Invoke-ScriptUpdate branches" -Tag "Unit", "Helper", "V221" {
         $text.Contains('Update complete') | Should -BeFalse
     }
 }
+
+#region v2.22 single end-of-run path
+
+Describe "Invoke-ScriptUpdate stop/continue contract" -Tag "Unit", "Helper", "V222" {
+    # v2.22: the function used to end the process itself, so its most important branch -
+    # the successful update - could not be tested at all without killing the suite. It now
+    # answers a question ("is the run over?") and the caller ends the run. That answer is
+    # the whole contract: get it wrong in the false direction and a run continues doing
+    # maintenance with a replaced script file underneath it; wrong in the true direction
+    # and an ordinary run stops before doing any work.
+
+    BeforeEach {
+        $script:Stats.WarningsCount = 0
+        $script:Stats.ErrorsCount = 0
+        $script:Stats.Aborted = $null
+        $script:printed = [System.Collections.Generic.List[string]]::new()
+        Mock Write-Host { if ($Object) { $script:printed.Add([string]$Object) } }
+        Mock Wait-ForKeyPress { }
+    }
+
+    It "returns true after an update it verified, so the caller ends the run" {
+        Mock Test-InteractiveConsole { $true }
+        Mock Read-Host { 'y' }
+        Mock Select-UpdateCommand { 'Update-Script' }
+        Mock Update-Script { }
+        Mock Get-ScriptFileVersion { '2.21' }
+
+        $stop = Invoke-ScriptUpdate -UpdateInfo @{ CurrentVersion = '2.20'; LatestVersion = '2.21'
+                                                   Channel = 'gallery'; Provider = 'PowerShellGet' }
+
+        $stop | Should -BeOfType [bool] -Because 'a leaked pipeline object here would make the caller decide on an array'
+        $stop | Should -BeTrue
+        $script:Stats.Aborted | Should -Be 'UpdatedAndExited'
+        ($script:printed -join "`n").Contains('Update complete') | Should -BeTrue
+    }
+
+    It "stays a plain boolean even when the update provider writes to the pipeline" {
+        # Added after a mutation survived: dropping the `$null =` in front of the provider
+        # switch changed nothing, because every mock returns nothing. A real provider that
+        # emitted an object would make this function return an array, and the caller's
+        # `if (...)` would then be judging the array rather than the answer. Update-Script
+        # and Update-PSResource are documented as returning nothing, but "documented as"
+        # is not "guaranteed to", and the cost of the guard is one assignment.
+        Mock Test-InteractiveConsole { $true }
+        Mock Read-Host { 'y' }
+        Mock Select-UpdateCommand { 'Update-Script' }
+        Mock Update-Script { [pscustomobject]@{ Name = 'WinClean'; Version = '2.21' } }
+        Mock Get-ScriptFileVersion { '2.21' }
+
+        $stop = Invoke-ScriptUpdate -UpdateInfo @{ CurrentVersion = '2.20'; LatestVersion = '2.21'
+                                                   Channel = 'gallery'; Provider = 'PowerShellGet' }
+
+        @($stop).Count | Should -Be 1 -Because 'provider output must not be part of the answer'
+        $stop | Should -BeOfType [bool]
+        $stop | Should -BeTrue
+    }
+
+    It "does not write the result JSON itself - that belongs to the shared end-of-run path" {
+        # The v2.21 shape: this function hand-copied the JSON write because its own exit
+        # bypassed the finally. Copying it back would recreate two owners of one artefact.
+        Mock Test-InteractiveConsole { $true }
+        Mock Read-Host { 'y' }
+        Mock Select-UpdateCommand { 'Update-Script' }
+        Mock Update-Script { }
+        Mock Get-ScriptFileVersion { '2.21' }
+        Mock Write-ResultJson { }
+
+        $null = Invoke-ScriptUpdate -UpdateInfo @{ CurrentVersion = '2.20'; LatestVersion = '2.21'
+                                                   Channel = 'gallery'; Provider = 'PowerShellGet' }
+
+        Should -Invoke Write-ResultJson -Times 0
+    }
+
+    It "returns false so the run continues - <Case>" -ForEach @(
+        @{ Case = 'report-only';        Setup = { $script:ReportOnly = $true } }
+        @{ Case = 'non-interactive';    Setup = { Mock Test-InteractiveConsole { $false } } }
+        @{ Case = 'user declines';      Setup = { Mock Test-InteractiveConsole { $true }; Mock Read-Host { 'n' } } }
+        @{ Case = 'update command failed'; Setup = {
+                Mock Test-InteractiveConsole { $true }; Mock Read-Host { 'y' }
+                Mock Select-UpdateCommand { 'Update-Script' }
+                Mock Update-Script { throw 'gallery exploded' } } }
+        @{ Case = 'version did not change'; Setup = {
+                Mock Test-InteractiveConsole { $true }; Mock Read-Host { 'y' }
+                Mock Select-UpdateCommand { 'Update-Script' }
+                Mock Update-Script { }
+                Mock Get-ScriptFileVersion { '2.20' } } }
+    ) {
+        $ReportOnly = $false
+        & $Setup
+
+        $stop = Invoke-ScriptUpdate -UpdateInfo @{ CurrentVersion = '2.20'; LatestVersion = '2.21'
+                                                   Channel = 'gallery'; Provider = 'PowerShellGet' }
+
+        $stop | Should -BeFalse -Because 'the maintenance the user asked for must still run'
+        $script:Stats.Aborted | Should -BeNullOrEmpty
+    }
+
+    It "returns false for a copy it cannot aim an update at - <Channel>" -ForEach @(
+        @{ Channel = 'installer' }
+        @{ Channel = 'oneliner' }
+        @{ Channel = 'manual' }
+        @{ Channel = 'unknown' }
+        @{ Channel = 'gallery-ambiguous' }
+    ) {
+        $ReportOnly = $false
+        Mock Test-InteractiveConsole { $true }
+
+        $stop = Invoke-ScriptUpdate -UpdateInfo @{ CurrentVersion = '2.20'; LatestVersion = '2.21'
+                                                   Channel = $Channel; Provider = 'PowerShellGet' }
+
+        $stop | Should -BeFalse
+    }
+}
+
+Describe "Complete-WinCleanRun" -Tag "Unit", "Helper", "V222" {
+    # One end-of-run path for the normal finally and for both abort branches. Before this
+    # the list of things a run must do on the way out existed in three places, and v2.21
+    # shipped two separate fixes to the copies rather than one fix to the list.
+
+    BeforeEach {
+        $script:Stats.Aborted = $null
+        $script:RunCompleted = $false
+        Mock Write-ResultJson { }
+        Mock Show-FinalStatistics { }
+    }
+
+    It "writes the result JSON and shows the summary for an ordinary run" {
+        Complete-WinCleanRun -ResultPath 'C:\some\result.json'
+
+        # -Exactly throughout this block, established by experiment: Pester treats
+        # `-Times 0` as "never" but `-Times N` (N>0) as "AT LEAST N", so the plain form
+        # cannot see a duplicate. That is exactly what the latch below has to prevent, and
+        # a mutation run proved the non-exact assertion could not catch its removal.
+        Should -Invoke Write-ResultJson -Exactly -Times 1
+        Should -Invoke Show-FinalStatistics -Exactly -Times 1
+    }
+
+    It "still writes the JSON for an aborted run but shows no summary - <Aborted>" -ForEach @(
+        @{ Aborted = 'UpdatedAndExited' }
+        @{ Aborted = 'PendingRebootDeclined' }
+    ) {
+        # Automation must always get the artefact; a human must not be told
+        # "COMPLETED SUCCESSFULLY" about a run that deliberately did nothing.
+        $script:Stats.Aborted = $Aborted
+
+        Complete-WinCleanRun -ResultPath 'C:\some\result.json'
+
+        Should -Invoke Write-ResultJson -Exactly -Times 1
+        Should -Invoke Show-FinalStatistics -Exactly -Times 0
+    }
+
+    It "is latched - an abort path that also unwinds through the finally writes once" {
+        # Both abort paths call this explicitly and then return; the finally calls it again
+        # for every other run. Without the latch the JSON would be written twice and the
+        # summary shown twice for the ordinary case.
+        Complete-WinCleanRun -ResultPath 'C:\some\result.json'
+        Complete-WinCleanRun -ResultPath 'C:\some\result.json'
+        Complete-WinCleanRun -ResultPath 'C:\some\result.json'
+
+        Should -Invoke Write-ResultJson -Exactly -Times 1
+        Should -Invoke Show-FinalStatistics -Exactly -Times 1
+    }
+
+    It "releases the log handle so the log can be moved right after the run" {
+        $logFile = Join-Path ([System.IO.Path]::GetTempPath()) "WinCleanComplete_$(Get-Random).log"
+        $prevPath = $script:LogPath
+        $script:LogPath = $logFile
+        try {
+            Write-LogFileLine -Line 'held open' -StartNewFile
+            $script:LogWriter | Should -Not -BeNullOrEmpty -Because 'the test needs a real open handle to prove it gets released'
+
+            Complete-WinCleanRun -ResultPath 'C:\some\result.json'
+
+            $script:LogWriter | Should -BeNullOrEmpty
+            # The operational point of releasing it, asserted as behaviour rather than as
+            # a null check: a still-open handle would make this fail on Windows.
+            { Remove-Item -LiteralPath $logFile -Force -ErrorAction Stop } | Should -Not -Throw
+        } finally {
+            if ($script:LogWriter) { $script:LogWriter.Dispose(); $script:LogWriter = $null; $script:LogWriterPath = $null }
+            Remove-Item -LiteralPath $logFile -Force -ErrorAction SilentlyContinue
+            $script:LogPath = $prevPath
+        }
+    }
+}
+
+#endregion
 
 Describe "Update-Applications when winget is absent" -Tag "Unit", "Helper", "V221" {
 

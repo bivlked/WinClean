@@ -1167,12 +1167,69 @@ Describe "v2.20: an operation that did nothing does not report success" -Tag "Fi
         }
     }
 
+    Context "Single end-of-run path (v2.22)" {
+        # The behaviour of each piece is tested in Helpers.Tests.ps1. What cannot be reached
+        # behaviourally without running the whole script as admin is the WIRING: that all
+        # three endings go through the one function. That is precisely what drifted before -
+        # each ending kept its own hand-copied subset of the list.
+
+        It "Every ending goes through Complete-WinCleanRun" {
+            # Comment lines are excluded deliberately: counting raw matches also counted the
+            # comment that names the function, which is the documented way these grep-style
+            # tests go wrong (a match in prose passing for a match in code).
+            $body = Get-FunctionBody -Name 'Start-WinClean'
+            $calls = @($body -split "`n" | Where-Object { $_ -notmatch '^\s*#' -and $_ -match 'Complete-WinCleanRun' })
+            $calls.Count |
+                Should -Be 3 -Because 'the finally, the self-update path and the declined-reboot path must all use it'
+        }
+
+        It "Start-WinClean no longer hand-copies the end-of-run steps" {
+            $body = Get-FunctionBody -Name 'Start-WinClean'
+            $body | Should -Not -Match 'Show-FinalStatistics'
+            $body | Should -Not -Match 'Write-ResultJson'
+        }
+
+        It "A verified self-update ends the run through the caller, not with exit" {
+            $body = Get-FunctionBody -Name 'Invoke-ScriptUpdate'
+            $body | Should -Not -Match '(?m)^\s*exit\s'
+            $body | Should -Not -Match 'Write-ResultJson'
+            $body | Should -Match 'return \$true'
+        }
+
+        It "Start-WinClean acts on the answer instead of ignoring it" {
+            # A caller that dropped the `if` would carry on running maintenance with the
+            # script file already replaced underneath it.
+            $body = Get-FunctionBody -Name 'Start-WinClean'
+            $body | Should -Match 'if \(Invoke-ScriptUpdate -UpdateInfo \$updateInfo\)'
+        }
+    }
+
     Context "Logging failure is visible" {
         It "Latches the first log write failure instead of swallowing every one" {
-            $body = Get-FunctionBody -Name 'Write-Log'
+            # v2.22: the degradation moved into Write-LogFileLine, so that the log header -
+            # written before Start-WinClean's try/finally exists - goes through it too.
+            $body = Get-FunctionBody -Name 'Write-LogFileLine'
             $body | Should -Match '\$script:LogWriteFailed'
-            # Write-Log must not report its own failure through Write-Log
+            # It must not report its own failure through Write-Log, which would recurse
             $body | Should -Match 'Write-Host'
+        }
+
+        It "Write-Log still routes file writes through the one degrading primitive" {
+            # Guards the seam the refactor created: a Write-Log that opened the file itself
+            # again would leave two implementations of the same fault tolerance, which is
+            # the state this change removed.
+            $body = Get-FunctionBody -Name 'Write-Log'
+            $body | Should -Match 'Write-LogFileLine'
+            $body | Should -Not -Match '\[System\.IO\.File\]::Open'
+        }
+
+        It "The log header cannot kill the run - it is not written with a bare Out-File" {
+            # The defect itself (external review, v2.22): two Out-File calls before any
+            # safety net. Measured: six of seven bad log paths throw a terminating error,
+            # which escaped Start-WinClean and cost the run its JSON and its maintenance.
+            $body = Get-FunctionBody -Name 'Start-WinClean'
+            $body | Should -Not -Match 'Out-File\s+-FilePath\s+\$script:LogPath'
+            $body | Should -Match 'Write-LogFileLine -Line "WinClean v'
         }
 
         It "Surfaces it in the result JSON so a consumer knows the log is incomplete" {
