@@ -925,6 +925,46 @@ Describe "v2.17: bootstrap verification is mandatory" -Tag "Fix", "V217" {
         $code | Should -Match 'version could not be read'
         $code | Should -Not -Match '\$pwshVersion -and \$pwshVersion -lt'
     }
+
+    It "install.ps1 actually reads the version of the real pwsh.exe (v2.23)" {
+        # Reported from a user machine running PowerShell 7.6.4: the installer refused to
+        # run, saying the version could not be read. It could not - pwsh reports
+        # ProductVersion as "7.6.4 SHA: <hash>+<hash>", the hash separated by a SPACE, so
+        # stripping a "-suffix" left it in place and the [version] cast threw on EVERY
+        # released PowerShell 7. The parse had been broken since it was written; the
+        # fail-open form above it skipped the comparison instead of reporting it, which is
+        # exactly why nobody could see it for three releases.
+        #
+        # The grep test above passed throughout, because it checks the SHAPE of the code and
+        # never evaluates it. This one runs install.ps1's own expression against the real
+        # binary on this machine - the only way the defect could have been caught.
+        $installPath = (Resolve-Path (Join-Path $PSScriptRoot '..' 'install.ps1')).Path
+        $ast = [System.Management.Automation.Language.Parser]::ParseFile($installPath, [ref]$null, [ref]$null)
+        $assign = @($ast.FindAll({
+            param($n)
+            $n -is [System.Management.Automation.Language.AssignmentStatementAst] -and
+            $n.Left.Extent.Text -eq '$pwshVersion'
+        }, $true))[0]
+        $assign | Should -Not -BeNullOrEmpty -Because 'install.ps1 must still compute $pwshVersion'
+
+        $pwshPath = Join-Path ([Environment]::GetFolderPath([Environment+SpecialFolder]::ProgramFiles)) 'PowerShell\7\pwsh.exe'
+        $pwshPath | Should -Exist -Because 'these tests run under PowerShell 7 from the canonical location'
+
+        # Run the product's line, then hand its result back out of the scriptblock.
+        $result = & ([scriptblock]::Create($assign.Extent.Text + "`n`$pwshVersion"))
+
+        $result | Should -Not -BeNullOrEmpty -Because 'a working PowerShell 7 must yield a version'
+        $result | Should -BeOfType ([version])
+        ($result -ge [version]'7.1') | Should -BeTrue -Because "the parsed version ($result) must clear the 7.1 gate"
+    }
+
+    It "install.ps1 does not parse the pwsh version out of the display string (v2.23)" {
+        # ProductVersion is a display string that carries a commit hash; the numeric
+        # ProductMajorPart/MinorPart/BuildPart fields cannot be misparsed.
+        $code = ($installScript -split "`n" | Where-Object { $_ -notmatch '^\s*#' }) -join "`n"
+        $code | Should -Not -Match 'ProductVersion\s+-split'
+        $code | Should -Match 'ProductMajorPart'
+    }
 }
 
 Describe "v2.18: bootstrap host allowlist is exact, not a broad suffix" -Tag "Fix", "V218" -ForEach @(
