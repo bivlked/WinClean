@@ -656,9 +656,16 @@ Describe "v2.16: Disk Cleanup timeout" -Tag "Fix", "V216" {
         # after this point is partial, and the run prints its total and writes its JSON
         # while an elevated process is still deleting. Silence made a partial result look
         # like a final one.
+        # v2.22 reworded the message and this test with it. The old text asserted cleanmgr
+        # "is still running", which the code cannot know: this branch is the fall-through
+        # for "neither signal fired", and broken WMI or activity that was never observed
+        # land here too. What must survive is the CONSEQUENCE - the figures may be
+        # incomplete - and the machine-readable flag that carries it.
         $body = Get-FunctionBody -Name 'Invoke-StorageSense'
-        $body | Should -Match 'still running - it continues in the background'
+        $body | Should -Match 'was not observed to stop'
+        $body | Should -Match 'may be incomplete'
         $body | Should -Match '\$script:Stats\.DiskCleanupPending = \$true'
+        $body | Should -Not -Match 'still running - it continues in the background'
     }
 
     It "cleanmgr is not killed on timeout" {
@@ -1190,9 +1197,21 @@ Describe "v2.20: an operation that did nothing does not report success" -Tag "Fi
             # which Storage Sense touches. A maintained machine would silently stop having
             # them cleaned. The setting is therefore read for the log only, and this test
             # exists so that decision cannot be reversed by accident.
+            # The decision lives in Invoke-StorageSense ($storageSenseDone), NOT in
+            # Get-StorageSenseVerdict. Guarding only the verdict function was theatre: a
+            # reviewer inserted `if (Test-StorageSenseEnabled) { $storageSenseDone = $true }`
+            # into Invoke-StorageSense - exactly the reversal this test forbids - and all
+            # 679 tests stayed green. Guard the variable that actually decides.
             $verdict = Get-FunctionBody -Name 'Get-StorageSenseVerdict'
             $verdict | Should -Not -Match 'Test-StorageSenseEnabled'
             $verdict | Should -Not -Match 'StoragePolicy'
+
+            $sense = Get-FunctionBody -Name 'Invoke-StorageSense'
+            $senseCode = ($sense -split "`n" | Where-Object { $_ -notmatch '^\s*#' }) -join "`n"
+            $assignments = @($senseCode -split "`n" | Where-Object { $_ -match '\$storageSenseDone\s*=' })
+            $assignments.Count | Should -Be 2 -Because 'only the initialiser and the verdict may set it'
+            ($assignments -join "`n") | Should -Not -Match 'Test-StorageSenseEnabled'
+            ($assignments -join "`n") | Should -Match '\$verdict\.Done'
         }
     }
 
@@ -1239,7 +1258,7 @@ Describe "v2.20: an operation that did nothing does not report success" -Tag "Fi
             # DiskCleanupPending means "an elevated process was still VISIBLY deleting, the figures
             # below are partial". The measured case is the opposite: nothing was happening.
             $residentBranch = [regex]::Match($script:senseCode,
-                '(?s)\}\s*elseif\s*\(\$finishedWhileResident\)\s*\{(.*?)\}\s*else\s*\{').Groups[1].Value
+                '(?s)\}\s*elseif\s*\(\$wentIdleWhileResident\)\s*\{(.*?)\}\s*else\s*\{').Groups[1].Value
             $residentBranch | Should -Not -BeNullOrEmpty -Because 'the branch must exist to be checked'
             $residentBranch | Should -Not -Match 'DiskCleanupPending'
             $residentBranch | Should -Match "DiskCleanupStatus = 'idle-resident'"
@@ -1317,6 +1336,96 @@ Describe "v2.20: an operation that did nothing does not report success" -Tag "Fi
             $tail | Should -Not -Match 'Wait-ForKeyPress'
         }
 
+        It "The log header call site passes -StartNewFile" {
+            # A mutation removing this switch from the only production caller survived the
+            # whole suite AND reached a commit. The behavioural test proves the function
+            # honours the switch; nothing proved the caller sends it. Without it a fixed
+            # -LogPath accumulates every run into one file.
+            $body = Get-FunctionBody -Name 'Start-WinClean'
+            $code = ($body -split "`n" | Where-Object { $_ -notmatch '^\s*#' }) -join "`n"
+            $code | Should -Match 'Write-LogFileLine -Line "WinClean v[^"]*" -StartNewFile'
+        }
+
+        It "The adaptive width is actually wired into the run" {
+            # Deleting both lines that compute the width survived the entire suite:
+            # Get-BoxWidth had ten unit tests and no caller assertion, so the feature could
+            # be disconnected while every test about it stayed green.
+            $body = Get-FunctionBody -Name 'Start-WinClean'
+            $code = ($body -split "`n" | Where-Object { $_ -notmatch '^\s*#' }) -join "`n"
+            $code | Should -Match 'Expand-ConsoleWindow'
+            $code | Should -Match '\$script:BoxWidth\s*=\s*Get-BoxWidth -ConsoleWidth \(Get-ConsoleWidth\)'
+        }
+
+        It "Every frame consumer reads the shared width, none re-hardcodes 70" {
+            # Four consumers were individually revertible to the literal 70 without any
+            # test noticing, because the geometry checker validates each box internally
+            # and never compares widths BETWEEN boxes.
+            foreach ($fn in 'Write-Log', 'Invoke-ScriptUpdate', 'Show-FinalStatisticsBody', 'Show-Banner') {
+                $b = Get-FunctionBody -Name $fn
+                $c = ($b -split "`n" | Where-Object { $_ -notmatch '^\s*#' }) -join "`n"
+                $c | Should -Not -Match '\$boxWidth\s*=\s*70' -Because "$fn must not pin the width again"
+                $c | Should -Not -Match '"[-─═]"\s*\*\s*70'   -Because "$fn must not pin a rule width again"
+            }
+        }
+
+        It "The abort marker is set BEFORE the run is completed, on both abort paths" {
+            # Swapping the two lines survived: the result JSON would then record
+            # Aborted: null and the summary would print "COMPLETED SUCCESSFULLY" over a run
+            # that deliberately did nothing. Neither branch has a finally behind it - both
+            # return before the outer try - so the order at the call site is the only guard.
+            # Only PendingRebootDeclined is set at the call site; UpdatedAndExited is set
+            # inside Invoke-ScriptUpdate before it returns $true, so it is already in place
+            # by the time Start-WinClean completes the run. Both are checked, each where it
+            # actually lives - the first draft of this test looked for both in Start-WinClean
+            # and failed, which is the test doing its job.
+            $body = Get-FunctionBody -Name 'Start-WinClean'
+            $at = $body.IndexOf("Aborted = 'PendingRebootDeclined'")
+            $at | Should -BeGreaterThan 0
+            $body.IndexOf('Complete-WinCleanRun', $at) | Should -BeGreaterThan $at
+
+            $update = Get-FunctionBody -Name 'Invoke-ScriptUpdate'
+            $setAt = $update.IndexOf("Aborted = 'UpdatedAndExited'")
+            $retAt = $update.IndexOf('return $true')
+            $setAt | Should -BeGreaterThan 0
+            $retAt | Should -BeGreaterThan $setAt -Because 'the caller must see the marker already set'
+        }
+
+        It "The completion latch is reset for every run" {
+            # Deleting the reset survived: a second Start-WinClean in one session would
+            # then silently produce no result JSON, no summary and no handle release,
+            # because the latch from the first run is still set.
+            $body = Get-FunctionBody -Name 'Start-WinClean'
+            $code = ($body -split "`n" | Where-Object { $_ -notmatch '^\s*#' }) -join "`n"
+            $code | Should -Match '\$script:RunCompleted\s*=\s*\$false'
+        }
+
+        It "The result JSON is written before anything that can block" {
+            # Complete-WinCleanRun documents "JSON goes first: Show-FinalStatistics may
+            # block on a keypress, and automated runs must get the result regardless".
+            # Swapping them survived - the three latch tests use -Exactly but never compare
+            # order. The equivalent ordering IS pinned for the self-update path; this makes
+            # the pair symmetrical.
+            # Comment-stripped: the docblock above the calls names Show-FinalStatistics
+            # while explaining why the JSON goes first, so a raw IndexOf found the prose
+            # and reported the wrong order. Third time this trap fired in this release.
+            $body = Get-FunctionBody -Name 'Complete-WinCleanRun'
+            $code = ($body -split "`n" | Where-Object { $_ -notmatch '^\s*#' }) -join "`n"
+            $jsonAt = $code.IndexOf('Write-ResultJson')
+            $statsAt = $code.IndexOf('Show-FinalStatistics')
+            $jsonAt  | Should -BeGreaterThan 0
+            $statsAt | Should -BeGreaterThan $jsonAt
+        }
+
+        It "The idle threshold used in production is the documented two minutes" {
+            # Every Wait-CleanmgrCompletion test passes -IdleChecksRequired explicitly, so
+            # the production value was invisible to them: setting it to 1 survived, which
+            # would declare a live cleanup finished after a single quiet check.
+            $body = Get-FunctionBody -Name 'Invoke-StorageSense'
+            $code = ($body -split "`n" | Where-Object { $_ -notmatch '^\s*#' }) -join "`n"
+            $code | Should -Match '\$idleChecksRequired = 12'
+            $code | Should -Match '\$checkInterval = 10'
+        }
+
         It "Start-WinClean acts on the answer instead of ignoring it" {
             # A caller that dropped the `if` would carry on running maintenance with the
             # script file already replaced underneath it.
@@ -1331,8 +1440,13 @@ Describe "v2.20: an operation that did nothing does not report success" -Tag "Fi
             # written before Start-WinClean's try/finally exists - goes through it too.
             $body = Get-FunctionBody -Name 'Write-LogFileLine'
             $body | Should -Match '\$script:LogWriteFailed'
-            # It must not report its own failure through Write-Log, which would recurse
-            $body | Should -Match 'Write-Host'
+            # Comment-stripped and matched on the MESSAGE, not the cmdlet name (raised in
+            # review, proved by mutation): the catch block contains the comment
+            # "Deliberately Write-Host and not Write-Log", so a bare 'Write-Host' match
+            # survived deleting the actual warning call - the run's only visible sign that
+            # logging failed could vanish with this test still green.
+            $code = ($body -split "`n" | Where-Object { $_ -notmatch '^\s*#' }) -join "`n"
+            $code | Should -Match 'Write-Host\s+"\s*\[WARN\]\s+Log file could not be written'
         }
 
         It "Write-Log still routes file writes through the one degrading primitive" {

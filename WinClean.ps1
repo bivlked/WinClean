@@ -837,9 +837,14 @@ function Get-ConsoleWidth {
     .SYNOPSIS
         The console width in columns, or 0 when it cannot be determined
     .DESCRIPTION
-        v2.22. Redirected output, scheduled tasks and non-console hosts either throw here
-        or report nonsense, and 0 is the honest answer for all of them - the caller falls
-        back to the historical fixed width rather than laying out against a guess.
+        v2.22. Returns 0 when there is no console to measure - a scheduled task, a service,
+        or any host without one - and the caller then falls back to the historical fixed
+        width rather than laying out against a guess.
+
+        Measured, because the obvious assumption is wrong: REDIRECTING output does NOT make
+        this return 0. $Host.UI.RawUI reads the attached console, not stdout, so
+        `pwsh -File script.ps1 *> out.txt` from a terminal still reports that terminal's
+        width. The smoke test therefore exercises the adaptive width, not the 70 fallback.
     #>
     try {
         $width = $Host.UI.RawUI.WindowSize.Width
@@ -5328,39 +5333,6 @@ function Invoke-DISMCleanup {
     }
 }
 
-function Get-ProcessActivityFingerprint {
-    <#
-    .SYNOPSIS
-        A comparable snapshot of how much work a process has actually done
-    .DESCRIPTION
-        v2.22. CPU time plus the three I/O operation counters, as one comparable string.
-        Two identical fingerprints taken far enough apart mean the process did literally
-        nothing in between.
-
-        Win32_Process rather than System.Diagnostics.Process, established by measurement:
-        the .NET object exposes the processor times but leaves ReadOperationCount,
-        WriteOperationCount and OtherOperationCount empty, so a fingerprint built from it
-        would compare CPU alone.
-
-        Returns $null when the counters cannot be read (WMI unavailable, the process gone,
-        access denied). The caller must treat $null as "cannot tell", never as "idle" -
-        otherwise a broken WMI would look exactly like a finished cleanup.
-    #>
-    param([int]$ProcessId)
-
-    try {
-        $p = Get-CimInstance -ClassName Win32_Process -Filter "ProcessId=$ProcessId" `
-                             -Property KernelModeTime, UserModeTime, ReadOperationCount,
-                                       WriteOperationCount, OtherOperationCount `
-                             -ErrorAction Stop
-        if (-not $p) { return $null }
-        return '{0}|{1}|{2}|{3}|{4}' -f $p.KernelModeTime, $p.UserModeTime,
-                                        $p.ReadOperationCount, $p.WriteOperationCount, $p.OtherOperationCount
-    } catch {
-        return $null
-    }
-}
-
 function Get-DiskCleanupActivityFingerprint {
     <#
     .SYNOPSIS
@@ -5449,7 +5421,14 @@ function Get-DiskCleanupActivityFingerprint {
         }
         $pids = (($family | ForEach-Object { [int]$_.ProcessId } | Sort-Object) -join ',')
 
-        return '{0}|{1}|{2}|{3}|{4}|{5}|{6}' -f $kernel, $user, $read, $write, $other, $family.Count, $pids
+        # Two segments separated by '#': the ACTIVITY part (counters) and the IDENTITY
+        # part (how many processes, and which). Raised in review: identity belongs in the
+        # fingerprint - a child appearing or exiting is a state change and must reset the
+        # idle streak - but it is NOT work. Letting it satisfy "activity was observed"
+        # would qualify a cleanmgr that merely spawned a helper and then blocked forever.
+        # The caller compares the whole string for stillness, the activity part alone for
+        # "did it ever do anything".
+        return '{0}|{1}|{2}|{3}|{4}#{5}|{6}' -f $kernel, $user, $read, $write, $other, $family.Count, $pids
     } catch {
         return $null
     }
@@ -5534,10 +5513,16 @@ function Wait-CleanmgrCompletion {
         $fingerprint = & $GetFingerprint
         $idleStreak = Update-IdleStreak -Previous $previousFingerprint -Current $fingerprint -Streak $idleStreak
 
-        # A reset caused by two READABLE but different fingerprints is real work. A reset
-        # caused by an unreadable sample is not, and must not qualify the run for an early
-        # verdict later on.
-        if ($idleStreak -eq 0 -and $previousFingerprint -and $fingerprint) { $sawActivity = $true }
+        # Real work, and only real work, opens the gate (raised in review). Two readable
+        # fingerprints differing is not enough: they also differ when a child process
+        # appears or exits, which is a state change but not work. Compare the activity
+        # segment (before '#') alone, so a cleanmgr that spawns a helper and then blocks
+        # forever cannot qualify for the early verdict. An unreadable sample never counts.
+        if ($previousFingerprint -and $fingerprint) {
+            $previousWork = ($previousFingerprint -split '#')[0]
+            $currentWork  = ($fingerprint -split '#')[0]
+            if ($currentWork -cne $previousWork) { $sawActivity = $true }
+        }
 
         if ($sawActivity -and $idleStreak -ge $IdleChecksRequired) {
             return @{ Outcome = 'idle-resident'; Elapsed = $elapsed }
@@ -5738,6 +5723,11 @@ function Invoke-StorageSense {
     # Docker/WSL, Visual Studio and the driver store - everything, to avoid one step.
     if ($ReportOnly) {
         Write-Log "Would run: Storage Sense" -Level DETAIL
+        # Its own value, not the 'not-run' default (raised in review): a preview is the
+        # most common way to reach this function - every smoke run and two of the stand
+        # modes use it - and 'not-run' is documented as "the step never executed, for
+        # example the run aborted earlier", which describes something else entirely.
+        $script:Stats.DiskCleanupStatus = 'skipped-report-only'
         return
     }
 
@@ -6026,7 +6016,9 @@ function Invoke-StorageSense {
             if ($armed -eq 0) {
                 Write-Log "No Disk Cleanup handlers could be armed - skipping cleanmgr" -Level WARNING
                 $script:Stats.WarningsCount++
-                $script:Stats.DiskCleanupStatus = 'failed'
+                # Distinct from a cleanmgr that started and failed (raised in review):
+                # nothing was attempted here, so nothing is half-done on the machine.
+                $script:Stats.DiskCleanupStatus = 'not-armed'
                 return
             }
 
@@ -6049,9 +6041,17 @@ function Invoke-StorageSense {
             if (-not $cleanmgr) {
                 Write-Log "Disk Cleanup could not be started (cleanmgr.exe is missing or blocked) - it cleaned nothing" -Level WARNING
                 $script:Stats.WarningsCount++
-                $script:Stats.DiskCleanupStatus = 'failed'
+                $script:Stats.DiskCleanupStatus = 'start-failed'
                 return
             }
+
+            # Recorded BEFORE the wait (raised in review): the status was only assigned
+            # after Wait-CleanmgrCompletion returned, leaving a window of up to fifteen
+            # minutes in which the JSON still said 'not-run'. If the run was interrupted
+            # there - Ctrl+C, or a throw anywhere in this block - a consumer read "the step
+            # never executed" while an elevated cleanmgr was actively deleting. The wrong
+            # answer on an abnormal exit is now "started, and we cannot account for it".
+            $script:Stats.DiskCleanupStatus = 'running'
 
             # v2.16: raised from 420s. cleanmgr regularly needs longer on a workstation
             # with a large component store, and killing it produced a warning on every
@@ -6089,18 +6089,20 @@ function Invoke-StorageSense {
                 -OnProgress { param($seconds) Write-Log "Disk Cleanup still running... ($seconds seconds)" -Level INFO }
 
             $elapsed = $waitOutcome.Elapsed
-            $finishedWhileResident = $waitOutcome.Outcome -eq 'idle-resident'
+            $wentIdleWhileResident = $waitOutcome.Outcome -eq 'idle-resident'
 
             if ($cleanmgr.HasExited -and $cleanmgr.ExitCode -ne 0) {
                 # v2.16: the exit code used to be ignored entirely, so a crash one second
                 # in was still logged as a success
                 Write-Log "Disk Cleanup exited with code $($cleanmgr.ExitCode) - results unverified" -Level WARNING
                 $script:Stats.WarningsCount++
-                $script:Stats.DiskCleanupStatus = 'failed'
+                # Unlike the two above, this one RAN: the machine may be partially
+                # cleaned, which is a different thing for a consumer to know.
+                $script:Stats.DiskCleanupStatus = 'exit-nonzero'
             } elseif ($cleanmgr.HasExited) {
                 Write-Log "Disk Cleanup completed ($armed categories)" -Level SUCCESS
                 $script:Stats.DiskCleanupStatus = 'completed'
-            } elseif ($finishedWhileResident) {
+            } elseif ($wentIdleWhileResident) {
                 # Deliberately worded as an OBSERVATION, not a conclusion (raised in the
                 # third review pass). What was measured is that cleanmgr and its children
                 # did nothing at all for two minutes after having been seen working; that
@@ -6124,8 +6126,13 @@ function Invoke-StorageSense {
                 # everything measured after this point is partial, the run is about to
                 # print a total and write its JSON while an elevated process is still
                 # deleting, and the freed bytes it goes on to reclaim are counted by nobody.
+                # Worded for what is actually known (raised in review): this branch is the
+                # fall-through for "neither signal fired", which also catches the cases
+                # where activity could NEVER be measured (broken WMI) or was never observed
+                # at all. Claiming it "is still working" would be the same inference stated
+                # as observation that the idle branch above was reworded to avoid.
                 $script:Stats.DiskCleanupPending = $true
-                Write-Log "Disk Cleanup exceeded $maxWait seconds and is still running - it continues in the background, so the freed figures below are partial" -Level WARNING
+                Write-Log "Disk Cleanup did not finish within $maxWait seconds and was not observed to stop - it is left running, so the freed figures below may be incomplete" -Level WARNING
                 $script:Stats.WarningsCount++
                 $script:Stats.DiskCleanupStatus = 'timeout'
             }
@@ -6142,7 +6149,15 @@ function Invoke-StorageSense {
             # an elevated deletion loop. The flags are swept by the next run's own sweep,
             # which is exactly the leftover case v2.16 added it for.
             if ($cleanmgr -and -not $cleanmgr.HasExited) {
-                Write-Log "Disk Cleanup is still running - its registry configuration will be swept by the next run" -Level DETAIL
+                # No promise about WHEN (raised in review). The next run's sweep is gated on
+                # no cleanmgr being present, and an idle-resident one typically lives until
+                # logoff or reboot - so on exactly the machines where that ending is normal,
+                # the next run would skip the sweep too. Sweeping here instead was rejected:
+                # if the idleness inference is wrong, pulling the flags could truncate a live
+                # cleanup, and v2.20 deliberately refused to guess whether cleanmgr re-reads
+                # them. Leaving stale flags is the cheaper of the two errors, but it must not
+                # be described as a cleanup that is going to happen.
+                Write-Log "cleanmgr.exe is still present, so its registry flags are left in place - they are swept by the first run that starts with no cleanmgr running" -Level DETAIL
             } else {
                 Get-ChildItem -Path $regPath -ErrorAction SilentlyContinue | ForEach-Object {
                     Remove-ItemProperty -Path $_.PSPath -Name "StateFlags$sageset" -Force -ErrorAction SilentlyContinue

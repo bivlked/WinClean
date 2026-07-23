@@ -43,9 +43,9 @@ CleanScript/
 │   └── logo.svg              # Логотип проекта
 ├── get.ps1                   # Bootstrap: разовый запуск одной командой (irm | iex)
 ├── install.ps1               # Bootstrap: установка/обновление + ярлык (RunAs admin)
-├── tests/                    # Pester тесты (679 всего; счётчик - прогоном, не грепом)
-│   ├── Helpers.Tests.ps1     # Unit-тесты helper-функций (363, дот-сорсят продукт - нужны права админа)
-│   ├── Fixes.Tests.ps1       # Валидационные тесты исправлений (198)
+├── tests/                    # Pester тесты (700 всего; счётчик - прогоном, не грепом)
+│   ├── Helpers.Tests.ps1     # Unit-тесты helper-функций (377, дот-сорсят продукт - нужны права админа)
+│   ├── Fixes.Tests.ps1       # Валидационные тесты исправлений (205)
 │   ├── Integration.Tests.ps1 # Интеграционные тесты в песочнице ФС (67, требуют admin)
 │   ├── StandHelpers.Tests.ps1 # Чистые хелперы стенда: dead-man + версионный гейт + таблица истинности report-гварда (23, без admin)
 │   └── Docs.Tests.ps1        # Гварды документации: нет тире + нет битых ссылок (28, без admin; файлы ПЕРЕЧИСЛЯЮТСЯ, а не задаются списком)
@@ -198,7 +198,7 @@ Publish-PSResource -Path .\WinClean.ps1 -Repository PSGallery -ApiKey $env:PSGAL
 **Проверки (4 job'а, счёт сверять gh run view --json jobs, а не этой строкой):**
 1. **lint** - PSScriptAnalyzer (Error+Warning) через общий 	ools/Invoke-Lint.ps1 - тот же, что зовёт релиз-гейт
 2. **syntax** - Проверка синтаксиса PowerShell
-3. **test** - Pester тесты (679; интеграционные требуют admin - на GitHub runners это выполняется)
+3. **test** - Pester тесты (700; интеграционные требуют admin - на GitHub runners это выполняется)
 4. **smoke** - прогон -ReportOnly + геометрия рамок + result JSON
 
 **Исключения PSScriptAnalyzer** (допустимые для CLI):
@@ -208,7 +208,7 @@ Publish-PSResource -Path .\WinClean.ps1 -Repository PSGallery -ApiKey $env:PSGAL
 
 ### Pester тесты (v2.13+)
 
-- `tests/Helpers.Tests.ps1` - 363 unit-тестов (дот-сорсят WinClean.ps1), `tests/Fixes.Tests.ps1` - 198, `tests/Integration.Tests.ps1` - 67 (песочница ФС, требуют admin), `tests/StandHelpers.Tests.ps1` - 23 (без admin), `tests/Docs.Tests.ps1` - 28 (гварды доков, без admin)
+- `tests/Helpers.Tests.ps1` - 377 unit-тестов (дот-сорсят WinClean.ps1), `tests/Fixes.Tests.ps1` - 205, `tests/Integration.Tests.ps1` - 67 (песочница ФС, требуют admin), `tests/StandHelpers.Tests.ps1` - 23 (без admin), `tests/Docs.Tests.ps1` - 28 (гварды доков, без admin)
 - Особенности: функции в BeforeAll (не AST), regex для locale-независимости, отдельные It блоки
 
 ---
@@ -434,7 +434,7 @@ pwsh tools/Invoke-ReleaseCheck.ps1                  # версия во всех
 pwsh tools/Invoke-ReleaseCheck.ps1 -IncludeStand    # + боевой прогон на VM (минуты)
 pwsh tools/Invoke-ReleaseCheck.ps1 -VerifyPublished # ПОСЛЕ выпуска: ассеты релиза и SHA256
 
-Invoke-Pester ./tests -Output Detailed              # 679 Pester тестов (считать прогоном, не грепом)
+Invoke-Pester ./tests -Output Detailed              # 700 Pester тестов (считать прогоном, не грепом)
 pwsh tools/Invoke-SmokeTest.ps1                     # Смоук: ReportOnly + геометрия UI
 pwsh tools/proxmox/Invoke-StandTest.ps1 -Mode Report # Стенд на Proxmox (RU=VM 190, EN: -ConfigPath ...en.json = VM 191)
 # Ночная матрица: cron 03:30 на proxmos (/opt/winclean-stand, /etc/cron.d/winclean-stand), отчёт в Telegram

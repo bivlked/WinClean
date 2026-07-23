@@ -87,7 +87,7 @@ the installer accepted a PowerShell whose version it had failed to read.
 
 ### Tests
 
-- 573 -> 668. Three mutation runs over the new logic (30 mutations); every one is caught.
+- 573 -> 700. Four mutation runs over the new logic (79 mutations); every one is caught.
   Eight of them survived at first and each exposed a real gap rather than a wrong fix -
   among them that `Should -Invoke -Times N` means *at least* N and cannot see a duplicate,
   that the "unreadable activity" branch was never exercised, and that nothing pinned the

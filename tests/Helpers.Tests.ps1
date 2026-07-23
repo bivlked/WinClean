@@ -2443,6 +2443,68 @@ Describe "Test-StorageSenseEnabled" -Tag "Unit", "Helper", "V222" {
 
 #endregion
 
+#region v2.22 DiskCleanupStatus reaches the result JSON
+
+Describe "DiskCleanupStatus is actually produced and published" -Tag "Unit", "Helper", "V222" {
+    # Added after a mutation run: the headline field of this release had NO behavioural
+    # coverage at all. Deleting five of its seven assignments, changing the default, or
+    # removing the field from the result JSON entirely all left 679 tests green. Only two
+    # comment-stripped greps existed, and a grep cannot see a value that is never set.
+
+    BeforeEach {
+        $script:Stats = New-RunStats
+        $script:resultFile = Join-Path ([System.IO.Path]::GetTempPath()) "WinCleanStatus_$(Get-Random).json"
+    }
+
+    AfterEach {
+        Remove-Item -LiteralPath $script:resultFile -Force -ErrorAction SilentlyContinue
+    }
+
+    It "starts as 'not-run' so an aborted run cannot look like a completed cleanup" {
+        (New-RunStats).DiskCleanupStatus | Should -Be 'not-run'
+    }
+
+    It "is written to the result JSON, with the value the run actually reached" {
+        # The mutation that deleted the field from Write-ResultJson survived; this is the
+        # assertion that kills it. A consumer reading the documented schema must find it.
+        $script:Stats.DiskCleanupStatus = 'idle-resident'
+
+        Write-ResultJson -Path $script:resultFile
+
+        $json = Get-Content -LiteralPath $script:resultFile -Raw | ConvertFrom-Json
+        $json.PSObject.Properties.Name | Should -Contain 'DiskCleanupStatus'
+        $json.DiskCleanupStatus | Should -Be 'idle-resident'
+    }
+
+    It "survives the JSON round trip as a string for every documented value - <Value>" -ForEach @(
+        @{ Value = 'not-run' }, @{ Value = 'skipped-parameter' }, @{ Value = 'skipped-report-only' }
+        @{ Value = 'storage-sense' }, @{ Value = 'running' }, @{ Value = 'completed' }
+        @{ Value = 'idle-resident' }, @{ Value = 'timeout' }
+        @{ Value = 'not-armed' }, @{ Value = 'start-failed' }, @{ Value = 'exit-nonzero' }
+    ) {
+        # Pins the vocabulary itself: docs/result-json.md documents exactly these, and a
+        # value that only exists in the code is a contract nobody can consume.
+        $script:Stats.DiskCleanupStatus = $Value
+        Write-ResultJson -Path $script:resultFile
+        (Get-Content -LiteralPath $script:resultFile -Raw | ConvertFrom-Json).DiskCleanupStatus | Should -Be $Value
+    }
+
+    It "records the preview as its own value, not as 'not-run'" {
+        # -ReportOnly is the most common way into this function: the smoke test and two
+        # stand modes all use it. Reporting the documented "the step never executed (for
+        # example the run aborted earlier)" for a healthy preview is simply untrue.
+        # Safe to call for real: the ReportOnly branch returns before touching anything.
+        $ReportOnly = $true
+        Mock Write-Log { }
+
+        Invoke-StorageSense
+
+        $script:Stats.DiskCleanupStatus | Should -Be 'skipped-report-only'
+    }
+}
+
+#endregion
+
 #region v2.22 adaptive console width
 
 Describe "Get-BoxWidth" -Tag "Unit", "Helper", "V222" {
@@ -2683,7 +2745,7 @@ Describe "Update-IdleStreak" -Tag "Unit", "Helper", "V222" {
         @{ Case = 'previous empty';      Prev = '';    Curr = 'a' }
         @{ Case = 'current empty';       Prev = 'a';   Curr = '' }
     ) {
-        # The safety property. Get-ProcessActivityFingerprint returns $null when WMI cannot
+        # The safety property. Get-DiskCleanupActivityFingerprint returns $null when WMI cannot
         # answer, and if that accumulated towards the threshold a machine with broken WMI
         # would cut every Disk Cleanup short after two minutes and call it complete.
         Update-IdleStreak -Previous $Prev -Current $Curr -Streak 11 |
@@ -2697,24 +2759,26 @@ Describe "Update-IdleStreak" -Tag "Unit", "Helper", "V222" {
     }
 }
 
-Describe "Get-ProcessActivityFingerprint" -Tag "Unit", "Helper", "V222" {
+Describe "Get-DiskCleanupActivityFingerprint" -Tag "Unit", "Helper", "V222" {
 
     It "returns a comparable fingerprint for a live process" {
-        $fp = Get-ProcessActivityFingerprint -ProcessId $PID
+        $fp = Get-DiskCleanupActivityFingerprint -ProcessId $PID
         $fp | Should -Not -BeNullOrEmpty
         # CPU kernel + CPU user + three I/O counters
-        ($fp -split '\|').Count | Should -Be 5
+        # Five counters, then '#', then the identity segment (process count, PID list)
+        ($fp -split '[|#]').Count | Should -Be 7
+        $fp | Should -Match '#' -Because 'the activity and identity parts must stay separable'
     }
 
     It "changes after the process does measurable work" {
         # Proves the fingerprint actually tracks activity. If it were built from cached or
         # constant values, everything would look idle and every cleanmgr would be cut short
         # at two minutes - the failure mode that matters most here.
-        $before = Get-ProcessActivityFingerprint -ProcessId $PID
+        $before = Get-DiskCleanupActivityFingerprint -ProcessId $PID
         $sink = 0
         1..200000 | ForEach-Object { $sink += $_ }
         $null = Get-ChildItem -Path ([System.IO.Path]::GetTempPath()) -ErrorAction SilentlyContinue | Select-Object -First 50
-        $after = Get-ProcessActivityFingerprint -ProcessId $PID
+        $after = Get-DiskCleanupActivityFingerprint -ProcessId $PID
 
         $after | Should -Not -Be $before
     }
@@ -2722,7 +2786,7 @@ Describe "Get-ProcessActivityFingerprint" -Tag "Unit", "Helper", "V222" {
     It "returns null for a process id that does not exist, rather than throwing" {
         # cleanmgr can exit between two checks; the caller must get "cannot tell", and
         # Update-IdleStreak turns that into a reset rather than a false completion.
-        Get-ProcessActivityFingerprint -ProcessId 999999 | Should -BeNullOrEmpty
+        Get-DiskCleanupActivityFingerprint -ProcessId 999999 | Should -BeNullOrEmpty
     }
 
     It "the Disk Cleanup fingerprint covers our own process tree, not every cleanmgr" {
@@ -2743,7 +2807,7 @@ Describe "Get-ProcessActivityFingerprint" -Tag "Unit", "Helper", "V222" {
         $fp = Get-DiskCleanupActivityFingerprint -ProcessId 100
 
         # our process + its child: kernel 10+20, and the PID list names exactly those two
-        $fp | Should -Be '30|3|3|3|3|2|100,200'
+        $fp | Should -Be '30|3|3|3|3#2|100,200'
         $fp | Should -Not -Match '900' -Because 'an unrelated cleanmgr must not influence our verdict'
     }
 
@@ -2762,7 +2826,7 @@ Describe "Get-ProcessActivityFingerprint" -Tag "Unit", "Helper", "V222" {
             )
         }
         $fp = Get-DiskCleanupActivityFingerprint -ProcessId 100
-        $fp | Should -Be '2|0|0|0|0|2|100,200'
+        $fp | Should -Be '2|0|0|0|0#2|100,200'
     }
 
     It "sums counters as integers, without the precision loss of a Double" {
@@ -2784,8 +2848,8 @@ Describe "Get-ProcessActivityFingerprint" -Tag "Unit", "Helper", "V222" {
         # every Disk Cleanup short and call it finished.
         Mock Get-CimInstance { throw 'WMI is unavailable' }
 
-        $first  = Get-ProcessActivityFingerprint -ProcessId $PID
-        $second = Get-ProcessActivityFingerprint -ProcessId $PID
+        $first  = Get-DiskCleanupActivityFingerprint -ProcessId $PID
+        $second = Get-DiskCleanupActivityFingerprint -ProcessId $PID
 
         $first | Should -BeNullOrEmpty
         Update-IdleStreak -Previous $first -Current $second -Streak 11 |
@@ -3029,8 +3093,30 @@ Describe "Invoke-ScriptUpdate stop/continue contract" -Tag "Unit", "Helper", "V2
         Should -Invoke Write-ResultJson -Times 0
     }
 
+    It "returns false in a preview, without ever attempting an update" {
+        # Rewritten (raised in review): this case used to live in the -ForEach below, whose
+        # body sets a LOCAL $ReportOnly = $false before running each Setup. PowerShell
+        # resolves variables through the dynamic scope chain, so the product saw that local
+        # and not the $script: value the Setup wrote - the case never entered the ReportOnly
+        # branch at all and merely duplicated 'non-interactive'. Proved by mutation: making
+        # the ReportOnly branch return $true survived this Describe entirely.
+        # The local assignment here is what the function actually reads.
+        $ReportOnly = $true
+        Mock Test-InteractiveConsole { $true }
+        Mock Read-Host { 'y' }
+        Mock Update-Script { }
+        Mock Update-PSResource { }
+
+        $stop = Invoke-ScriptUpdate -UpdateInfo @{ CurrentVersion = '2.20'; LatestVersion = '2.21'
+                                                   Channel = 'gallery'; Provider = 'PowerShellGet' }
+
+        $stop | Should -BeFalse
+        Should -Invoke Update-Script -Exactly -Times 0 -Because 'a preview must change nothing'
+        Should -Invoke Update-PSResource -Exactly -Times 0
+        $script:Stats.Aborted | Should -BeNullOrEmpty
+    }
+
     It "returns false so the run continues - <Case>" -ForEach @(
-        @{ Case = 'report-only';        Setup = { $script:ReportOnly = $true } }
         @{ Case = 'non-interactive';    Setup = { Mock Test-InteractiveConsole { $false } } }
         @{ Case = 'user declines';      Setup = { Mock Test-InteractiveConsole { $true }; Mock Read-Host { 'n' } } }
         @{ Case = 'update command failed'; Setup = {

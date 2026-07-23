@@ -14,7 +14,7 @@ This page documents every field, gives a full sample, and explains how to consum
 
 | Field | Type | Meaning |
 |-------|------|---------|
-| `Version` | string | Script version that produced this file, e.g. `"2.19"`. |
+| `Version` | string | Script version that produced this file, e.g. `"2.22"`. |
 | `Timestamp` | string | Run time in ISO-8601 round-trip format (`"o"`, e.g. `2026-07-21T03:15:42.1234567+00:00`). Use it to confirm the file belongs to the run you started, not a leftover. |
 | `DurationSeconds` | number | Wall-clock duration of the run, rounded to one decimal. |
 | `ReportOnly` | bool | `true` when the run was a preview (`-ReportOnly`): no cleanup or updates were applied (the log and this result file are still written). |
@@ -29,7 +29,7 @@ This page documents every field, gives a full sample, and explains how to consum
 | `RebootRequired` | bool | `true` when a change (a Windows update, an app update finishing on reboot) needs a restart to take effect. |
 | `LoggingDegraded` | bool | v2.20. `true` when writing the log file failed at some point during the run. The run itself still completed, but `LogPath` points at an incomplete file: do not read that log as the full record of what happened. |
 | `DiskCleanupPending` | bool | v2.20. `true` when Disk Cleanup was still **visibly working** when its timeout expired and was left running in the background; `TotalFreedBytes` is then a lower bound. Note `false` is not a proof that nothing more will ever be deleted - see `DiskCleanupStatus`, which is the field to read when that distinction matters. |
-| `DiskCleanupStatus` | string | v2.22. How the Storage Sense / Disk Cleanup step actually ended: `completed`, `idle-resident`, `timeout`, `storage-sense`, `failed`, `skipped-parameter`, or `not-run`. See below - the boolean above conflated a finished cleanup with a still-running one. |
+| `DiskCleanupStatus` | string | v2.22. How the Storage Sense / Disk Cleanup step actually ended - eleven values, listed below. The boolean above could not tell a cleanup that had stopped doing anything from one still deleting, and reported both as pending. |
 | `ControlledFolderAccess` | string | Tri-state, see below. Reflects whether Defender's Controlled Folder Access may have silently blocked deletions. |
 | `Aborted` | string or null | `null` unless the run stopped early for a known reason: `"PendingRebootDeclined"` (the user declined to continue with a reboot pending) or `"UpdatedAndExited"` (v2.21 - the script updated itself and exited so the new version runs next time). When set, the phase arrays below are incomplete by design. Note `null` does not by itself prove every phase ran - see the invariant note below. |
 | `PhasesCompleted` | array of string | Phases whose action ran to completion without an uncaught exception. |
@@ -99,11 +99,15 @@ than the conclusion.
 |-------|---------|
 | `completed` | cleanmgr ran and exited with code 0. |
 | `idle-resident` | cleanmgr was seen working, then did nothing at all for two minutes and never exited. Reported as what was **observed**, not as proven completion: a process performing no CPU work and no I/O is not deleting anything, so the figures are treated as final and `DiskCleanupPending` stays `false`. |
-| `timeout` | cleanmgr was still genuinely working when the timeout expired. `DiskCleanupPending` is `true` and `TotalFreedBytes` is a lower bound. |
-| `storage-sense` | Storage Sense demonstrably did the work, so cleanmgr was not run. Note this covers a different, smaller set of things than cleanmgr's handlers. |
-| `failed` | cleanmgr could not be started, no handlers could be armed, or it exited non-zero. Nothing was verifiably cleaned by this step. |
+| `timeout` | The wait expired without either signal firing. That includes the case where activity could never be measured at all (WMI unavailable) or was never observed, so it does not by itself mean cleanmgr was seen working. `DiskCleanupPending` is `true` and `TotalFreedBytes` is a lower bound. |
+| `running` | Set as soon as cleanmgr starts, and replaced by one of the values above when the wait ends. Seeing it in a result file means the run was interrupted while an elevated cleanmgr was in flight - the totals are not final and the process may still be deleting. |
+| `storage-sense` | Storage Sense demonstrably did the work, so cleanmgr was not run. Note this covers a different, smaller set of things than cleanmgr handlers - it does not touch Update Cleanup, memory dumps, Language Pack, old ChkDsk files or Windows Error Reporting. |
+| `not-armed` | No Disk Cleanup handler could be armed, so cleanmgr was never started. Nothing was attempted and nothing is half-done. |
+| `start-failed` | cleanmgr.exe could not be started at all (missing, or blocked by AppLocker/WDAC). Nothing was attempted. |
+| `exit-nonzero` | cleanmgr started and exited with a non-zero code. Unlike the two above, it **ran**: the machine may be partially cleaned. |
 | `skipped-parameter` | `-SkipDiskCleanup` was passed. |
-| `not-run` | The step never executed (for example the run aborted earlier). |
+| `skipped-report-only` | `-ReportOnly` was passed. This is what every preview run, the smoke test and the `Report`/`ReportNoCleanup` stand modes produce. |
+| `not-run` | The step never executed - the run aborted before reaching it. |
 
 `idle-resident` is not an error, and it is named after the observation rather than after
 the conclusion on purpose. What is measured is stillness; "it finished" is an inference
@@ -144,7 +148,7 @@ VisualStudioCleanup, DeepSystemCleanup, DiskSpaceReport, Telemetry
 
 ```json
 {
-  "Version": "2.20",
+  "Version": "2.22",
   "Timestamp": "2026-07-21T03:15:42.1234567+00:00",
   "DurationSeconds": 196.4,
   "ReportOnly": false,

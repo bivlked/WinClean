@@ -186,9 +186,13 @@ if ($pester) {
             elseif ($failedContainers) { "$failedContainers тест-файл(ов) не загрузились - их тесты не выполнялись" }
             else { '' })
 
+    # v2.22: CHANGELOG.md added (raised in review). It was the one document a user reads
+    # and quotes, it states the count in the form "A -> B", and nothing verified it - so it
+    # shipped stale while the two files that WERE checked had already been corrected.
     $countClaims = @(
         @{ File = 'CLAUDE.md';       Pattern = "$pesterCount Pester" }
         @{ File = 'CONTRIBUTING.md'; Pattern = "$pesterCount tests" }
+        @{ File = 'CHANGELOG.md';    Pattern = "-> $pesterCount\." }
     )
     $wrongCounts = foreach ($claim in $countClaims) {
         $full = Join-Path $repoRoot $claim.File
