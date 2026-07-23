@@ -2415,6 +2415,33 @@ Describe "Invoke-ScriptUpdate branches" -Tag "Unit", "Helper", "V221" {
     }
 }
 
+#region v2.22 Storage Sense setting is reported, not acted on
+
+Describe "Test-StorageSenseEnabled" -Tag "Unit", "Helper", "V222" {
+    # Explains which of two states produced "returned 0 and freed nothing". Deliberately
+    # NOT wired into the skip decision - see the comment at its call site.
+
+    It "reports enabled when the policy value says so" {
+        Mock Get-ItemProperty { [pscustomobject]@{ '01' = 1 } }
+        Test-StorageSenseEnabled | Should -BeTrue
+    }
+
+    It "reports disabled when the policy value says so" {
+        Mock Get-ItemProperty { [pscustomobject]@{ '01' = 0 } }
+        Test-StorageSenseEnabled | Should -BeFalse
+    }
+
+    It "answers null - not false - when the setting cannot be read" {
+        # Under SYSTEM (a scheduled task) HKCU is a different hive and the key is absent.
+        # Reporting "switched off" there would state a fact nobody established.
+        Mock Get-ItemProperty { throw 'no such key' }
+        Test-StorageSenseEnabled | Should -BeNullOrEmpty
+    }
+
+}
+
+#endregion
+
 #region v2.22 adaptive console width
 
 Describe "Get-BoxWidth" -Tag "Unit", "Helper", "V222" {

@@ -1,5 +1,5 @@
 <#PSScriptInfo
-.VERSION 2.21
+.VERSION 2.22
 .GUID 8f7c3b2a-1d4e-5f6a-9b8c-0d1e2f3a4b5c
 .AUTHOR bivlked
 .COMPANYNAME
@@ -12,6 +12,7 @@
 .REQUIREDSCRIPTS
 .EXTERNALSCRIPTDEPENDENCIES
 .RELEASENOTES
+    v2.22: Honest completion and adaptive output - a finished Disk Cleanup is no longer reported as partial, a bad log path can no longer kill a run, every run now ends through one path, and the console output follows the window width
     v2.21: Self-update targeting and honest exit codes - the update could change a file that was not the one running and still report success; a missing winget or no connectivity no longer fails the run
     v2.20: Correctness and honesty round - a junction could bypass protected-path checks, four operations reported success while doing nothing, Storage Sense was unreachable so on machines where it works the slow Disk Cleanup no longer runs; where it fails, the new -SkipDiskCleanup is what removes the wait
     v2.19: Contract and documentation round - -SkipCleanup now skips ALL cleanup categories, result JSON gains a tri-state PhasesSkipped, AppUpdatesCount renamed to AppUpdatesOffered (offered, not installed), full docs overhaul
@@ -30,7 +31,7 @@
 
 <#
 .SYNOPSIS
-    WinClean - Ultimate Windows 11 Maintenance Script v2.21
+    WinClean - Ultimate Windows 11 Maintenance Script v2.22
 .DESCRIPTION
     Комплексный скрипт для обновления и очистки Windows 11:
     - Обновление Windows (включая драйверы)
@@ -44,8 +45,21 @@
     - Подробный цветной вывод + лог-файл
 .NOTES
     Author: biv
-    Version: 2.21
+    Version: 2.22
     Requires: PowerShell 7.1+, Windows 11, Administrator rights
+    Changes in 2.22:
+    - A Disk Cleanup that finished its work but never exited is no longer reported as
+      still running: completion is now detected by total stillness as well as by exit,
+      so a finished cleanup stops costing the full 15-minute timeout
+    - An unusable -LogPath can no longer kill the run before it starts - the log header
+      is written through the same fault-tolerant path as every other log line
+    - Every run now ends through one code path, so the result JSON, the summary and the
+      log handle release cannot drift apart between normal and self-update exits
+    - Console output adapts to the window width: the window is widened best-effort at
+      startup and the frames follow it, so winget's table stops wrapping into them
+    - install.ps1 refuses a PowerShell 7 whose version it cannot read, instead of
+      treating "could not check" as "good enough"
+
     Changes in 2.21:
     - The self-update could update a DIFFERENT copy than the one running and report
       success - it asked whether a Gallery copy existed anywhere, not whether the
@@ -429,7 +443,7 @@ if (-not $LogPath) {
 }
 
 # Script version (single source of truth for version checking)
-$script:Version = "2.21"
+$script:Version = "2.22"
 
 # Protected paths that should never be deleted
 $script:ProtectedPaths = @(
@@ -5438,6 +5452,31 @@ function Select-StorageSenseTask {
     return @{ Task = $found[0]; Reason = 'ok' }
 }
 
+function Test-StorageSenseEnabled {
+    <#
+    .SYNOPSIS
+        Whether Storage Sense is switched on in Settings
+    .DESCRIPTION
+        v2.22. Tri-state on purpose: $true / $false / $null for "cannot tell". Used ONLY
+        to explain what happened, never to decide whether Disk Cleanup runs - see the note
+        in Invoke-StorageSense for why that distinction matters.
+
+        Verified on a live Windows 11 25H2 (build 26200): the value is still
+        HKCU\...\StorageSense\Parameters\StoragePolicy\01, and it was not renamed.
+
+        HKCU is the user's hive, so a run under SYSTEM (a scheduled task) reads a
+        different one and gets nothing - which is exactly why the answer must be allowed
+        to be $null instead of defaulting to "off".
+    #>
+    try {
+        $policy = Get-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\StorageSense\Parameters\StoragePolicy' `
+                                   -Name '01' -ErrorAction Stop
+        return [bool][int]$policy.'01'
+    } catch {
+        return $null
+    }
+}
+
 function Get-StorageSenseVerdict {
     <#
     .SYNOPSIS
@@ -5723,7 +5762,25 @@ function Invoke-StorageSense {
                     'unreadable'   { Write-Log "Storage Sense ran but its result could not be read - using Disk Cleanup as well" -Level INFO }
                     'failed'       { Write-Log ("Storage Sense failed (task result 0x{0:X8}) - using Disk Cleanup instead" -f $taskResult) -Level INFO }
                     'not-measured' { Write-Log "Storage Sense reported success but free space could not be measured - running Disk Cleanup as well" -Level INFO }
-                    'nothing-freed' { Write-Log "Storage Sense reported success but freed nothing measurable - running Disk Cleanup as well" -Level INFO }
+                    'nothing-freed' {
+                        # v2.22 (MyAI-1qtn): say WHICH of the two states this is. "Returned
+                        # 0 and freed nothing" covers both "switched off, so it did nothing"
+                        # and "switched on, ran, and there was nothing left to free" - and
+                        # on a regularly maintained machine the second happens every time,
+                        # which looked like a malfunction to the person reading the log.
+                        #
+                        # Reported, NOT acted on. The proposal was to trust an enabled
+                        # Storage Sense and skip Disk Cleanup, and checking what that would
+                        # cost settled it: the categories armed below include Update
+                        # Cleanup, memory dumps, Language Pack, old ChkDsk files and Windows
+                        # Error Reporting - none of which Storage Sense touches at all. A
+                        # maintained machine would silently stop having them cleaned.
+                        switch (Test-StorageSenseEnabled) {
+                            $true   { Write-Log "Storage Sense is enabled and ran, but there was nothing left for it to free - running Disk Cleanup as well for the categories it does not cover" -Level INFO }
+                            $false  { Write-Log "Storage Sense is switched off in Settings, so its run freed nothing - using Disk Cleanup instead" -Level INFO }
+                            default { Write-Log "Storage Sense reported success but freed nothing measurable, and its setting could not be read - running Disk Cleanup as well" -Level INFO }
+                        }
+                    }
                     default        { Write-Log "Storage Sense verdict '$($verdict.Reason)' not recognised - running Disk Cleanup as well" -Level INFO }
                 }
             } elseif ($waitResult.Outcome -eq 'vanished') {

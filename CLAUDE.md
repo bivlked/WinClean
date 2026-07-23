@@ -11,7 +11,7 @@
 
 | Параметр | Значение |
 |----------|----------|
-| **Версия** | 2.21 |
+| **Версия** | 2.22 |
 | **Язык** | PowerShell 7.1+ |
 | **Платформа** | Windows 11 (23H2/24H2/25H2) |
 | **Лицензия** | MIT |
@@ -43,11 +43,11 @@ CleanScript/
 │   └── logo.svg              # Логотип проекта
 ├── get.ps1                   # Bootstrap: разовый запуск одной командой (irm | iex)
 ├── install.ps1               # Bootstrap: установка/обновление + ярлык (RunAs admin)
-├── tests/                    # Pester тесты (573 всего; счётчик - прогоном, не грепом)
-│   ├── Helpers.Tests.ps1     # Unit-тесты helper-функций (280, дот-сорсят продукт - нужны права админа)
-│   ├── Fixes.Tests.ps1       # Валидационные тесты исправлений (183)
+├── tests/                    # Pester тесты (668 всего; счётчик - прогоном, не грепом)
+│   ├── Helpers.Tests.ps1     # Unit-тесты helper-функций (355, дот-сорсят продукт - нужны права админа)
+│   ├── Fixes.Tests.ps1       # Валидационные тесты исправлений (197)
 │   ├── Integration.Tests.ps1 # Интеграционные тесты в песочнице ФС (67, требуют admin)
-│   ├── StandHelpers.Tests.ps1 # Чистые хелперы стенда: dead-man + версионный гейт ассертов (17, без admin)
+│   ├── StandHelpers.Tests.ps1 # Чистые хелперы стенда: dead-man + версионный гейт + таблица истинности report-гварда (23, без admin)
 │   └── Docs.Tests.ps1        # Гварды документации: нет тире + нет битых внутренних ссылок (26, без admin)
 ├── tools/                    # Тестовая инфраструктура (не публикуется в PSGallery)
 │   ├── Invoke-ReleaseCheck.ps1 # 🔴 Единая проверка перед релизом (fail-closed)
@@ -198,7 +198,7 @@ Publish-PSResource -Path .\WinClean.ps1 -Repository PSGallery -ApiKey $env:PSGAL
 **Проверки (4 job'а, счёт сверять gh run view --json jobs, а не этой строкой):**
 1. **lint** - PSScriptAnalyzer (Error+Warning) через общий 	ools/Invoke-Lint.ps1 - тот же, что зовёт релиз-гейт
 2. **syntax** - Проверка синтаксиса PowerShell
-3. **test** - Pester тесты (573; интеграционные требуют admin - на GitHub runners это выполняется)
+3. **test** - Pester тесты (668; интеграционные требуют admin - на GitHub runners это выполняется)
 4. **smoke** - прогон -ReportOnly + геометрия рамок + result JSON
 
 **Исключения PSScriptAnalyzer** (допустимые для CLI):
@@ -208,7 +208,7 @@ Publish-PSResource -Path .\WinClean.ps1 -Repository PSGallery -ApiKey $env:PSGAL
 
 ### Pester тесты (v2.13+)
 
-- `tests/Helpers.Tests.ps1` - 280 unit-тестов (дот-сорсят WinClean.ps1), `tests/Fixes.Tests.ps1` - 183, `tests/Integration.Tests.ps1` - 67 (песочница ФС, требуют admin), `tests/StandHelpers.Tests.ps1` - 17 (без admin), `tests/Docs.Tests.ps1` - 26 (гварды доков, без admin)
+- `tests/Helpers.Tests.ps1` - 355 unit-тестов (дот-сорсят WinClean.ps1), `tests/Fixes.Tests.ps1` - 197, `tests/Integration.Tests.ps1` - 67 (песочница ФС, требуют admin), `tests/StandHelpers.Tests.ps1` - 23 (без admin), `tests/Docs.Tests.ps1` - 26 (гварды доков, без admin)
 - Особенности: функции в BeforeAll (не AST), regex для locale-независимости, отдельные It блоки
 
 ---
@@ -217,6 +217,41 @@ Publish-PSResource -Path .\WinClean.ps1 -Repository PSGallery -ApiKey $env:PSGAL
 
 ### В работе
 - [ ] Публикация статьи на Хабре (`docs/_habr/habr-article.md` - текст готов, ждёт скриншоты). ⚠️ Текст писался под старую версию - сверить с v2.21 (появились get.ps1/install.ps1, стенд, ночные прогоны, очистка Driver Store, пофазное выполнение, публичный docs/, `-SkipDiskCleanup`)
+
+### v2.22 - В РАБОТЕ (ветка `feature/v2.22`)
+
+Эпик **`MyAI-bt2h`**. Свои задачи: `MyAI-zfwv` (P1), `MyAI-r6cd` (P2), `MyAI-1qtn` (P3).
+Внешние замечания двух команд разобраны критически, подтверждённые заведены как
+`MyAI-bt2h.1` (лог), `.2` (install.ps1), `.3` (единый выход), `.4` (доки).
+
+🔴 **Два замечания ОТКЛОНЕНЫ проверкой, а не мнением - не переоткрывать:**
+
+| Замечание | Чем опровергнуто |
+|---|---|
+| Приоритет `-in`/`-and` в `Invoke-StandTest.ps1` якобы пропускает `ReportNoCleanup` | AST показал группировку `($Mode -in @(...)) -and (-not ...)`, таблица истинности верна. Скобки добавлены только для читаемости, поведение прежнее |
+| Публичный README на GitHub якобы отстаёт (6 браузеров, v2.16) | Запрошен `README.md` с `main` через GitHub API: 7 браузеров, `-SkipDiskCleanup`, диаграмма v2.21. Аудитор смотрел устаревший снимок. Вдобавок покрыто гейтом транзитивно (чистое дерево + синк с origin) |
+
+🔴 **Отклонено и предложение `MyAI-1qtn`** (доверять включённому Storage Sense и не
+запускать cleanmgr): проверка показала, что вооружаемые категории включают **Update
+Cleanup, дампы памяти, Language Pack, старые ChkDsk, WER** - ничего из этого Storage Sense
+не делает. Регулярно обслуживаемая машина молча перестала бы их чистить. Реализована
+наблюдаемость (лог различает «выключен» и «включён, но чистить нечего»), решение не
+тронуто; на это есть тест-страж в `Fixes.Tests.ps1`.
+
+🔴 **Durable-уроки этого релиза:**
+1. **Мутационная проверка нашла то, чего не нашли 600+ тестов.** Три прогона, 30 мутаций;
+   восемь сначала ВЫЖИЛИ, и каждая вскрыла реальный пробел, а не требовала подгонки:
+   `Should -Invoke -Times N` при N>0 означает **«не менее N»** и не видит дубля (`-Times 0`
+   при этом строгий - проверено экспериментом, поэтому тесты v2.21 править не пришлось);
+   ветка `catch` (сломанный WMI) не была покрыта вовсе; ничто не пиновало выравнивание
+   логотипа и центрирование заголовка. Одна мутация оказалась **эквивалентной** - записана
+   как таковая, а не «починена» подгонкой теста.
+2. **Мои гипотезы опровергались замером трижды.** Ожидал, что `Out-File` даст
+   non-terminating error - **шесть из семи** плохих путей бросают terminating. Ожидал, что
+   `-Times 0` вакуумен - он строгий. Ожидал, что `Show-Banner` использует общую ширину - он
+   рисовал жёсткие 70.
+3. **Греп-тест дважды поймал паттерн в собственном комментарии.** Оба раза чинилось
+   фильтрацией строк-комментариев, а не переписыванием комментария.
 
 ### v2.21 - ВЫПУЩЕНА 23.07.2026
 
@@ -399,7 +434,7 @@ pwsh tools/Invoke-ReleaseCheck.ps1                  # версия во всех
 pwsh tools/Invoke-ReleaseCheck.ps1 -IncludeStand    # + боевой прогон на VM (минуты)
 pwsh tools/Invoke-ReleaseCheck.ps1 -VerifyPublished # ПОСЛЕ выпуска: ассеты релиза и SHA256
 
-Invoke-Pester ./tests -Output Detailed              # 573 Pester тестов (считать прогоном, не грепом)
+Invoke-Pester ./tests -Output Detailed              # 668 Pester тестов (считать прогоном, не грепом)
 pwsh tools/Invoke-SmokeTest.ps1                     # Смоук: ReportOnly + геометрия UI
 pwsh tools/proxmox/Invoke-StandTest.ps1 -Mode Report # Стенд на Proxmox (RU=VM 190, EN: -ConfigPath ...en.json = VM 191)
 # Ночная матрица: cron 03:30 на proxmos (/opt/winclean-stand, /etc/cron.d/winclean-stand), отчёт в Telegram

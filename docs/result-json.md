@@ -29,6 +29,7 @@ This page documents every field, gives a full sample, and explains how to consum
 | `RebootRequired` | bool | `true` when a change (a Windows update, an app update finishing on reboot) needs a restart to take effect. |
 | `LoggingDegraded` | bool | v2.20. `true` when writing the log file failed at some point during the run. The run itself still completed, but `LogPath` points at an incomplete file: do not read that log as the full record of what happened. |
 | `DiskCleanupPending` | bool | v2.20. `true` when Disk Cleanup outlived its timeout and was left running in the background. `TotalFreedBytes` is then a lower bound rather than the final figure, because deletion continued after this file was written. |
+| `DiskCleanupStatus` | string | v2.22. How the Storage Sense / Disk Cleanup step actually ended: `completed`, `completed-resident`, `timeout`, `storage-sense`, `failed`, `skipped-parameter`, or `not-run`. See below - the boolean above conflated a finished cleanup with a still-running one. |
 | `ControlledFolderAccess` | string | Tri-state, see below. Reflects whether Defender's Controlled Folder Access may have silently blocked deletions. |
 | `Aborted` | string or null | `null` unless the run stopped early for a known reason: `"PendingRebootDeclined"` (the user declined to continue with a reboot pending) or `"UpdatedAndExited"` (v2.21 - the script updated itself and exited so the new version runs next time). When set, the phase arrays below are incomplete by design. Note `null` does not by itself prove every phase ran - see the invariant note below. |
 | `PhasesCompleted` | array of string | Phases whose action ran to completion without an uncaught exception. |
@@ -77,6 +78,33 @@ Consequently:
 | `not-run` | The phase never executed (for example the run aborted earlier). |
 
 Treat any value other than `checked` as "the count means nothing", not as "there was nothing to update".
+
+### `DiskCleanupStatus` (added in v2.22)
+
+`DiskCleanupPending` alone could not tell two different situations apart, and reported
+both as pending. Measured on a live workstation: `cleanmgr /sagerun` did its work in about
+ten seconds, closed its window, and then stayed in the process list doing nothing at all -
+no CPU, no I/O, every thread waiting. Waiting on process exit as the definition of "the
+work is done" therefore burned the remaining fifteen-minute timeout and then published a
+**finished** cleanup as partial.
+
+Since v2.22 a second, independent completion signal is used: total stillness. If the
+process performs no CPU work and no I/O across twelve consecutive ten-second checks, its
+work is over whether or not it exited. This field records which of those endings happened.
+
+| Value | Meaning |
+|-------|---------|
+| `completed` | cleanmgr ran and exited with code 0. |
+| `completed-resident` | cleanmgr finished its work and went completely idle, but never exited. The cleanup is **done**; the figures are final and `DiskCleanupPending` stays `false`. |
+| `timeout` | cleanmgr was still genuinely working when the timeout expired. `DiskCleanupPending` is `true` and `TotalFreedBytes` is a lower bound. |
+| `storage-sense` | Storage Sense demonstrably did the work, so cleanmgr was not run. Note this covers a different, smaller set of things than cleanmgr's handlers. |
+| `failed` | cleanmgr could not be started, no handlers could be armed, or it exited non-zero. Nothing was verifiably cleaned by this step. |
+| `skipped-parameter` | `-SkipDiskCleanup` was passed. |
+| `not-run` | The step never executed (for example the run aborted earlier). |
+
+Note that `completed-resident` is a success. It is reported separately only because a
+`cleanmgr.exe` still visible in Task Manager after the run finishes is surprising, and the
+log says so explicitly rather than leaving it to be discovered.
 
 ### `ControlledFolderAccess` (tri-state string)
 
@@ -140,6 +168,7 @@ VisualStudioCleanup, DeepSystemCleanup, DiskSpaceReport, Telemetry
   "ControlledFolderAccess": "disabled",
   "LoggingDegraded": false,
   "DiskCleanupPending": false,
+  "DiskCleanupStatus": "completed",
   "Aborted": null,
   "PhasesCompleted": [
     "Preparation",

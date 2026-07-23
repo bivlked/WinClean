@@ -128,7 +128,7 @@ Invoke-Pester ./tests/Integration.Tests.ps1
 All PRs automatically run:
 - PSScriptAnalyzer (linting)
 - Syntax check
-- Pester tests (573 tests)
+- Pester tests (668 tests)
 
 ### Release-impacting changes
 
@@ -144,6 +144,39 @@ then before opening the PR:
 2. In the PR description, note the change is release-impacting and outline the publication plan (GitHub Release with both assets + SHA256, and PowerShell Gallery if applicable).
 
 The full release runbook is in [docs/release-process.md](docs/release-process.md).
+
+### What gets accepted
+
+WinClean runs elevated on other people's working machines, so the bar is about
+consequences rather than about size. Before proposing a new cleanup target or behaviour,
+it helps to have answers to these:
+
+- **Safety.** What exactly is deleted, and what could a user lose if the assumption behind
+  it is wrong on their machine? Anything that deletes must respect `$script:ProtectedPaths`.
+- **Preview.** Does `-ReportOnly` describe it accurately without changing anything?
+- **Honesty of the report.** Can the step tell "it worked" from "it could not tell"? An
+  operation that cannot verify itself should say so rather than report success - several
+  past releases were spent removing exactly that.
+- **Tests.** Behavioural tests, not just a grep for the new string. A test that passes
+  when the feature is deleted is worse than no test.
+- **Result JSON.** Does anything change in the schema that automation reads?
+- **Verification.** Does it need a real Windows VM to be believed? Anything touching
+  Windows Update, drivers, Storage Sense, Docker/WSL or locale-dependent output does, and
+  is checked on the ru-RU and en-US stands before release.
+
+Ideas that need discussion before code are welcome as a
+[Discussion](https://github.com/bivlked/WinClean/discussions) - it is much cheaper to
+agree on the acceptance criteria there than after an implementation exists.
+
+Deliberately out of scope: registry "optimisation", service disabling, telemetry blocking
+beyond the documented Group Policy switch, and anything whose benefit cannot be measured
+on a stand.
+
+### Conduct
+
+Be straightforward and civil - review comments are about the code, not the person. There
+is no separate code of conduct document for a project this size; if that ever stops being
+enough, one will be added.
 
 ### Commit Messages
 
@@ -251,7 +284,7 @@ Invoke-Pester ./tests/Integration.Tests.ps1
 Все PR автоматически проходят:
 - PSScriptAnalyzer (линтинг)
 - Проверка синтаксиса
-- Pester тесты (573 тестов)
+- Pester тесты (668 тестов)
 
 ### Изменения, влияющие на релиз
 

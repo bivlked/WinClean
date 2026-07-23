@@ -65,6 +65,40 @@ $hash = (Get-FileHash .\WinClean.ps1 -Algorithm SHA256).Hash
 gh release upload vX.Y ".\WinClean.ps1#WinClean.ps1" "$env:TEMP\WinClean.ps1.sha256#WinClean.ps1.sha256" --clobber
 ```
 
+### Release notes template
+
+For a tool that runs elevated, predictability is worth more than a long feature list, so
+every release uses the same headings. Keep them even when a section is short - a reader
+looking for "did this change what gets deleted?" should find the answer in the same place
+every time.
+
+```markdown
+## What changed
+Grouped as Fixed / Changed / Added, one line each, in user terms rather than internal
+task numbers. Say what was wrong, not only what was done.
+
+## Safety notes
+Anything that alters what is deleted, what is reported, or how the script decides it is
+finished. Say "nothing in this release changes what gets deleted" when that is the case -
+its absence is what people check for.
+
+## Verification
+Release gate, Pester count, PSScriptAnalyzer, smoke, and the RU/EN stand runs, plus the
+end-to-end run through the published one-liner. State what was actually run for THIS
+release, not what the process says in general.
+
+## Assets
+`WinClean.ps1` and `WinClean.ps1.sha256`. Both are required: the bootstrap scripts verify
+the hash fail-closed and refuse to run without it.
+
+## Upgrade
+Which of the four installation methods needs an action, and which update themselves.
+
+## Known limitations
+Anything deliberately not fixed in this release, with the reason. This section is the one
+most worth writing honestly - it is where trust is earned or lost.
+```
+
 ## Publishing to PSGallery
 
 ```powershell

@@ -1181,6 +1181,21 @@ Describe "v2.20: an operation that did nothing does not report success" -Tag "Fi
         }
     }
 
+    Context "Storage Sense setting explains, it does not decide (v2.22)" {
+        It "The skip verdict stays a function of what happened, not of a setting" {
+            # MyAI-1qtn proposed trusting an enabled Storage Sense and skipping Disk
+            # Cleanup when it freed nothing measurable. Checking what that would cost
+            # settled it: the armed cleanmgr categories include Update Cleanup, memory
+            # dumps, Language Pack, old ChkDsk files and Windows Error Reporting - none of
+            # which Storage Sense touches. A maintained machine would silently stop having
+            # them cleaned. The setting is therefore read for the log only, and this test
+            # exists so that decision cannot be reversed by accident.
+            $verdict = Get-FunctionBody -Name 'Get-StorageSenseVerdict'
+            $verdict | Should -Not -Match 'Test-StorageSenseEnabled'
+            $verdict | Should -Not -Match 'StoragePolicy'
+        }
+    }
+
     Context "Console widening is bounded and cannot fail a run (v2.22)" {
         # Structural, and deliberately so: $Host.UI.RawUI is not reachable through any
         # cmdlet, so there is nothing to mock and no way to drive these branches from a

@@ -195,7 +195,13 @@ if (-not $jsonRaw) {
     # A report mode that silently ran for real is the 18.07 incident: guard it explicitly
     # before trusting the ReportOnly-driven branch below, or a run that dropped ReportOnly
     # would fall through to the "Full freed enough" check and pass while destroying data.
-    if ($Mode -in 'Report', 'ReportNoCleanup' -and -not $result.ReportOnly) {
+    # Parenthesised in v2.22 for readability only. An external reviewer read the
+    # unparenthesised form as ambiguous and suspected ReportNoCleanup fell outside the
+    # guard; it did not - PowerShell binds -in tighter than -and, and both the AST and a
+    # truth table confirmed the grouping was already ($Mode -in @(...)) -and (-not ...).
+    # The behaviour is unchanged; the parentheses just stop the next reader from having to
+    # verify that again. StandHelpers.Tests.ps1 pins the truth table.
+    if (($Mode -in 'Report', 'ReportNoCleanup') -and (-not $result.ReportOnly)) {
         $failures += "ReportOnly not confirmed in result JSON for mode $Mode"
     }
     if ($result.ReportOnly) {
