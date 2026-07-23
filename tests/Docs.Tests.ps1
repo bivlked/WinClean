@@ -12,7 +12,15 @@
 
 # Computed at discovery time so -ForEach can enumerate one test per file.
 $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
-$DocFiles = @('README.md', 'README_RU.md', 'SECURITY.md', 'CONTRIBUTING.md', 'CHANGELOG.md') +
+# v2.22: enumerated instead of listed by hand. SUPPORT.md was added in this release and
+# silently fell outside the guards - a new user-facing document with links in it was the
+# one file nothing checked. A hand-written list only covers the files someone remembered,
+# and the next addition would have been forgotten the same way.
+# CLAUDE.md is excluded deliberately: it is the maintainer/agent runbook, not user
+# documentation, and it is not part of the published contract.
+$DocFiles = @(Get-ChildItem $RepoRoot -Filter *.md -File |
+        Where-Object { $_.Name -ne 'CLAUDE.md' } |
+        ForEach-Object { $_.Name }) +
     (Get-ChildItem (Join-Path $RepoRoot 'docs') -Filter *.md -File -ErrorAction SilentlyContinue |
         ForEach-Object { Join-Path 'docs' $_.Name })
 $DocCases = $DocFiles | ForEach-Object { @{ File = $_; RepoRoot = $RepoRoot } }
