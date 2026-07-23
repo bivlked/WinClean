@@ -373,6 +373,14 @@ function New-RunStats {
     # v2.20: cleanmgr outlived its timeout and is still deleting in the background. The
     # totals reported by this run are partial, and a consumer must not read them as final.
     DiskCleanupPending   = $false
+    # v2.22: how the Storage Sense / Disk Cleanup step actually ended. DiskCleanupPending
+    # alone could not tell "still deleting" from "finished but the process never exited",
+    # and reported both as pending - so a completed cleanup was published as partial.
+    # Same shape and reasoning as AppUpdatesStatus (v2.21): when a boolean starts covering
+    # two different truths, the fix is a status, not a cleverer boolean.
+    # 'not-run' | 'skipped-parameter' | 'storage-sense' | 'completed' |
+    # 'completed-resident' | 'timeout' | 'failed'
+    DiskCleanupStatus    = 'not-run'
     # v2.17 (p.11 of the audit): which top-level phases ran to completion vs threw.
     # Before this, one exception anywhere in the run silently skipped every phase
     # after it - Developer Cleanup, Docker/WSL, Visual Studio, Deep System Cleanup,
@@ -5211,6 +5219,116 @@ function Invoke-DISMCleanup {
     }
 }
 
+function Get-ProcessActivityFingerprint {
+    <#
+    .SYNOPSIS
+        A comparable snapshot of how much work a process has actually done
+    .DESCRIPTION
+        v2.22. CPU time plus the three I/O operation counters, as one comparable string.
+        Two identical fingerprints taken far enough apart mean the process did literally
+        nothing in between.
+
+        Win32_Process rather than System.Diagnostics.Process, established by measurement:
+        the .NET object exposes the processor times but leaves ReadOperationCount,
+        WriteOperationCount and OtherOperationCount empty, so a fingerprint built from it
+        would compare CPU alone.
+
+        Returns $null when the counters cannot be read (WMI unavailable, the process gone,
+        access denied). The caller must treat $null as "cannot tell", never as "idle" -
+        otherwise a broken WMI would look exactly like a finished cleanup.
+    #>
+    param([int]$ProcessId)
+
+    try {
+        $p = Get-CimInstance -ClassName Win32_Process -Filter "ProcessId=$ProcessId" `
+                             -Property KernelModeTime, UserModeTime, ReadOperationCount,
+                                       WriteOperationCount, OtherOperationCount `
+                             -ErrorAction Stop
+        if (-not $p) { return $null }
+        return '{0}|{1}|{2}|{3}|{4}' -f $p.KernelModeTime, $p.UserModeTime,
+                                        $p.ReadOperationCount, $p.WriteOperationCount, $p.OtherOperationCount
+    } catch {
+        return $null
+    }
+}
+
+function Update-IdleStreak {
+    <#
+    .SYNOPSIS
+        Counts consecutive checks in which a process did nothing at all
+    .DESCRIPTION
+        v2.22, pure so the rule is testable without a process. Returns the new streak
+        length: one longer when the two fingerprints match, zero otherwise.
+
+        An unreadable fingerprint on either side resets the streak. That is the whole
+        safety property: "I could not measure it" must never accumulate towards "it has
+        finished", or a machine with broken WMI would cut every Disk Cleanup short.
+    #>
+    param(
+        [AllowNull()][string]$Previous,
+        [AllowNull()][string]$Current,
+        [int]$Streak
+    )
+
+    if ([string]::IsNullOrEmpty($Previous) -or [string]::IsNullOrEmpty($Current)) { return 0 }
+    if ($Current -ceq $Previous) { return $Streak + 1 }
+    return 0
+}
+
+function Wait-CleanmgrCompletion {
+    <#
+    .SYNOPSIS
+        Waits for Disk Cleanup to finish its work, which is not the same as exiting
+    .DESCRIPTION
+        v2.22, split out in the style of Wait-StorageSenseTask so the wait can be tested
+        without a process and without waiting fifteen minutes: the caller injects how to
+        tell whether the process exited, how to read its activity, and how to wait.
+
+        Two completion signals, because HasExited alone was the wrong model of "done".
+        Measured on a live workstation: cleanmgr /sagerun did its work in about ten
+        seconds, closed its window, then stayed resident with CPU and all three I/O
+        counters frozen and every thread in Wait. The run sat out the remaining ~890
+        seconds and then published the finished cleanup as partial.
+
+        Returns Outcome ('exited' | 'idle-resident' | 'timeout') and Elapsed seconds.
+        'idle-resident' means the work is over and nothing is pending; only the process
+        outstayed it. 'timeout' means it was still genuinely working when time ran out.
+    #>
+    param(
+        [scriptblock]$HasExited,
+        [scriptblock]$GetFingerprint,
+        [int]$MaxWaitSeconds = 900,
+        [int]$CheckInterval = 10,
+        [int]$IdleChecksRequired = 12,
+        [scriptblock]$OnProgress = { param($seconds) },
+        [scriptblock]$Wait = { param($seconds) Start-Sleep -Seconds $seconds }
+    )
+
+    $elapsed = 0
+    $idleStreak = 0
+    $fingerprint = & $GetFingerprint
+
+    while (-not (& $HasExited) -and $elapsed -lt $MaxWaitSeconds) {
+        & $Wait $CheckInterval
+        $elapsed += $CheckInterval
+
+        $previousFingerprint = $fingerprint
+        $fingerprint = & $GetFingerprint
+        $idleStreak = Update-IdleStreak -Previous $previousFingerprint -Current $fingerprint -Streak $idleStreak
+
+        if ($idleStreak -ge $IdleChecksRequired) {
+            return @{ Outcome = 'idle-resident'; Elapsed = $elapsed }
+        }
+
+        if ($elapsed % 60 -eq 0) { & $OnProgress $elapsed }
+    }
+
+    # Re-read rather than assume: the process may have exited during the last interval,
+    # and that is a cleaner answer than "timeout" for the same instant.
+    if (& $HasExited) { return @{ Outcome = 'exited'; Elapsed = $elapsed } }
+    return @{ Outcome = 'timeout'; Elapsed = $elapsed }
+}
+
 function Select-StorageSenseTask {
     <#
     .SYNOPSIS
@@ -5403,6 +5521,7 @@ function Invoke-StorageSense {
     # was added for.
     if ($SkipDiskCleanup) {
         Write-Log "Storage Sense / Disk Cleanup skipped (parameter)" -Level INFO
+        $script:Stats.DiskCleanupStatus = 'skipped-parameter'
         return
     }
 
@@ -5557,6 +5676,13 @@ function Invoke-StorageSense {
         }
     }
 
+    if ($storageSenseDone) {
+        # Storage Sense demonstrably did the work, so cleanmgr is not run at all. Recorded
+        # so the JSON distinguishes this from "Disk Cleanup ran and completed" - they free
+        # different things, and a consumer comparing runs needs to know which one happened.
+        $script:Stats.DiskCleanupStatus = 'storage-sense'
+    }
+
     if (-not $storageSenseDone) {
         # Fallback to cleanmgr. Every other reason for landing here (ambiguous lookup,
         # start failed, task failed, timed out, vanished, unverifiable) has already said
@@ -5634,6 +5760,7 @@ function Invoke-StorageSense {
             if ($armed -eq 0) {
                 Write-Log "No Disk Cleanup handlers could be armed - skipping cleanmgr" -Level WARNING
                 $script:Stats.WarningsCount++
+                $script:Stats.DiskCleanupStatus = 'failed'
                 return
             }
 
@@ -5656,43 +5783,74 @@ function Invoke-StorageSense {
             if (-not $cleanmgr) {
                 Write-Log "Disk Cleanup could not be started (cleanmgr.exe is missing or blocked) - it cleaned nothing" -Level WARNING
                 $script:Stats.WarningsCount++
+                $script:Stats.DiskCleanupStatus = 'failed'
                 return
             }
 
             # v2.16: raised from 420s. cleanmgr regularly needs longer on a workstation
             # with a large component store, and killing it produced a warning on every
             # single run while cleanmgr kept working in the background anyway.
+            #
+            # v2.22: waiting on HasExited alone was the wrong model of "the work is done".
+            # Measured on a live workstation: cleanmgr /sagerun finished in about ten
+            # seconds, closed its window and then simply stayed resident - CPU, all three
+            # I/O counters and its six threads frozen, every thread in Wait. The run then
+            # sat here for the remaining ~890 seconds and finally declared the FINISHED
+            # cleanup partial. Both halves of that are wrong, and the second is the worse
+            # one: it is the same class of dishonest report v2.20 and v2.21 were spent
+            # removing, only inverted - not success that never happened, but incompleteness
+            # that never happened.
+            #
+            # So a second, independent completion signal: total stillness. If the process
+            # has done no CPU work and no I/O at all across $idleChecksRequired consecutive
+            # checks, its work is over whether or not it bothered to exit.
             $maxWait = 900  # 15 minutes
-            $elapsed = 0
             $checkInterval = 10
+            # Two full minutes of absolute stillness. Deliberately far longer than needed
+            # to observe the measured case: a process mid-delete moves at least the "other
+            # operations" counter, so this is not a race with slow work - it is a margin
+            # against a pause nobody has observed yet. The cost of being wrong is bounded
+            # anyway: the registry sweep below still refuses to touch a process that has
+            # not exited, so a premature verdict cannot pull configuration out from under
+            # a cleanmgr that turns out to be working after all.
+            $idleChecksRequired = 12
 
-            while (-not $cleanmgr.HasExited -and $elapsed -lt $maxWait) {
-                Start-Sleep -Seconds $checkInterval
-                $elapsed += $checkInterval
+            $waitOutcome = Wait-CleanmgrCompletion `
+                -HasExited { $cleanmgr.HasExited } `
+                -GetFingerprint { Get-ProcessActivityFingerprint -ProcessId $cleanmgr.Id } `
+                -MaxWaitSeconds $maxWait -CheckInterval $checkInterval -IdleChecksRequired $idleChecksRequired `
+                -OnProgress { param($seconds) Write-Log "Disk Cleanup still running... ($seconds seconds)" -Level INFO }
 
-                # Log progress every minute
-                if ($elapsed % 60 -eq 0) {
-                    Write-Log "Disk Cleanup still running... ($elapsed seconds)" -Level INFO
-                }
-            }
+            $elapsed = $waitOutcome.Elapsed
+            $finishedWhileResident = $waitOutcome.Outcome -eq 'idle-resident'
 
-            if (-not $cleanmgr.HasExited) {
-                # Still killing it would be worse - cleanmgr keeps working after a kill and
-                # the deletion is mid-flight (v2.16). But this is not an informational
-                # event either: everything measured after this point is partial, the run
-                # is about to print a total and write its JSON while an elevated process
-                # is still deleting, and the freed bytes it goes on to reclaim are counted
-                # by nobody.
-                $script:Stats.DiskCleanupPending = $true
-                Write-Log "Disk Cleanup exceeded $maxWait seconds and is still running - it continues in the background, so the freed figures below are partial" -Level WARNING
-                $script:Stats.WarningsCount++
-            } elseif ($cleanmgr.ExitCode -ne 0) {
+            if ($cleanmgr.HasExited -and $cleanmgr.ExitCode -ne 0) {
                 # v2.16: the exit code used to be ignored entirely, so a crash one second
                 # in was still logged as a success
                 Write-Log "Disk Cleanup exited with code $($cleanmgr.ExitCode) - results unverified" -Level WARNING
                 $script:Stats.WarningsCount++
-            } else {
+                $script:Stats.DiskCleanupStatus = 'failed'
+            } elseif ($cleanmgr.HasExited) {
                 Write-Log "Disk Cleanup completed ($armed categories)" -Level SUCCESS
+                $script:Stats.DiskCleanupStatus = 'completed'
+            } elseif ($finishedWhileResident) {
+                # The work is done; only the process is still here. Not a warning: nothing
+                # went wrong and nothing is pending, so DiskCleanupPending stays false and
+                # the figures below are final.
+                Write-Log "Disk Cleanup completed ($armed categories) - finished after $elapsed seconds, then stayed resident without doing anything further" -Level SUCCESS
+                Write-Log "cleanmgr.exe is still in the process list but has been completely idle for $($idleChecksRequired * $checkInterval) seconds - not waiting out the remaining $($maxWait - $elapsed) seconds" -Level DETAIL
+                $script:Stats.DiskCleanupStatus = 'completed-resident'
+            } else {
+                # Genuinely still working when the timeout expired. Killing it would be
+                # worse - cleanmgr keeps working after a kill and the deletion is
+                # mid-flight (v2.16). But this is not an informational event either:
+                # everything measured after this point is partial, the run is about to
+                # print a total and write its JSON while an elevated process is still
+                # deleting, and the freed bytes it goes on to reclaim are counted by nobody.
+                $script:Stats.DiskCleanupPending = $true
+                Write-Log "Disk Cleanup exceeded $maxWait seconds and is still running - it continues in the background, so the freed figures below are partial" -Level WARNING
+                $script:Stats.WarningsCount++
+                $script:Stats.DiskCleanupStatus = 'timeout'
             }
         } finally {
             # Remove StateFlags to avoid leaving traces in the registry.
@@ -5991,6 +6149,11 @@ function Write-ResultJson {
             # v2.20: true when Disk Cleanup outlived its timeout and was left running.
             # TotalFreedBytes is then a lower bound, not the final figure.
             DiskCleanupPending  = [bool]$script:Stats.DiskCleanupPending
+            # v2.22: how that step ended, because the boolean above conflated two states.
+            # 'completed-resident' is the measured case where cleanmgr does its work, closes
+            # its window and then never exits: finished, nothing pending, figures final.
+            # 'timeout' is the genuine overrun the boolean was added for.
+            DiskCleanupStatus   = [string]$script:Stats.DiskCleanupStatus
             # 'enabled' means cleanup figures are understated (Defender blocked some
             # deletions without reporting an error); 'unknown' means the check itself
             # failed, so the figures are unverified rather than confirmed good

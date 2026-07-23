@@ -904,6 +904,20 @@ Describe "v2.17: bootstrap verification is mandatory" -Tag "Fix", "V217" {
         $installScript | Should -Match "\[Environment\]::GetFolderPath\(\[Environment\+SpecialFolder\]::ProgramFiles\)"
         $installScript | Should -Not -Match "Join-Path \`$env:ProgramFiles"
     }
+
+    It "install.ps1 refuses a pwsh whose version it could not read (v2.22)" {
+        # External review: `if ($pwshVersion -and $pwshVersion -lt '7.1')` let an unreadable
+        # version through, because $null fails the first operand and the comparison never
+        # runs. Same fail-open shape as the SHA256 check that hid inside `if ($hashAsset)`
+        # until v2.17. The unreadable case must be its own stop, before the comparison.
+        # Code lines only: the comment above the fix quotes the old fail-open expression
+        # verbatim, and a naive match found it there. Second time this exact trap fired in
+        # this release, which is why both checks now strip comments first.
+        $code = ($installScript -split "`n" | Where-Object { $_ -notmatch '^\s*#' }) -join "`n"
+        $code | Should -Match '(?m)^if \(-not \$pwshVersion\) \{'
+        $code | Should -Match 'version could not be read'
+        $code | Should -Not -Match '\$pwshVersion -and \$pwshVersion -lt'
+    }
 }
 
 Describe "v2.18: bootstrap host allowlist is exact, not a broad suffix" -Tag "Fix", "V218" -ForEach @(
@@ -1164,6 +1178,40 @@ Describe "v2.20: an operation that did nothing does not report success" -Tag "Fi
             $body = Get-FunctionBody -Name 'Start-WinClean'
             $body | Should -Match '\$script:Stats\s*=\s*New-RunStats'
             $body | Should -Match '\$script:InternetConnectionCache\s*=\s*\$null'
+        }
+    }
+
+    Context "Disk Cleanup that finished but never exited (v2.22)" {
+        # Wait-CleanmgrCompletion is covered behaviourally in Helpers.Tests.ps1. What is
+        # not reachable without a live cleanmgr is how Invoke-StorageSense REPORTS the
+        # 'idle-resident' outcome - and misreporting it is the entire defect: a finished
+        # cleanup was published as partial. Structural, and labelled as such.
+        BeforeAll {
+            $script:senseBody = Get-FunctionBody -Name 'Invoke-StorageSense'
+            $script:senseCode = ($script:senseBody -split "`n" | Where-Object { $_ -notmatch '^\s*#' }) -join "`n"
+        }
+
+        It "A cleanup that finished while resident is not reported as pending" {
+            # DiskCleanupPending means "an elevated process is STILL deleting, the figures
+            # below are partial". The measured case is the opposite: the work is over.
+            $residentBranch = [regex]::Match($script:senseCode,
+                '(?s)\}\s*elseif\s*\(\$finishedWhileResident\)\s*\{(.*?)\}\s*else\s*\{').Groups[1].Value
+            $residentBranch | Should -Not -BeNullOrEmpty -Because 'the branch must exist to be checked'
+            $residentBranch | Should -Not -Match 'DiskCleanupPending'
+            $residentBranch | Should -Match "DiskCleanupStatus = 'completed-resident'"
+        }
+
+        It "The genuine overrun still sets DiskCleanupPending" {
+            # The v2.20 guarantee must survive: a cleanmgr that really is still working
+            # has to keep marking the run's totals as a lower bound.
+            $script:senseCode | Should -Match '\$script:Stats\.DiskCleanupPending = \$true'
+            $script:senseCode | Should -Match "DiskCleanupStatus = 'timeout'"
+        }
+
+        It "The registry sweep still refuses to touch a process that has not exited" {
+            # This is what bounds the cost of a wrong idle verdict: even if the wait ends
+            # early, the StateFlags of a still-running cleanmgr are left alone.
+            $script:senseCode | Should -Match 'if \(\$cleanmgr -and -not \$cleanmgr\.HasExited\)'
         }
     }
 

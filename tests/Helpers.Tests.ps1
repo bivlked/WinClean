@@ -2415,6 +2415,198 @@ Describe "Invoke-ScriptUpdate branches" -Tag "Unit", "Helper", "V221" {
     }
 }
 
+#region v2.22 Disk Cleanup idle detection
+
+Describe "Update-IdleStreak" -Tag "Unit", "Helper", "V222" {
+    # The rule that decides when a resident cleanmgr is declared finished. Pure, so the
+    # decision can be exercised without a process - the measured case (finished in ~10s,
+    # then frozen for the remaining ~890) is otherwise only reproducible on a live machine.
+
+    It "counts consecutive identical fingerprints" {
+        $s = 0
+        $s = Update-IdleStreak -Previous 'a' -Current 'a' -Streak $s
+        $s | Should -Be 1
+        $s = Update-IdleStreak -Previous 'a' -Current 'a' -Streak $s
+        $s | Should -Be 2
+    }
+
+    It "resets the moment the process does anything" {
+        # One counter moving is enough: a process mid-delete is not idle.
+        Update-IdleStreak -Previous 'cpu|1|2|3|4' -Current 'cpu|1|2|3|5' -Streak 11 | Should -Be 0
+    }
+
+    It "treats an unreadable fingerprint as 'cannot tell', never as idle - <Case>" -ForEach @(
+        @{ Case = 'previous unreadable'; Prev = $null; Curr = 'a' }
+        @{ Case = 'current unreadable';  Prev = 'a';   Curr = $null }
+        @{ Case = 'both unreadable';     Prev = $null; Curr = $null }
+        @{ Case = 'previous empty';      Prev = '';    Curr = 'a' }
+        @{ Case = 'current empty';       Prev = 'a';   Curr = '' }
+    ) {
+        # The safety property. Get-ProcessActivityFingerprint returns $null when WMI cannot
+        # answer, and if that accumulated towards the threshold a machine with broken WMI
+        # would cut every Disk Cleanup short after two minutes and call it complete.
+        Update-IdleStreak -Previous $Prev -Current $Curr -Streak 11 |
+            Should -Be 0 -Because 'not being able to measure work is not evidence that work finished'
+    }
+
+    It "compares case-sensitively, so counters differing only in case still count as work" {
+        # Fingerprints are numeric today, but -eq in PowerShell is case-INSENSITIVE by
+        # default and this comparison decides whether to stop waiting. Pinned deliberately.
+        Update-IdleStreak -Previous 'A|1' -Current 'a|1' -Streak 5 | Should -Be 0
+    }
+}
+
+Describe "Get-ProcessActivityFingerprint" -Tag "Unit", "Helper", "V222" {
+
+    It "returns a comparable fingerprint for a live process" {
+        $fp = Get-ProcessActivityFingerprint -ProcessId $PID
+        $fp | Should -Not -BeNullOrEmpty
+        # CPU kernel + CPU user + three I/O counters
+        ($fp -split '\|').Count | Should -Be 5
+    }
+
+    It "changes after the process does measurable work" {
+        # Proves the fingerprint actually tracks activity. If it were built from cached or
+        # constant values, everything would look idle and every cleanmgr would be cut short
+        # at two minutes - the failure mode that matters most here.
+        $before = Get-ProcessActivityFingerprint -ProcessId $PID
+        $sink = 0
+        1..200000 | ForEach-Object { $sink += $_ }
+        $null = Get-ChildItem -Path ([System.IO.Path]::GetTempPath()) -ErrorAction SilentlyContinue | Select-Object -First 50
+        $after = Get-ProcessActivityFingerprint -ProcessId $PID
+
+        $after | Should -Not -Be $before
+    }
+
+    It "returns null for a process id that does not exist, rather than throwing" {
+        # cleanmgr can exit between two checks; the caller must get "cannot tell", and
+        # Update-IdleStreak turns that into a reset rather than a false completion.
+        Get-ProcessActivityFingerprint -ProcessId 999999 | Should -BeNullOrEmpty
+    }
+
+    It "returns null - never a constant - when the counters cannot be read at all" {
+        # Added after a mutation survived. The test above exercises the "no such process"
+        # branch, where Get-CimInstance returns nothing; it never reached the catch, which
+        # is where a broken WMI lands. Returning any FIXED value there would be the worst
+        # possible answer: two consecutive unreadable checks would compare equal, the idle
+        # streak would build on pure ignorance, and a machine with broken WMI would cut
+        # every Disk Cleanup short and call it finished.
+        Mock Get-CimInstance { throw 'WMI is unavailable' }
+
+        $first  = Get-ProcessActivityFingerprint -ProcessId $PID
+        $second = Get-ProcessActivityFingerprint -ProcessId $PID
+
+        $first | Should -BeNullOrEmpty
+        Update-IdleStreak -Previous $first -Current $second -Streak 11 |
+            Should -Be 0 -Because 'two unreadable samples must not look like two identical ones'
+    }
+}
+
+Describe "Wait-CleanmgrCompletion" -Tag "Unit", "Helper", "V222" {
+    # The whole wait, exercised without a process and without waiting fifteen minutes -
+    # the caller injects exit state, activity and the sleep. This is the part that could
+    # previously only be observed on a live machine, which is why the defect it fixes
+    # survived into a release: on the stand cleanmgr exits normally.
+
+    BeforeEach {
+        $script:progressAt = [System.Collections.Generic.List[int]]::new()
+        $script:noWait = { param($seconds) }
+        $script:onProgress = { param($seconds) $script:progressAt.Add($seconds) }
+    }
+
+    It "returns 'exited' as soon as the process leaves" {
+        $script:calls = 0
+        $r = Wait-CleanmgrCompletion `
+                -HasExited { $script:calls++; $script:calls -gt 3 } `
+                -GetFingerprint { "moving-$($script:calls)" } `
+                -Wait $script:noWait -OnProgress $script:onProgress
+
+        $r.Outcome | Should -Be 'exited'
+        $r.Elapsed | Should -BeLessThan 900
+    }
+
+    It "declares 'idle-resident' once the process has been completely still for the threshold" {
+        # The measured case: never exits, never does anything again.
+        $r = Wait-CleanmgrCompletion `
+                -HasExited { $false } `
+                -GetFingerprint { 'frozen' } `
+                -CheckInterval 10 -IdleChecksRequired 12 `
+                -Wait $script:noWait -OnProgress $script:onProgress
+
+        $r.Outcome | Should -Be 'idle-resident'
+        $r.Elapsed | Should -Be 120 -Because '12 checks of 10 seconds, and not one second longer'
+    }
+
+    It "waits the full timeout when the process keeps working" {
+        # Every check shows movement, so the idle streak never builds - this must still
+        # behave exactly as it did before v2.22.
+        $script:n = 0
+        $r = Wait-CleanmgrCompletion `
+                -HasExited { $false } `
+                -GetFingerprint { $script:n++; "busy-$($script:n)" } `
+                -MaxWaitSeconds 900 -CheckInterval 10 `
+                -Wait $script:noWait -OnProgress $script:onProgress
+
+        $r.Outcome | Should -Be 'timeout'
+        $r.Elapsed | Should -Be 900
+    }
+
+    It "does not call a busy process idle just because it pauses briefly" {
+        # Stillness must be CONSECUTIVE. A process that goes quiet for a while and then
+        # resumes is working, and cutting it short would truncate a real cleanup.
+        $script:n = 0
+        $r = Wait-CleanmgrCompletion `
+                -HasExited { $false } `
+                -GetFingerprint {
+                    $script:n++
+                    # quiet for 8 checks, then a burst of work, repeatedly
+                    if ($script:n % 10 -lt 8) { 'quiet-block-' + [math]::Floor($script:n / 10) } else { "work-$($script:n)" }
+                } `
+                -MaxWaitSeconds 900 -CheckInterval 10 -IdleChecksRequired 12 `
+                -Wait $script:noWait -OnProgress $script:onProgress
+
+        $r.Outcome | Should -Be 'timeout' -Because 'the streak never reached 12 consecutive still checks'
+    }
+
+    It "never declares idle when activity cannot be measured at all" {
+        # Broken WMI must not look like a finished cleanup. Without this, such a machine
+        # would silently cut every Disk Cleanup off after two minutes.
+        $r = Wait-CleanmgrCompletion `
+                -HasExited { $false } `
+                -GetFingerprint { $null } `
+                -MaxWaitSeconds 900 -CheckInterval 10 `
+                -Wait $script:noWait -OnProgress $script:onProgress
+
+        $r.Outcome | Should -Be 'timeout'
+        $r.Elapsed | Should -Be 900
+    }
+
+    It "reports progress once a minute, not on every check" {
+        $r = Wait-CleanmgrCompletion `
+                -HasExited { $false } `
+                -GetFingerprint { $script:n++; "busy-$($script:n)" } `
+                -MaxWaitSeconds 300 -CheckInterval 10 `
+                -Wait $script:noWait -OnProgress $script:onProgress
+
+        $r.Outcome | Should -Be 'timeout'
+        $script:progressAt | Should -Be @(60, 120, 180, 240, 300)
+    }
+
+    It "prefers 'exited' over 'timeout' when the process leaves during the final interval" {
+        # Same instant, two possible labels; the accurate one is that it exited.
+        $script:n = 0
+        $r = Wait-CleanmgrCompletion `
+                -HasExited { $script:n -ge 30 } `
+                -GetFingerprint { $script:n++; "busy-$($script:n)" } `
+                -MaxWaitSeconds 300 -CheckInterval 10 `
+                -Wait $script:noWait -OnProgress $script:onProgress
+
+        $r.Outcome | Should -Be 'exited'
+    }
+}
+
+#endregion
+
 #region v2.22 single end-of-run path
 
 Describe "Invoke-ScriptUpdate stop/continue contract" -Tag "Unit", "Helper", "V222" {
