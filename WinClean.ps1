@@ -6611,7 +6611,7 @@ function Start-WinClean {
     # opened throws there - measured on six of seven bad paths - and the exception escaped
     # Start-WinClean before any safety net existed: no result JSON, no summary, and none of
     # the maintenance, because of the log. Now they degrade like every other log write.
-    Write-LogFileLine -Line "WinClean v$($script:Version) - Started at $(Get-Date)"
+    Write-LogFileLine -Line "WinClean v$($script:Version) - Started at $(Get-Date)" -StartNewFile
     Write-LogFileLine -Line ("=" * $script:BoxWidth)
 
     # v2.17 (p.13 of the audit): recover from a hard-killed previous run before doing

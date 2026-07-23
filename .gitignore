@@ -56,3 +56,7 @@ Krasivoe*.ps1
 tools/proxmox/stand.config*.json
 !tools/proxmox/stand.config.example.json
 tools/proxmox/results/
+
+# Mutation-testing scratch backups. Added after a runner's backup and one of its
+# mutants were swept into a commit by `git add -A`: *.bak did not match .mutbak.
+*.mutbak
