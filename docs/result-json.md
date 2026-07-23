@@ -28,8 +28,8 @@ This page documents every field, gives a full sample, and explains how to consum
 | `ErrorsCount` | number | Count of errors raised during the run. A healthy run reports `0`. |
 | `RebootRequired` | bool | `true` when a change (a Windows update, an app update finishing on reboot) needs a restart to take effect. |
 | `LoggingDegraded` | bool | v2.20. `true` when writing the log file failed at some point during the run. The run itself still completed, but `LogPath` points at an incomplete file: do not read that log as the full record of what happened. |
-| `DiskCleanupPending` | bool | v2.20. `true` when Disk Cleanup outlived its timeout and was left running in the background. `TotalFreedBytes` is then a lower bound rather than the final figure, because deletion continued after this file was written. |
-| `DiskCleanupStatus` | string | v2.22. How the Storage Sense / Disk Cleanup step actually ended: `completed`, `completed-resident`, `timeout`, `storage-sense`, `failed`, `skipped-parameter`, or `not-run`. See below - the boolean above conflated a finished cleanup with a still-running one. |
+| `DiskCleanupPending` | bool | v2.20. `true` when Disk Cleanup was still **visibly working** when its timeout expired and was left running in the background; `TotalFreedBytes` is then a lower bound. Note `false` is not a proof that nothing more will ever be deleted - see `DiskCleanupStatus`, which is the field to read when that distinction matters. |
+| `DiskCleanupStatus` | string | v2.22. How the Storage Sense / Disk Cleanup step actually ended: `completed`, `idle-resident`, `timeout`, `storage-sense`, `failed`, `skipped-parameter`, or `not-run`. See below - the boolean above conflated a finished cleanup with a still-running one. |
 | `ControlledFolderAccess` | string | Tri-state, see below. Reflects whether Defender's Controlled Folder Access may have silently blocked deletions. |
 | `Aborted` | string or null | `null` unless the run stopped early for a known reason: `"PendingRebootDeclined"` (the user declined to continue with a reboot pending) or `"UpdatedAndExited"` (v2.21 - the script updated itself and exited so the new version runs next time). When set, the phase arrays below are incomplete by design. Note `null` does not by itself prove every phase ran - see the invariant note below. |
 | `PhasesCompleted` | array of string | Phases whose action ran to completion without an uncaught exception. |
@@ -84,27 +84,34 @@ Treat any value other than `checked` as "the count means nothing", not as "there
 `DiskCleanupPending` alone could not tell two different situations apart, and reported
 both as pending. Measured on a live workstation: `cleanmgr /sagerun` did its work in about
 ten seconds, closed its window, and then stayed in the process list doing nothing at all -
-no CPU, no I/O, every thread waiting. Waiting on process exit as the definition of "the
-work is done" therefore burned the remaining fifteen-minute timeout and then published a
-**finished** cleanup as partial.
+no CPU, no I/O, every thread waiting. Treating process exit as the only sign that there is
+still something to wait for therefore burned the remaining fifteen-minute timeout, and
+then published as partial a cleanup that had not been observed doing anything for most of
+that time.
 
-Since v2.22 a second, independent completion signal is used: total stillness. If the
-process performs no CPU work and no I/O across twelve consecutive ten-second checks, its
-work is over whether or not it exited. This field records which of those endings happened.
+Since v2.22 a second, independent signal is used to stop waiting: total stillness. If the
+process was seen working and then performs no CPU work and no I/O across twelve
+consecutive ten-second checks, there is nothing observable left to wait for. That is
+deliberately weaker than "it has finished", and the field names the observation rather
+than the conclusion.
 
 | Value | Meaning |
 |-------|---------|
 | `completed` | cleanmgr ran and exited with code 0. |
-| `completed-resident` | cleanmgr finished its work and went completely idle, but never exited. The cleanup is **done**; the figures are final and `DiskCleanupPending` stays `false`. |
+| `idle-resident` | cleanmgr was seen working, then did nothing at all for two minutes and never exited. Reported as what was **observed**, not as proven completion: a process performing no CPU work and no I/O is not deleting anything, so the figures are treated as final and `DiskCleanupPending` stays `false`. |
 | `timeout` | cleanmgr was still genuinely working when the timeout expired. `DiskCleanupPending` is `true` and `TotalFreedBytes` is a lower bound. |
 | `storage-sense` | Storage Sense demonstrably did the work, so cleanmgr was not run. Note this covers a different, smaller set of things than cleanmgr's handlers. |
 | `failed` | cleanmgr could not be started, no handlers could be armed, or it exited non-zero. Nothing was verifiably cleaned by this step. |
 | `skipped-parameter` | `-SkipDiskCleanup` was passed. |
 | `not-run` | The step never executed (for example the run aborted earlier). |
 
-Note that `completed-resident` is a success. It is reported separately only because a
-`cleanmgr.exe` still visible in Task Manager after the run finishes is surprising, and the
-log says so explicitly rather than leaving it to be discovered.
+`idle-resident` is not an error, and it is named after the observation rather than after
+the conclusion on purpose. What is measured is stillness; "it finished" is an inference
+from it, and the inference can be wrong - a cleanmgr blocked on something external would
+look identical. Nothing downstream is built to depend on it being right: the registry
+configuration of a process that has not exited is still left alone, and the log states
+what was actually seen. A `cleanmgr.exe` still visible in Task Manager after the run is
+the expected consequence, which is why it is reported rather than left to be discovered.
 
 ### `ControlledFolderAccess` (tri-state string)
 

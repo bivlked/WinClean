@@ -24,16 +24,18 @@ the installer accepted a PowerShell whose version it had failed to read.
 
 ### Fixed
 
-- **A finished Disk Cleanup was reported as still running, and cost the full timeout.**
-  Measured on a live workstation: `cleanmgr /sagerun` did its work in about ten seconds,
-  closed its window, and then stayed resident - no CPU, no I/O on any of the three
-  counters, all six threads waiting. Because the wait was written against process exit,
-  the run sat there for the remaining ~890 seconds and then set `DiskCleanupPending` and
-  warned that the figures were partial. They were final. Completion is now recognised by
-  total stillness as well as by exit: no CPU and no I/O across twelve consecutive checks
-  means the work is over. Not being able to measure activity resets that counter rather
-  than advancing it, so a machine where WMI is broken keeps the old, patient behaviour
-  instead of cutting cleanups short.
+- **A Disk Cleanup that had stopped doing anything was reported as still deleting, and
+  cost the full timeout.** Measured on a live workstation: `cleanmgr /sagerun` did its
+  work in about ten seconds, closed its window, and then stayed resident - no CPU, no I/O
+  on any of the three counters, all six threads waiting. Because the wait was written
+  against process exit, the run sat there for the remaining ~890 seconds and then set
+  `DiskCleanupPending` and warned that the figures were partial, having observed nothing
+  happening for most of that time. The wait now also ends on total stillness: no CPU and
+  no I/O across twelve consecutive checks, after activity was seen at least once. That is
+  reported as what it is - an observation, not proof of completion - so the new status is
+  called `idle-resident` and the log says what was measured. Not being able to measure
+  activity resets the counter rather than advancing it, so a machine where WMI is broken
+  keeps the old, patient behaviour instead of cutting cleanups short.
 - **An unusable `-LogPath` killed the run before any maintenance happened.** The log
   header was written with two bare `Out-File` calls placed before the block that
   guarantees the result JSON and the summary. Six of seven bad paths make `Out-File` throw
@@ -74,10 +76,12 @@ the installer accepted a PowerShell whose version it had failed to read.
 
 ### Added
 
-- `DiskCleanupStatus` in the result JSON: `completed`, `completed-resident`, `timeout`,
+- `DiskCleanupStatus` in the result JSON: `completed`, `idle-resident`, `timeout`,
   `storage-sense`, `failed`, `skipped-parameter` or `not-run`. `DiskCleanupPending` was a
-  boolean covering two different truths; `completed-resident` is the measured case where
-  the work is done and only the process outstayed it.
+  boolean covering two different truths. `idle-resident` is named after what is measured -
+  a process that was seen working and then went completely still - rather than after the
+  conclusion drawn from it, because that conclusion can be wrong and nothing downstream
+  is built to depend on it.
 - `SUPPORT.md`, a release-notes template in `docs/release-process.md`, and a section in
   `CONTRIBUTING.md` describing what gets accepted and on what criteria.
 

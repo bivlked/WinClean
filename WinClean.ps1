@@ -48,9 +48,9 @@
     Version: 2.22
     Requires: PowerShell 7.1+, Windows 11, Administrator rights
     Changes in 2.22:
-    - A Disk Cleanup that finished its work but never exited is no longer reported as
-      still running: completion is now detected by total stillness as well as by exit,
-      so a finished cleanup stops costing the full 15-minute timeout
+    - A Disk Cleanup that stops doing anything but never exits is no longer waited out
+      for the full 15-minute timeout, nor reported as still deleting: the wait now also
+      ends when the process has shown no CPU or I/O activity for two minutes
     - An unusable -LogPath can no longer kill the run before it starts - the log header
       is written through the same fault-tolerant path as every other log line
     - Every run now ends through one code path, so the result JSON, the summary and the
@@ -388,12 +388,13 @@ function New-RunStats {
     # totals reported by this run are partial, and a consumer must not read them as final.
     DiskCleanupPending   = $false
     # v2.22: how the Storage Sense / Disk Cleanup step actually ended. DiskCleanupPending
-    # alone could not tell "still deleting" from "finished but the process never exited",
-    # and reported both as pending - so a completed cleanup was published as partial.
+    # alone could not tell "still visibly deleting" from "resident but doing nothing", and
+    # reported both as pending - so a cleanup nothing had been observed to be doing was
+    # published as partial.
     # Same shape and reasoning as AppUpdatesStatus (v2.21): when a boolean starts covering
     # two different truths, the fix is a status, not a cleverer boolean.
     # 'not-run' | 'skipped-parameter' | 'storage-sense' | 'completed' |
-    # 'completed-resident' | 'timeout' | 'failed'
+    # 'idle-resident' | 'timeout' | 'failed'
     DiskCleanupStatus    = 'not-run'
     # v2.17 (p.11 of the audit): which top-level phases ran to completion vs threw.
     # Before this, one exception anywhere in the run silently skipped every phase
@@ -1748,15 +1749,19 @@ function Invoke-ScriptUpdate {
     Write-Host "  ✓ Update complete!" -ForegroundColor Green
     Write-Host "  Please run WinClean again to use the new version." -ForegroundColor Gray
     Write-Host ""
-    Write-Host "  Press any key to exit..." -ForegroundColor DarkGray
-
-    Wait-ForKeyPress
 
     # v2.22: this used to call exit here, which bypassed the finally in Start-WinClean and
     # therefore had to hand-copy the result JSON write and the exit-code rule alongside it.
     # The caller now owns ending the run, through the one path that does it (raised in
     # external review). The exit code is unchanged: the entry point already derives it from
     # ErrorsCount, which is what the copied lines here were re-deriving.
+    #
+    # The "press any key" pause deliberately does NOT happen here (raised in the second
+    # review pass): it blocks indefinitely, and in v2.21 the result JSON was already on
+    # disk before it. Pausing here would put an unbounded wait between the update and the
+    # artefacts, so a window closed or interrupted at that prompt would leave the run with
+    # no result JSON and an unreleased log handle - a regression introduced by this very
+    # refactor. The caller pauses after the run is complete.
     $script:Stats.Aborted = 'UpdatedAndExited'
     return $true
 }
@@ -5356,6 +5361,100 @@ function Get-ProcessActivityFingerprint {
     }
 }
 
+function Get-DiskCleanupActivityFingerprint {
+    <#
+    .SYNOPSIS
+        Activity fingerprint of the whole cleanmgr family, not just the process we started
+    .DESCRIPTION
+        v2.22, raised in review, then narrowed in the round after that.
+
+        The concern is real: the handle we hold is not necessarily the only process doing
+        the work - cleanmgr was started with -WindowStyle Hidden and a Disk Cleanup window
+        appeared anyway. If a worker does the deleting while the process we started merely
+        waits, fingerprinting our PID alone would show a frozen parent and call a live
+        cleanup finished.
+
+        The first attempt aggregated over every cleanmgr.exe on the machine, and that was
+        WORSE: a Disk Cleanup the user opens by hand is also called cleanmgr.exe, so an
+        unrelated process could both satisfy "activity was observed" for our run and, by
+        staying busy, keep our run waiting the full fifteen minutes after our own cleanup
+        had finished. It made the verdict depend on a process we know nothing about.
+
+        So: our process and its descendants, and nothing else. Same protection against a
+        worker doing the deleting, no dependence on strangers. Children are matched by
+        parent PID regardless of name, since a worker need not be called cleanmgr.exe.
+
+        Counters are summed as [long] rather than through Measure-Object, which returns a
+        Double and would silently lose integer precision past 2^53 (raised in review).
+
+        $null when nothing can be read; the caller must treat that as "cannot tell".
+
+        ACCEPTED LIMITS, stated rather than implied (raised in review). Process identity on
+        Windows is not exact: a process whose parent died and whose parent's PID was later
+        reused by our cleanmgr would be counted as family, and a worker started through a
+        service or COM rather than as a child would be missed. No process-tree scheme
+        avoids both. This is why the outcome is reported as observed idleness rather than
+        as proven completion, and why the registry sweep still refuses to touch a cleanmgr
+        that has not exited: every consumer of this signal is built to tolerate it being
+        wrong, which is the property that actually matters.
+    #>
+    param([int]$ProcessId)
+
+    try {
+        $all = @(Get-CimInstance -ClassName Win32_Process `
+                                 -Property ProcessId, ParentProcessId, KernelModeTime, UserModeTime,
+                                           ReadOperationCount, WriteOperationCount, OtherOperationCount `
+                                 -ErrorAction Stop)
+        if (-not $all) { return $null }
+
+        # Walk down from our PID. The seen-set both prevents rework and makes a cyclic
+        # parent chain (possible after PID reuse) terminate instead of spinning.
+        $byParent = @{}
+        foreach ($p in $all) {
+            $parent = [int]$p.ParentProcessId
+            if (-not $byParent.ContainsKey($parent)) { $byParent[$parent] = [System.Collections.Generic.List[object]]::new() }
+            $byParent[$parent].Add($p)
+        }
+
+        $family  = [System.Collections.Generic.List[object]]::new()
+        $seen    = [System.Collections.Generic.HashSet[int]]::new()
+        $pending = [System.Collections.Generic.Queue[int]]::new()
+        $pending.Enqueue($ProcessId)
+
+        while ($pending.Count -gt 0) {
+            $current = $pending.Dequeue()
+            if (-not $seen.Add($current)) { continue }
+
+            $proc = $all | Where-Object { [int]$_.ProcessId -eq $current } | Select-Object -First 1
+            if ($proc) { $family.Add($proc) }
+
+            if ($byParent.ContainsKey($current)) {
+                foreach ($child in $byParent[$current]) { $pending.Enqueue([int]$child.ProcessId) }
+            }
+        }
+
+        if ($family.Count -eq 0) {
+            # Our process is gone. The caller detects the exit on its own; "cannot tell"
+            # is the honest answer here, never "idle".
+            return $null
+        }
+
+        [long]$kernel = 0; [long]$user = 0; [long]$read = 0; [long]$write = 0; [long]$other = 0
+        foreach ($p in $family) {
+            $kernel += [long]$p.KernelModeTime
+            $user   += [long]$p.UserModeTime
+            $read   += [long]$p.ReadOperationCount
+            $write  += [long]$p.WriteOperationCount
+            $other  += [long]$p.OtherOperationCount
+        }
+        $pids = (($family | ForEach-Object { [int]$_.ProcessId } | Sort-Object) -join ',')
+
+        return '{0}|{1}|{2}|{3}|{4}|{5}|{6}' -f $kernel, $user, $read, $write, $other, $family.Count, $pids
+    } catch {
+        return $null
+    }
+}
+
 function Update-IdleStreak {
     <#
     .SYNOPSIS
@@ -5388,15 +5487,29 @@ function Wait-CleanmgrCompletion {
         without a process and without waiting fifteen minutes: the caller injects how to
         tell whether the process exited, how to read its activity, and how to wait.
 
-        Two completion signals, because HasExited alone was the wrong model of "done".
+        Two signals for "is there still something to wait for", because HasExited alone
+        was the wrong model of it. Note the distinction that matters throughout this
+        function: the MEASURED case below is described as what it was on that machine,
+        while what this code can PROVE in general is only the absence of observable
+        activity. The first is history, the second is the contract.
         Measured on a live workstation: cleanmgr /sagerun did its work in about ten
         seconds, closed its window, then stayed resident with CPU and all three I/O
         counters frozen and every thread in Wait. The run sat out the remaining ~890
         seconds and then published the finished cleanup as partial.
 
         Returns Outcome ('exited' | 'idle-resident' | 'timeout') and Elapsed seconds.
-        'idle-resident' means the work is over and nothing is pending; only the process
-        outstayed it. 'timeout' means it was still genuinely working when time ran out.
+        'idle-resident' names what was OBSERVED - the process was seen working and then
+        did nothing at all for long enough - not the conclusion drawn from it. That the
+        work is therefore over is an inference, and a process blocked on something
+        external would look identical, so nothing is built to depend on it being right.
+        'timeout' means it was still visibly working when time ran out.
+
+        'idle-resident' additionally requires that activity was OBSERVED at least once
+        (raised in review). Without that, "it has finished" and "it has not started yet"
+        are the same observation - a process that is suspended, or waiting on something
+        before it begins, would be declared complete after two minutes of a stillness that
+        never followed any work. Since the first fingerprint is taken the moment cleanmgr
+        starts, a run that does anything at all changes it within the first interval.
     #>
     param(
         [scriptblock]$HasExited,
@@ -5410,6 +5523,7 @@ function Wait-CleanmgrCompletion {
 
     $elapsed = 0
     $idleStreak = 0
+    $sawActivity = $false
     $fingerprint = & $GetFingerprint
 
     while (-not (& $HasExited) -and $elapsed -lt $MaxWaitSeconds) {
@@ -5420,7 +5534,12 @@ function Wait-CleanmgrCompletion {
         $fingerprint = & $GetFingerprint
         $idleStreak = Update-IdleStreak -Previous $previousFingerprint -Current $fingerprint -Streak $idleStreak
 
-        if ($idleStreak -ge $IdleChecksRequired) {
+        # A reset caused by two READABLE but different fingerprints is real work. A reset
+        # caused by an unreadable sample is not, and must not qualify the run for an early
+        # verdict later on.
+        if ($idleStreak -eq 0 -and $previousFingerprint -and $fingerprint) { $sawActivity = $true }
+
+        if ($sawActivity -and $idleStreak -ge $IdleChecksRequired) {
             return @{ Outcome = 'idle-resident'; Elapsed = $elapsed }
         }
 
@@ -5938,19 +6057,20 @@ function Invoke-StorageSense {
             # with a large component store, and killing it produced a warning on every
             # single run while cleanmgr kept working in the background anyway.
             #
-            # v2.22: waiting on HasExited alone was the wrong model of "the work is done".
-            # Measured on a live workstation: cleanmgr /sagerun finished in about ten
-            # seconds, closed its window and then simply stayed resident - CPU, all three
-            # I/O counters and its six threads frozen, every thread in Wait. The run then
-            # sat here for the remaining ~890 seconds and finally declared the FINISHED
-            # cleanup partial. Both halves of that are wrong, and the second is the worse
-            # one: it is the same class of dishonest report v2.20 and v2.21 were spent
-            # removing, only inverted - not success that never happened, but incompleteness
-            # that never happened.
+            # v2.22: waiting on HasExited alone was the wrong model of "there is still
+            # something to wait for". Measured on a live workstation: cleanmgr /sagerun did
+            # its work in about ten seconds, closed its window and then simply stayed
+            # resident - CPU, all three I/O counters and its six threads frozen, every
+            # thread in Wait. The run sat here for the remaining ~890 seconds and then
+            # declared the cleanup partial. Both halves of that are wrong, and the second
+            # is the worse one: it is the same class of dishonest report v2.20 and v2.21
+            # were spent removing, only inverted - not success that never happened, but
+            # incompleteness that was never observed either.
             #
-            # So a second, independent completion signal: total stillness. If the process
-            # has done no CPU work and no I/O at all across $idleChecksRequired consecutive
-            # checks, its work is over whether or not it bothered to exit.
+            # So a second, independent signal to stop waiting: total stillness. If the
+            # process has done no CPU work and no I/O at all across $idleChecksRequired
+            # consecutive checks, there is nothing left to wait for that we can observe.
+            # That is weaker than "it has finished", and is reported as such.
             $maxWait = 900  # 15 minutes
             $checkInterval = 10
             # Two full minutes of absolute stillness. Deliberately far longer than needed
@@ -5964,7 +6084,7 @@ function Invoke-StorageSense {
 
             $waitOutcome = Wait-CleanmgrCompletion `
                 -HasExited { $cleanmgr.HasExited } `
-                -GetFingerprint { Get-ProcessActivityFingerprint -ProcessId $cleanmgr.Id } `
+                -GetFingerprint { Get-DiskCleanupActivityFingerprint -ProcessId $cleanmgr.Id } `
                 -MaxWaitSeconds $maxWait -CheckInterval $checkInterval -IdleChecksRequired $idleChecksRequired `
                 -OnProgress { param($seconds) Write-Log "Disk Cleanup still running... ($seconds seconds)" -Level INFO }
 
@@ -5981,12 +6101,22 @@ function Invoke-StorageSense {
                 Write-Log "Disk Cleanup completed ($armed categories)" -Level SUCCESS
                 $script:Stats.DiskCleanupStatus = 'completed'
             } elseif ($finishedWhileResident) {
-                # The work is done; only the process is still here. Not a warning: nothing
-                # went wrong and nothing is pending, so DiskCleanupPending stays false and
-                # the figures below are final.
-                Write-Log "Disk Cleanup completed ($armed categories) - finished after $elapsed seconds, then stayed resident without doing anything further" -Level SUCCESS
-                Write-Log "cleanmgr.exe is still in the process list but has been completely idle for $($idleChecksRequired * $checkInterval) seconds - not waiting out the remaining $($maxWait - $elapsed) seconds" -Level DETAIL
-                $script:Stats.DiskCleanupStatus = 'completed-resident'
+                # Deliberately worded as an OBSERVATION, not a conclusion (raised in the
+                # third review pass). What was measured is that cleanmgr and its children
+                # did nothing at all for two minutes after having been seen working; that
+                # they FINISHED is the inference, and the earlier wording ("completed")
+                # stated the inference as fact. This project has spent three releases
+                # removing exactly that habit, so the status is 'idle-resident' and the log
+                # says what was seen.
+                #
+                # DiskCleanupPending stays false, which is the best available estimate: a
+                # process performing no CPU work and no I/O is not deleting anything. It is
+                # an estimate rather than a certainty, and that is why it is not called
+                # completion. Not a warning either - on the machine where this was measured
+                # it is the normal ending, and warning on every run would be noise.
+                Write-Log "Disk Cleanup ($armed categories): worked, then stopped doing anything for $($idleChecksRequired * $checkInterval) seconds" -Level SUCCESS
+                Write-Log "cleanmgr.exe is still in the process list but shows no CPU or I/O activity - treating its work as over and not waiting out the remaining $($maxWait - $elapsed) seconds" -Level DETAIL
+                $script:Stats.DiskCleanupStatus = 'idle-resident'
             } else {
                 # Genuinely still working when the timeout expired. Killing it would be
                 # worse - cleanmgr keeps working after a kill and the deletion is
@@ -6322,9 +6452,9 @@ function Write-ResultJson {
             # TotalFreedBytes is then a lower bound, not the final figure.
             DiskCleanupPending  = [bool]$script:Stats.DiskCleanupPending
             # v2.22: how that step ended, because the boolean above conflated two states.
-            # 'completed-resident' is the measured case where cleanmgr does its work, closes
-            # its window and then never exits: finished, nothing pending, figures final.
-            # 'timeout' is the genuine overrun the boolean was added for.
+            # 'idle-resident' is the measured case: cleanmgr was seen working, then went
+            # completely still without exiting. 'timeout' is the genuine overrun the
+            # boolean was added for - still visibly working when time ran out.
             DiskCleanupStatus   = [string]$script:Stats.DiskCleanupStatus
             # 'enabled' means cleanup figures are understated (Defender blocked some
             # deletions without reporting an error); 'unknown' means the check itself
@@ -6562,7 +6692,13 @@ function Start-WinClean {
                 # so continuing would perform maintenance with the old code still loaded -
                 # the run ends here, but it ends the same way every other run does.
                 if (Invoke-ScriptUpdate -UpdateInfo $updateInfo) {
+                    # Artefacts first, then the pause. The prompt blocks until a key is
+                    # pressed and a double-clicked shortcut may simply be closed there;
+                    # writing the JSON afterwards would mean an abandoned window produced
+                    # no result file at all (raised in the second review pass).
                     Complete-WinCleanRun -ResultPath $ResultJsonPath
+                    Write-Host "  Press any key to exit..." -ForegroundColor DarkGray
+                    Wait-ForKeyPress
                     return
                 }
             }

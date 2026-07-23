@@ -2225,13 +2225,14 @@ Describe "Invoke-ScriptUpdate branches" -Tag "Unit", "Helper", "V221" {
         $script:askedPath | Should -Be $script:WinCleanPath
     }
 
-    It "pauses before handing the run back, so the user reads the outcome" {
-        # v2.22 rewrote this test. It used to assert that the function wrote the result
-        # JSON itself, which was only ever true because its own `exit` bypassed the
-        # finally that should have done it. That workaround is gone: the artefact is now
-        # the caller's job (covered in the V222 region), and what is worth pinning here is
-        # the interactive behaviour that survived - the pause. Without it the window of a
-        # double-clicked shortcut closes on "Update complete" before it can be read.
+    It "does not block on a keypress before the run's artefacts exist" {
+        # Rewritten twice. It first asserted that this function wrote the result JSON,
+        # which was only true because its own `exit` bypassed the finally that should
+        # have. Then it asserted the pause happened here - and the second review pass
+        # showed that was the regression: the pause blocks indefinitely, so in v2.21 the
+        # JSON was already on disk before it, while pausing here puts an unbounded wait
+        # BEFORE the artefacts. A window closed at that prompt would leave no result file.
+        # The pause now belongs to the caller, after Complete-WinCleanRun.
         Mock Test-InteractiveConsole { $true }
         Mock Read-Host { 'y' }
         Mock Update-Script { }
@@ -2240,7 +2241,7 @@ Describe "Invoke-ScriptUpdate branches" -Tag "Unit", "Helper", "V221" {
         $null = Invoke-ScriptUpdate -UpdateInfo @{ CurrentVersion = '2.20'; LatestVersion = '2.21'
                                                    Channel = 'gallery'; Provider = 'PowerShellGet' }
 
-        Should -Invoke Wait-ForKeyPress -Times 1
+        Should -Invoke Wait-ForKeyPress -Exactly -Times 0 -Because 'nothing may block between the update and the result JSON'
         $script:Stats.Aborted | Should -Be 'UpdatedAndExited'
         ($script:printed -join "`n").Contains('Update complete') | Should -BeTrue
     }
@@ -2458,20 +2459,27 @@ Describe "Get-BoxWidth" -Tag "Unit", "Helper", "V222" {
         Get-BoxWidth -ConsoleWidth $Width | Should -Be 70
     }
 
-    It "never returns a box that cannot fit the console - <Width> columns" -ForEach @(
+    It "fits the console whenever a 70-column box can fit at all - <Width> columns" -ForEach @(
         @{ Width = 80 }, @{ Width = 100 }, @{ Width = 120 }, @{ Width = 200 }, @{ Width = 3824 }
     ) {
         # A box costs 2 indent + 1 border + inner + 1 border. Anything wider than the
         # console wraps, and a wrapped frame is worse than a narrow one.
+        # Scoped honestly (raised in review): this property holds for consoles of 74
+        # columns and up. Below that no box fits, and the case is covered separately.
         $inner = Get-BoxWidth -ConsoleWidth $Width
         ($inner + 4) | Should -BeLessOrEqual $Width
     }
 
-    It "does not shrink below 70 on a narrow console" {
-        # 60 columns cannot fit a 70-wide box, but every previous version had the same
-        # problem there. Shrinking would change the look for everyone to fix nobody.
-        Get-BoxWidth -ConsoleWidth 60 | Should -Be 70
-        Get-BoxWidth -ConsoleWidth 40 | Should -Be 70
+    It "keeps the historical 70 on a console too narrow for any box - <Width> columns" -ForEach @(
+        @{ Width = 60 }, @{ Width = 40 }
+    ) {
+        # Stated as the accepted limitation it is, not hidden. Below 74 columns a framed
+        # box cannot fit, and it never could - every previous version drew 70 there too.
+        # Narrowing the frame would change how WinClean looks for everyone in order to
+        # improve a console nobody has reported using, so the old behaviour is kept and
+        # written down instead of quietly implied by a bound.
+        Get-BoxWidth -ConsoleWidth $Width | Should -Be 70
+        (Get-BoxWidth -ConsoleWidth $Width) + 4 | Should -BeGreaterThan $Width -Because 'this is the known, accepted limit - the assertion records it rather than pretending it does not exist'
     }
 
     It "does not grow past 90 however wide the console is" {
@@ -2717,6 +2725,56 @@ Describe "Get-ProcessActivityFingerprint" -Tag "Unit", "Helper", "V222" {
         Get-ProcessActivityFingerprint -ProcessId 999999 | Should -BeNullOrEmpty
     }
 
+    It "the Disk Cleanup fingerprint covers our own process tree, not every cleanmgr" {
+        # Raised in review, after the first attempt aggregated by process NAME. A Disk
+        # Cleanup the user opens by hand is also cleanmgr.exe, and including it made the
+        # verdict depend on a stranger: its activity could satisfy "work was observed" for
+        # our run, and its busyness could keep us waiting the full fifteen minutes after
+        # our own cleanup had finished. Descendants of our PID, and nothing else.
+        Mock Get-CimInstance {
+            @(
+                [pscustomobject]@{ ProcessId = 100; ParentProcessId = 1;   KernelModeTime = 10; UserModeTime = 1; ReadOperationCount = 1; WriteOperationCount = 1; OtherOperationCount = 1 }
+                [pscustomobject]@{ ProcessId = 200; ParentProcessId = 100; KernelModeTime = 20; UserModeTime = 2; ReadOperationCount = 2; WriteOperationCount = 2; OtherOperationCount = 2 }
+                # An unrelated cleanmgr the user started: must not appear in the fingerprint
+                [pscustomobject]@{ ProcessId = 900; ParentProcessId = 1;   KernelModeTime = 99999; UserModeTime = 99999; ReadOperationCount = 99999; WriteOperationCount = 99999; OtherOperationCount = 99999 }
+            )
+        }
+
+        $fp = Get-DiskCleanupActivityFingerprint -ProcessId 100
+
+        # our process + its child: kernel 10+20, and the PID list names exactly those two
+        $fp | Should -Be '30|3|3|3|3|2|100,200'
+        $fp | Should -Not -Match '900' -Because 'an unrelated cleanmgr must not influence our verdict'
+    }
+
+    It "the Disk Cleanup fingerprint is null when our process is gone" {
+        Mock Get-CimInstance { @([pscustomobject]@{ ProcessId = 900; ParentProcessId = 1; KernelModeTime = 1; UserModeTime = 1; ReadOperationCount = 1; WriteOperationCount = 1; OtherOperationCount = 1 }) }
+        Get-DiskCleanupActivityFingerprint -ProcessId 100 | Should -BeNullOrEmpty
+    }
+
+    It "the Disk Cleanup fingerprint terminates on a cyclic parent chain" {
+        # PID reuse can produce a cycle; the walk must end rather than spin forever inside
+        # a wait that is already holding up the run.
+        Mock Get-CimInstance {
+            @(
+                [pscustomobject]@{ ProcessId = 100; ParentProcessId = 200; KernelModeTime = 1; UserModeTime = 0; ReadOperationCount = 0; WriteOperationCount = 0; OtherOperationCount = 0 }
+                [pscustomobject]@{ ProcessId = 200; ParentProcessId = 100; KernelModeTime = 1; UserModeTime = 0; ReadOperationCount = 0; WriteOperationCount = 0; OtherOperationCount = 0 }
+            )
+        }
+        $fp = Get-DiskCleanupActivityFingerprint -ProcessId 100
+        $fp | Should -Be '2|0|0|0|0|2|100,200'
+    }
+
+    It "sums counters as integers, without the precision loss of a Double" {
+        # Measure-Object -Sum returns a Double and silently loses integer precision past
+        # 2^53, so a small counter change could vanish at large totals (raised in review).
+        $big = 9007199254740993   # 2^53 + 1, not representable as a Double
+        Mock Get-CimInstance {
+            @([pscustomobject]@{ ProcessId = 100; ParentProcessId = 1; KernelModeTime = $big; UserModeTime = 0; ReadOperationCount = 0; WriteOperationCount = 0; OtherOperationCount = 0 })
+        }
+        (Get-DiskCleanupActivityFingerprint -ProcessId 100).Split('|')[0] | Should -Be "$big"
+    }
+
     It "returns null - never a constant - when the counters cannot be read at all" {
         # Added after a mutation survived. The test above exercises the "no such process"
         # branch, where Get-CimInstance returns nothing; it never reached the catch, which
@@ -2732,6 +2790,11 @@ Describe "Get-ProcessActivityFingerprint" -Tag "Unit", "Helper", "V222" {
         $first | Should -BeNullOrEmpty
         Update-IdleStreak -Previous $first -Current $second -Streak 11 |
             Should -Be 0 -Because 'two unreadable samples must not look like two identical ones'
+
+        # The function actually used by the Disk Cleanup wait must obey the same rule.
+        # Raised in review: this guard used to exercise only the single-process helper,
+        # so a fixed value returned from the family function's catch would have survived it.
+        Get-DiskCleanupActivityFingerprint -ProcessId $PID | Should -BeNullOrEmpty
     }
 }
 
@@ -2758,16 +2821,21 @@ Describe "Wait-CleanmgrCompletion" -Tag "Unit", "Helper", "V222" {
         $r.Elapsed | Should -BeLessThan 900
     }
 
-    It "declares 'idle-resident' once the process has been completely still for the threshold" {
-        # The measured case: never exits, never does anything again.
+    It "stops waiting once the process has been completely still for the threshold" {
+        # The measured case: works briefly, then never exits and never moves again. The verdict
+        # is 'nothing left to observe', not 'proven finished'. One interval of real work
+        # first, because stillness only counts after something was seen happening.
+        $script:n = 0
         $r = Wait-CleanmgrCompletion `
                 -HasExited { $false } `
-                -GetFingerprint { 'frozen' } `
+                -GetFingerprint { $script:n++; if ($script:n -le 2) { "working-$($script:n)" } else { 'frozen' } } `
                 -CheckInterval 10 -IdleChecksRequired 12 `
                 -Wait $script:noWait -OnProgress $script:onProgress
 
         $r.Outcome | Should -Be 'idle-resident'
-        $r.Elapsed | Should -Be 120 -Because '12 checks of 10 seconds, and not one second longer'
+        # 20s of observed movement (working-1 -> working-2 -> frozen, two changes), then
+        # 12 identical checks of 10s each.
+        $r.Elapsed | Should -Be 140 -Because 'the streak only starts once the fingerprint stops changing'
     }
 
     It "waits the full timeout when the process keeps working" {
@@ -2823,6 +2891,55 @@ Describe "Wait-CleanmgrCompletion" -Tag "Unit", "Helper", "V222" {
 
         $r.Outcome | Should -Be 'timeout'
         $script:progressAt | Should -Be @(60, 120, 180, 240, 300)
+    }
+
+    It "does not call a process finished if it was never seen doing anything" {
+        # Raised in review: without this, "it has finished" and "it has not started yet"
+        # are the same observation. A cleanmgr that is suspended, or waiting on something
+        # before it begins, would otherwise be declared complete after two minutes of a
+        # stillness that never followed any work at all.
+        $r = Wait-CleanmgrCompletion `
+                -HasExited { $false } `
+                -GetFingerprint { 'frozen-from-the-start' } `
+                -MaxWaitSeconds 900 -CheckInterval 10 -IdleChecksRequired 12 `
+                -Wait $script:noWait -OnProgress $script:onProgress
+
+        $r.Outcome | Should -Be 'timeout' -Because 'stillness is only taken as "nothing left to wait for" if work was observed first'
+        $r.Elapsed | Should -Be 900
+    }
+
+    It "does not count an unreadable sample as the activity that qualifies an early verdict" {
+        # A reset caused by "cannot tell" must not stand in for observed work: otherwise
+        # a machine with flaky WMI could satisfy the sawActivity condition without any
+        # process ever having done anything.
+        $script:n = 0
+        $r = Wait-CleanmgrCompletion `
+                -HasExited { $false } `
+                -GetFingerprint {
+                    $script:n++
+                    # one unreadable blip, then frozen for the rest of the run
+                    if ($script:n -eq 2) { $null } else { 'frozen' }
+                } `
+                -MaxWaitSeconds 900 -CheckInterval 10 -IdleChecksRequired 12 `
+                -Wait $script:noWait -OnProgress $script:onProgress
+
+        $r.Outcome | Should -Be 'timeout'
+    }
+
+    It "still ends early when real work was observed and then stopped" {
+        # The measured case, now with the stricter rule in place: it must still work.
+        $script:n = 0
+        $r = Wait-CleanmgrCompletion `
+                -HasExited { $false } `
+                -GetFingerprint {
+                    $script:n++
+                    if ($script:n -le 3) { "working-$($script:n)" } else { 'done-and-frozen' }
+                } `
+                -MaxWaitSeconds 900 -CheckInterval 10 -IdleChecksRequired 12 `
+                -Wait $script:noWait -OnProgress $script:onProgress
+
+        $r.Outcome | Should -Be 'idle-resident'
+        $r.Elapsed | Should -BeLessThan 900
     }
 
     It "prefers 'exited' over 'timeout' when the process leaves during the final interval" {

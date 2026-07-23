@@ -1235,14 +1235,14 @@ Describe "v2.20: an operation that did nothing does not report success" -Tag "Fi
             $script:senseCode = ($script:senseBody -split "`n" | Where-Object { $_ -notmatch '^\s*#' }) -join "`n"
         }
 
-        It "A cleanup that finished while resident is not reported as pending" {
-            # DiskCleanupPending means "an elevated process is STILL deleting, the figures
-            # below are partial". The measured case is the opposite: the work is over.
+        It "A cleanup that went idle while resident is not reported as still deleting" {
+            # DiskCleanupPending means "an elevated process was still VISIBLY deleting, the figures
+            # below are partial". The measured case is the opposite: nothing was happening.
             $residentBranch = [regex]::Match($script:senseCode,
                 '(?s)\}\s*elseif\s*\(\$finishedWhileResident\)\s*\{(.*?)\}\s*else\s*\{').Groups[1].Value
             $residentBranch | Should -Not -BeNullOrEmpty -Because 'the branch must exist to be checked'
             $residentBranch | Should -Not -Match 'DiskCleanupPending'
-            $residentBranch | Should -Match "DiskCleanupStatus = 'completed-resident'"
+            $residentBranch | Should -Match "DiskCleanupStatus = 'idle-resident'"
         }
 
         It "The genuine overrun still sets DiskCleanupPending" {
@@ -1286,6 +1286,35 @@ Describe "v2.20: an operation that did nothing does not report success" -Tag "Fi
             $body | Should -Not -Match '(?m)^\s*exit\s'
             $body | Should -Not -Match 'Write-ResultJson'
             $body | Should -Match 'return \$true'
+        }
+
+        It "The self-update pause happens after the artefacts, never before them" {
+            # Raised in the second review pass. Wait-ForKeyPress blocks indefinitely; in
+            # v2.21 the result JSON was written before it. Moving the pause into
+            # Invoke-ScriptUpdate put an unbounded wait between the update and the
+            # artefacts, so an abandoned window produced no result file at all.
+            # Scoped to the self-update branch itself (raised in review): comparing the
+            # FIRST Complete-WinCleanRun in the whole function found the pending-reboot
+            # call instead, so the ordering held even if the self-update branch lost its
+            # completion call entirely.
+            $body = Get-FunctionBody -Name 'Start-WinClean'
+            $branch = [regex]::Match($body,
+                '(?s)if \(Invoke-ScriptUpdate -UpdateInfo \$updateInfo\) \{(.*?)\n\s*\}').Groups[1].Value
+            $branch | Should -Not -BeNullOrEmpty -Because 'the branch must exist to be checked'
+
+            $completeAt = $branch.IndexOf('Complete-WinCleanRun')
+            $pauseAt    = $branch.IndexOf('Wait-ForKeyPress')
+            $completeAt | Should -BeGreaterOrEqual 0 -Because 'the self-update branch must complete the run itself'
+            $pauseAt    | Should -BeGreaterThan $completeAt
+
+            # Exactly one prompt on this path, so the pause is neither lost nor doubled
+            ([regex]::Matches($branch, 'Wait-ForKeyPress')).Count | Should -Be 1
+            ([regex]::Matches($branch, 'Press any key to exit')).Count | Should -Be 1
+
+            # And it must not have crept back into the updater
+            $update = Get-FunctionBody -Name 'Invoke-ScriptUpdate'
+            $tail = $update.Substring($update.IndexOf('Update complete'))
+            $tail | Should -Not -Match 'Wait-ForKeyPress'
         }
 
         It "Start-WinClean acts on the answer instead of ignoring it" {
