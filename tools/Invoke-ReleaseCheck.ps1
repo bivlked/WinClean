@@ -192,7 +192,9 @@ if ($pester) {
     $countClaims = @(
         @{ File = 'CLAUDE.md';       Pattern = "$pesterCount Pester" }
         @{ File = 'CONTRIBUTING.md'; Pattern = "$pesterCount tests" }
-        @{ File = 'CHANGELOG.md';    Pattern = "-> $pesterCount\." }
+        # Literal, not a regex: the matcher below runs every pattern through
+        # [regex]::Escape, so a hand-written "\." would be searched for as a backslash.
+        @{ File = 'CHANGELOG.md';    Pattern = "-> $pesterCount." }
     )
     $wrongCounts = foreach ($claim in $countClaims) {
         $full = Join-Path $repoRoot $claim.File
