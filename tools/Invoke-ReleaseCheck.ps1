@@ -74,10 +74,18 @@ function Test-ChangelogTopmostEntry {
     # "## [Unreleased]" is skipped on purpose: it legitimately sits above the releases and
     # carries no version number. An older version heading appearing first means the new
     # entry was not added at the top, which is how a stale CHANGELOG would slip through.
+    # Lines inside ``` fences are skipped so an example heading in the Unreleased notes
+    # cannot be mistaken for the real entry. The grammar is deliberately the bare X.Y(.Z)
+    # form the project always uses; a heading it does not model (a v-prefix, a single
+    # segment) fails closed, stopping the release for a human to look, never a false pass.
     param([string]$Changelog, [string]$Version)
-    $numbered = [regex]::Matches($Changelog, "(?m)^##\s*\[(\d+(?:\.\d+)+)\]")
-    if ($numbered.Count -eq 0) { return $false }
-    return $numbered[0].Groups[1].Value -eq $Version
+    $inFence = $false
+    foreach ($line in ($Changelog -split "\r?\n")) {
+        if ($line -match '^\s*```') { $inFence = -not $inFence; continue }
+        if ($inFence) { continue }
+        if ($line -match '^##\s*\[(\d+(?:\.\d+)+)\]') { return $Matches[1] -eq $Version }
+    }
+    return $false
 }
 
 Write-Host ""

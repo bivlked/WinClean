@@ -1762,6 +1762,11 @@ Describe "v2.20 pre-release review: fixes to the fixes" -Tag "Fix", "V220R2" {
             $gateText = Get-Content $gatePath -Raw
             $gateText | Should -Match 'Test-ReleaseNotesFirstLine -ReleaseNotesSection \$releaseNotes' `
                 -Because 'the predicate must be fed the section, not the whole script'
+            # Symmetric guard: without this, a revert of section 2 to an inline presence-match
+            # would leave Test-ChangelogTopmostEntry defined but uncalled, and the fixture
+            # checks below would keep passing against the now-orphaned function.
+            $gateText | Should -Match 'Test-ChangelogTopmostEntry -Changelog \$changelog' `
+                -Because 'section 2 must actually call the predicate, not merely define it'
 
             $ast = [System.Management.Automation.Language.Parser]::ParseFile($gatePath, [ref]$null, [ref]$null)
             foreach ($fnName in 'Test-ReleaseNotesFirstLine', 'Test-ChangelogTopmostEntry') {
@@ -1788,6 +1793,18 @@ Describe "v2.20 pre-release review: fixes to the fixes" -Tag "Fix", "V220R2" {
                 Should -BeFalse -Because 'an older version on top means the new entry was not added at the top'
             Test-ChangelogTopmostEntry -Changelog "# Changelog`n`n## [Unreleased]`n" -Version '2.23' |
                 Should -BeFalse -Because 'a missing entry must not pass'
+
+            # A "## [x.y]" heading inside a fenced example in the Unreleased notes must not be
+            # mistaken for the real topmost entry - that would be a false PASS on a stale file.
+            $logFenced = @(
+                '# Changelog', '', '## [Unreleased]', '',
+                '```markdown', '## [9.9] - fenced example', '```', '',
+                '## [2.22] - 2025-12-01'
+            ) -join "`n"
+            Test-ChangelogTopmostEntry -Changelog $logFenced -Version '2.22' |
+                Should -BeTrue -Because 'a fenced example heading is not the topmost entry'
+            Test-ChangelogTopmostEntry -Changelog $logFenced -Version '9.9' |
+                Should -BeFalse -Because 'the fenced example heading must be ignored, not matched'
         }
 
         It "Resolve-PathThroughLinks stops the ancestor walk at the volume root" {
