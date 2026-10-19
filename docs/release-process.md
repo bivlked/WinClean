@@ -16,7 +16,7 @@ If these drift, users get confused or, worse, run an old version while the READM
 
 ## Where the version lives
 
-The version appears in several places inside `WinClean.ps1` (the `$script:Version` variable, the PSScriptInfo `.VERSION`, `.RELEASENOTES`, the `.SYNOPSIS`, and the `NOTES` block) and in the docs (the flow diagram heading in both READMEs, and the CHANGELOG entry). The README version badge is dynamic and needs no bump; the test-count lines in CONTRIBUTING and CLAUDE are a separate counter the gate also checks. Line numbers move between releases, so find each spot by content (grep), not by a fixed line number.
+The version appears in several places inside `WinClean.ps1` (the `$script:Version` variable, the PSScriptInfo `.VERSION`, `.RELEASENOTES`, the `.SYNOPSIS`, and the `NOTES` block) and in the docs (the flow diagram heading in both READMEs, and the CHANGELOG entry). The README version badge is dynamic and needs no bump; the test-count lines in CONTRIBUTING and CHANGELOG are a separate counter the gate also checks. Line numbers move between releases, so find each spot by content (grep), not by a fixed line number.
 
 You do not verify these by hand. The machine gate does it for you.
 

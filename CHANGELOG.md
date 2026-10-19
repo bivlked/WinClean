@@ -32,7 +32,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   passes. 702 -> 704 tests.
 
 Planned for a later release: quick system health section (SMART, image integrity, WinRE),
-Windows Update driver listing, run-to-run delta and HTML report. See CLAUDE.md.
+Windows Update driver listing, run-to-run delta and HTML report.
 
 ---
 
