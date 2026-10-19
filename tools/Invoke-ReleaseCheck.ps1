@@ -70,20 +70,26 @@ function Test-ReleaseNotesFirstLine {
 }
 
 function Test-ChangelogTopmostEntry {
-    # True only when the TOPMOST numbered entry in the changelog is "## [<Version>]".
-    # "## [Unreleased]" is skipped on purpose: it legitimately sits above the releases and
-    # carries no version number. An older version heading appearing first means the new
-    # entry was not added at the top, which is how a stale CHANGELOG would slip through.
-    # Lines inside ``` fences are skipped so an example heading in the Unreleased notes
-    # cannot be mistaken for the real entry. The grammar is deliberately the bare X.Y(.Z)
-    # form the project always uses; a heading it does not model (a v-prefix, a single
-    # segment) fails closed, stopping the release for a human to look, never a false pass.
+    # True only when the TOPMOST "## [...]" heading other than "## [Unreleased]" names
+    # exactly this version. "## [Unreleased]" legitimately sits above the releases and is
+    # skipped; the first release heading below it must be the version being cut, or the new
+    # entry was added somewhere other than the top and a stale CHANGELOG slips through.
+    # The bracket text is compared to $Version verbatim, so whatever shape the version takes
+    # (the project uses X.Y) is matched without a grammar to drift from it.
+    # Lines inside ``` or ~~~ fences are skipped so an example heading in the Unreleased
+    # notes is not read as the real entry. Deliberately out of scope: a pathological nest of
+    # different-length fences could still mistrack - such a CHANGELOG is a maintainer error a
+    # human catches, and the common single-fence shapes are handled.
     param([string]$Changelog, [string]$Version)
     $inFence = $false
     foreach ($line in ($Changelog -split "\r?\n")) {
-        if ($line -match '^\s*```') { $inFence = -not $inFence; continue }
+        if ($line -match '^\s*(```|~~~)') { $inFence = -not $inFence; continue }
         if ($inFence) { continue }
-        if ($line -match '^##\s*\[(\d+(?:\.\d+)+)\]') { return $Matches[1] -eq $Version }
+        if ($line -match '^##\s*\[([^\]]+)\]') {
+            $label = $Matches[1].Trim()
+            if ($label -eq 'Unreleased') { continue }
+            return $label -eq $Version
+        }
     }
     return $false
 }

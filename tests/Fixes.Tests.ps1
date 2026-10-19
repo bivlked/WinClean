@@ -1805,6 +1805,23 @@ Describe "v2.20 pre-release review: fixes to the fixes" -Tag "Fix", "V220R2" {
                 Should -BeTrue -Because 'a fenced example heading is not the topmost entry'
             Test-ChangelogTopmostEntry -Changelog $logFenced -Version '9.9' |
                 Should -BeFalse -Because 'the fenced example heading must be ignored, not matched'
+
+            # Tilde fences are markdown too; an example heading inside one must also be skipped.
+            $logTilde = @(
+                '# Changelog', '', '## [Unreleased]', '',
+                '~~~', '## [9.9] - fenced example', '~~~', '',
+                '## [2.22] - 2025-12-01'
+            ) -join "`n"
+            Test-ChangelogTopmostEntry -Changelog $logTilde -Version '2.22' |
+                Should -BeTrue -Because 'a ~~~ fenced heading is skipped like a backtick one'
+
+            # The bracket text is compared verbatim, so a version shape with no dot still works
+            # (the earlier grammar demanded at least X.Y and false-failed on a bare number).
+            Test-ChangelogTopmostEntry -Changelog "# Changelog`n`n## [Unreleased]`n`n## [3] - 2026-01-01`n" -Version '3' |
+                Should -BeTrue -Because 'a single-segment version heading must match its version'
+            # A non-version heading on top is not this release and must fail closed.
+            Test-ChangelogTopmostEntry -Changelog "# Changelog`n`n## [Unreleased]`n`n## [YANKED]`n`n## [2.22]`n" -Version '2.22' |
+                Should -BeFalse -Because 'a non-version heading above the entry means it is not topmost'
         }
 
         It "Resolve-PathThroughLinks stops the ancestor walk at the volume root" {
