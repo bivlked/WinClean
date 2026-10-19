@@ -69,26 +69,25 @@ function Test-ReleaseNotesFirstLine {
     return [bool]($firstLine -match "^\s*v$([regex]::Escape($Version)):")
 }
 
-function Test-ChangelogTopmostEntry {
-    # True only when the TOPMOST numbered version heading "## [X.Y]" names exactly this
-    # version. Headings that are not a bare numeric version are skipped by the grammar, not
-    # by an explicit name list: "## [Unreleased]" and any other prelude a changelog may carry
-    # ("## [Deprecated]", "## [Planned]") fall through so the first REAL release heading below
-    # them is the one tested. If that heading is an older version, the new entry was added
-    # somewhere other than the top and a stale CHANGELOG would slip through. A single-segment
-    # version ("3") is accepted; a v-prefixed or pre-release heading is not (the project
-    # writes bare X.Y), which fails closed, stopping the release for a human rather than ever
-    # passing wrongly. Lines inside ``` or ~~~ fences are skipped so an example heading in the
-    # Unreleased notes is not read as the real entry; a pathological nest of different-length
-    # fences is out of scope - such a CHANGELOG is a maintainer error a human catches.
-    param([string]$Changelog, [string]$Version)
-    $inFence = $false
-    foreach ($line in ($Changelog -split "\r?\n")) {
-        if ($line -match '^\s*(```|~~~)') { $inFence = -not $inFence; continue }
-        if ($inFence) { continue }
-        if ($line -match '^##\s*\[(\d+(?:\.\d+)*)\]') { return $Matches[1] -eq $Version }
-    }
-    return $false
+function Get-ChangelogTopmostVersion {
+    # Returns the version of the first numbered release heading "## [X.Y]" (the newest
+    # release, which Keep a Changelog places directly below the single "## [Unreleased]"
+    # section), or $null when there is no numbered entry at all. Non-version headings
+    # ("## [Unreleased]", "## [Deprecated]") do not match the numeric grammar and are passed
+    # over, so a changelog that carries a prelude section still resolves to its real newest
+    # release. A single-segment version ("3") is accepted; a v-prefixed or pre-release
+    # heading is not (the project writes bare X.Y).
+    #
+    # This keys off the numbered-heading grammar alone - no markdown fence parsing. It
+    # assumes a well-formed changelog whose "## [X.Y]" lines are real release sections; a
+    # version-like heading written inside the Unreleased notes (in a code fence or in prose)
+    # is malformed input that is deliberately not modelled. An earlier version hand-rolled a
+    # fence state machine to guard that case; review found the machine was more fragile than
+    # the non-occurring input it chased, so the caller instead reports what it found (below)
+    # and a human reads the file.
+    param([string]$Changelog)
+    $m = [regex]::Match($Changelog, '(?m)^##\s*\[(\d+(?:\.\d+)*)\]')
+    if ($m.Success) { $m.Groups[1].Value } else { $null }
 }
 
 Write-Host ""
@@ -143,8 +142,16 @@ if (-not $version) {
 # --- 2. CHANGELOG entry for this version sits at the top (above only Unreleased) ----
 if ($version) {
     $changelog = Get-Content (Join-Path $repoRoot 'CHANGELOG.md') -Raw
-    $hasEntry = Test-ChangelogTopmostEntry -Changelog $changelog -Version $version
-    Add-Result -Name "CHANGELOG has a [$version] entry at the top" -Passed $hasEntry
+    $topmost = Get-ChangelogTopmostVersion -Changelog $changelog
+    $hasEntry = $topmost -eq $version
+    # Two distinct failures look identical without this: "the entry is missing" and "the
+    # entry exists but an older one is above it". The second is the easy mistake (forgetting
+    # to move the new section up), and grepping for the version would wrongly suggest the
+    # check is broken, so name which one happened.
+    $changelogDetail = if ($hasEntry) { '' }
+        elseif ($null -eq $topmost) { 'в CHANGELOG нет ни одной записи вида ## [X.Y]' }
+        else { "верхняя версионная запись [$topmost], ожидалась [$version] - новая запись не вверху" }
+    Add-Result -Name "CHANGELOG has a [$version] entry at the top" -Passed $hasEntry -Detail $changelogDetail
 }
 
 # --- 3. No em/en dashes anywhere (absolute project rule) ---------------------
