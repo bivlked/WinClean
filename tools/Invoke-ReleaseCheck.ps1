@@ -69,25 +69,31 @@ function Test-ReleaseNotesFirstLine {
     return [bool]($firstLine -match "^\s*v$([regex]::Escape($Version)):")
 }
 
-function Get-ChangelogTopmostVersion {
-    # Returns the version of the first numbered release heading "## [X.Y]" (the newest
-    # release, which Keep a Changelog places directly below the single "## [Unreleased]"
-    # section), or $null when there is no numbered entry at all. Non-version headings
-    # ("## [Unreleased]", "## [Deprecated]") do not match the numeric grammar and are passed
-    # over, so a changelog that carries a prelude section still resolves to its real newest
-    # release. A single-segment version ("3") is accepted; a v-prefixed or pre-release
-    # heading is not (the project writes bare X.Y).
+function Get-ChangelogCheckResult {
+    # The gate's whole CHANGELOG verdict in one place: Passed, the Topmost version it found,
+    # and a Detail string. The verdict itself lives here (not inline at the call site) so a
+    # test can execute the actual pass/fail decision against fixtures, not merely grep that
+    # the gate calls a helper - a cross-engine review showed an inline "$hasEntry = $topmost
+    # -eq $version" could be mutated to "$hasEntry = $true" with every test still green.
     #
-    # This keys off the numbered-heading grammar alone - no markdown fence parsing. It
-    # assumes a well-formed changelog whose "## [X.Y]" lines are real release sections; a
-    # version-like heading written inside the Unreleased notes (in a code fence or in prose)
-    # is malformed input that is deliberately not modelled. An earlier version hand-rolled a
-    # fence state machine to guard that case; review found the machine was more fragile than
-    # the non-occurring input it chased, so the caller instead reports what it found (below)
-    # and a human reads the file.
-    param([string]$Changelog)
+    # Passed is true only when the TOPMOST numbered release heading "## [X.Y]" - the first
+    # one, which Keep a Changelog places directly below the single "## [Unreleased]" - names
+    # this version. A version added below an older one, or missing, is caught. Non-version
+    # headings ("## [Unreleased]", "## [Deprecated]") do not match the numeric grammar and are
+    # passed over, so a prelude section does not block a valid release. A single-segment
+    # version ("3") is accepted; a v-prefix or pre-release heading is not (the project writes
+    # bare X.Y). This keys off the heading grammar alone - no markdown fence parsing: a
+    # version-like heading written inside the Unreleased notes (fenced or prose) is malformed
+    # input deliberately not modelled. Detail names which failure happened, because "missing"
+    # and "present but not at the top" look identical to someone grepping for the version.
+    param([string]$Changelog, [string]$Version)
     $m = [regex]::Match($Changelog, '(?m)^##\s*\[(\d+(?:\.\d+)*)\]')
-    if ($m.Success) { $m.Groups[1].Value } else { $null }
+    $topmost = if ($m.Success) { $m.Groups[1].Value } else { $null }
+    $passed = $topmost -eq $Version
+    $detail = if ($passed) { '' }
+        elseif ($null -eq $topmost) { 'в CHANGELOG нет ни одной записи вида ## [X.Y]' }
+        else { "верхняя версионная запись [$topmost], ожидалась [$Version] - новая запись не вверху" }
+    [pscustomobject]@{ Passed = $passed; Topmost = $topmost; Detail = $detail }
 }
 
 Write-Host ""
@@ -142,16 +148,8 @@ if (-not $version) {
 # --- 2. CHANGELOG entry for this version sits at the top (above only Unreleased) ----
 if ($version) {
     $changelog = Get-Content (Join-Path $repoRoot 'CHANGELOG.md') -Raw
-    $topmost = Get-ChangelogTopmostVersion -Changelog $changelog
-    $hasEntry = $topmost -eq $version
-    # Two distinct failures look identical without this: "the entry is missing" and "the
-    # entry exists but an older one is above it". The second is the easy mistake (forgetting
-    # to move the new section up), and grepping for the version would wrongly suggest the
-    # check is broken, so name which one happened.
-    $changelogDetail = if ($hasEntry) { '' }
-        elseif ($null -eq $topmost) { 'в CHANGELOG нет ни одной записи вида ## [X.Y]' }
-        else { "верхняя версионная запись [$topmost], ожидалась [$version] - новая запись не вверху" }
-    Add-Result -Name "CHANGELOG has a [$version] entry at the top" -Passed $hasEntry -Detail $changelogDetail
+    $changelogCheck = Get-ChangelogCheckResult -Changelog $changelog -Version $version
+    Add-Result -Name "CHANGELOG has a [$version] entry at the top" -Passed $changelogCheck.Passed -Detail $changelogCheck.Detail
 }
 
 # --- 3. No em/en dashes anywhere (absolute project rule) ---------------------

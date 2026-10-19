@@ -1754,9 +1754,13 @@ Describe "v2.20 pre-release review: fixes to the fixes" -Tag "Fix", "V220R2" {
             # Behavioural, not a grep over the gate text. A grep stays green when the regex it
             # quotes is subtly wrong - the exact trap that let install.ps1 ship a pwsh-version
             # check that never ran for three releases. Here the gate's OWN predicates are
-            # extracted from its source and executed against fixtures, including the cases
-            # that MUST fail. Two assertions stay textual on purpose: that each predicate is
-            # actually called, and with the section/changelog it is meant to read.
+            # extracted from its source and executed against fixtures, including the cases that
+            # MUST fail. Crucially the CHANGELOG predicate returns the whole VERDICT (Passed),
+            # so a mutation of the decision itself - not just the helper it calls - is caught; a
+            # cross-engine review proved an inline "$hasEntry = $topmost -eq $version" could be
+            # replaced with "$hasEntry = $true" and leave every assertion green. Textual guards
+            # stay only for the wiring the fixtures cannot see: that each predicate is called,
+            # fed the right input, and that its result is what Add-Result records.
             $gatePath = (Resolve-Path (Join-Path $PSScriptRoot '..' 'tools' 'Invoke-ReleaseCheck.ps1')).Path
             $gateText = Get-Content $gatePath -Raw
             $gateText | Should -Match 'Test-ReleaseNotesFirstLine -ReleaseNotesSection \$releaseNotes' `
@@ -1766,14 +1770,15 @@ Describe "v2.20 pre-release review: fixes to the fixes" -Tag "Fix", "V220R2" {
             # an earlier fix removed. Without this a later relaxation could reintroduce it.
             $gateText | Should -Not -Match 'Test-ReleaseNotesFirstLine -ReleaseNotesSection \$scriptText' `
                 -Because 'the predicate must never be handed the whole script'
-            # Symmetric guard: section 2 must actually CALL the changelog predicate, or a
-            # revert to an inline presence-match would leave it defined but orphaned while the
-            # fixtures below kept passing against dead code.
-            $gateText | Should -Match 'Get-ChangelogTopmostVersion -Changelog \$changelog' `
-                -Because 'section 2 must actually call the predicate, not merely define it'
+            # Section 2 must call the verdict function AND feed its Passed into Add-Result - the
+            # two together stop a hardcoded "$hasEntry = $true" style bypass.
+            $gateText | Should -Match 'Get-ChangelogCheckResult -Changelog \$changelog' `
+                -Because 'section 2 must actually call the verdict function, not merely define it'
+            $gateText | Should -Match '-Passed \$changelogCheck\.Passed' `
+                -Because 'the recorded verdict must come from the check result, not a hardcoded value'
 
             $ast = [System.Management.Automation.Language.Parser]::ParseFile($gatePath, [ref]$null, [ref]$null)
-            foreach ($fnName in 'Test-ReleaseNotesFirstLine', 'Get-ChangelogTopmostVersion') {
+            foreach ($fnName in 'Test-ReleaseNotesFirstLine', 'Get-ChangelogCheckResult') {
                 $fn = $ast.Find({ param($n)
                     $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq $fnName
                 }, $true)
@@ -1790,26 +1795,28 @@ Describe "v2.20 pre-release review: fixes to the fixes" -Tag "Fix", "V220R2" {
             Test-ReleaseNotesFirstLine -ReleaseNotesSection $notes -Version '2.99' |
                 Should -BeFalse -Because 'an absent version must not pass'
 
-            # CHANGELOG: Get-ChangelogTopmostVersion returns the newest numbered release, which
-            # the gate compares to the version being cut. Here the newest is 2.23, so for a 2.22
-            # release this very file would be stale (the new entry is not at the top).
-            $log = "# Changelog`n`n## [Unreleased]`n`n## [2.23] - 2026-01-01`n`n## [2.22] - 2025-12-01`n"
-            Get-ChangelogTopmostVersion -Changelog $log |
-                Should -Be '2.23' -Because 'the first numbered heading is the newest release'
-
-            # Non-version headings are passed over by the numeric grammar, so a prelude section
-            # does not hide the real newest release nor block a valid release that carries one.
-            Get-ChangelogTopmostVersion -Changelog "# Changelog`n`n## [Unreleased]`n`n## [Deprecated]`n`n## [2.22]`n" |
-                Should -Be '2.22' -Because 'Unreleased and other prelude headings are skipped, not matched'
-
+            # CHANGELOG: execute the actual verdict (Passed), not just the topmost lookup. Newest
+            # numbered entry here is 2.23, so a 2.22 release is stale and must FAIL, and the
+            # detail must name what is on top rather than just "missing".
+            $stale = "# Changelog`n`n## [Unreleased]`n`n## [2.23] - 2026-01-01`n`n## [2.22] - 2025-12-01`n"
+            $r = Get-ChangelogCheckResult -Changelog $stale -Version '2.22'
+            $r.Passed | Should -BeFalse -Because 'an older version on top means the new entry is not at the top'
+            $r.Topmost | Should -Be '2.23'
+            $r.Detail | Should -Match '2\.23' -Because 'the failure detail must name the version that is on top'
+            # The version that genuinely heads the numbered entries passes.
+            (Get-ChangelogCheckResult -Changelog $stale -Version '2.23').Passed |
+                Should -BeTrue -Because 'the version heading the numbered entries is topmost'
+            # A non-version prelude heading (Unreleased, Deprecated) is skipped, not matched, so a
+            # valid release that carries one is not blocked.
+            (Get-ChangelogCheckResult -Changelog "# Changelog`n`n## [Unreleased]`n`n## [Deprecated]`n`n## [2.22]`n" -Version '2.22').Passed |
+                Should -BeTrue -Because 'a non-version prelude heading must not block a valid release'
             # A single-segment version resolves (an earlier grammar demanded at least X.Y).
-            Get-ChangelogTopmostVersion -Changelog "# Changelog`n`n## [Unreleased]`n`n## [3] - 2026-01-01`n" |
-                Should -Be '3' -Because 'a bare numeric version heading still resolves'
-
-            # No numbered entry is distinguishable from a wrong-position one ($null), so the gate
-            # can report "missing" apart from "present but not topmost".
-            Get-ChangelogTopmostVersion -Changelog "# Changelog`n`n## [Unreleased]`n" |
-                Should -BeNullOrEmpty -Because 'a changelog with no release entry has no topmost version'
+            (Get-ChangelogCheckResult -Changelog "# Changelog`n`n## [Unreleased]`n`n## [3] - 2026-01-01`n" -Version '3').Passed |
+                Should -BeTrue -Because 'a bare numeric version still resolves and matches'
+            # No numbered entry at all: fail, and say "missing" rather than mislabel it.
+            $miss = Get-ChangelogCheckResult -Changelog "# Changelog`n`n## [Unreleased]`n" -Version '2.23'
+            $miss.Passed | Should -BeFalse -Because 'a changelog with no release entry must not pass'
+            $miss.Detail | Should -Match 'нет ни одной' -Because 'the detail must distinguish missing from mispositioned'
         }
 
         It "Resolve-PathThroughLinks stops the ancestor walk at the volume root" {
