@@ -29,7 +29,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   behavioural test that executes `install.ps1`'s own expression against the real `pwsh.exe`
   on the test machine and asserts the result clears 7.1. Verified by mutation: with the old
   expression restored, the behavioural test fails while the grep test beside it still
-  passes. 702 -> 704 tests.
+  passes. The suite goes 702 -> 704.
+
+### Changed
+
+- **The release gate now checks POSITION, not just presence** in the two places a release's
+  version must lead: the `.RELEASENOTES` block (it must be the first line) and the CHANGELOG
+  (it must be the topmost entry, above only `[Unreleased]`). Both were matched anywhere in
+  the file, so a version line sitting in the wrong place satisfied a check whose own label
+  promised the first line. The two checks are now named functions exercised by a behavioural
+  test against fixtures, including the cases that must fail - the same lesson the `install.ps1`
+  fix above taught, turned back on the gate itself.
 
 Planned for a later release: quick system health section (SMART, image integrity, WinRE),
 Windows Update driver listing, run-to-run delta and HTML report.

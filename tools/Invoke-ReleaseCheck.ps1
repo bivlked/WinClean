@@ -55,6 +55,47 @@ function Add-Result {
     if ($Detail) { Write-Host "         $Detail" -ForegroundColor DarkGray }
 }
 
+function Test-ReleaseNotesFirstLine {
+    # True only when the FIRST non-empty line of the .RELEASENOTES section is "v<Version>:".
+    # The section lists every version newest-first, so the release being cut must head it.
+    # A matching line buried lower, or the same sentence pasted into prose elsewhere, must
+    # NOT satisfy the check: that stray-copy case shipped once and the gate stayed green.
+    # Named and extracted so a test can run it against fixtures rather than grep the gate
+    # text, which is how install.ps1 shipped a version check that never actually ran.
+    param([string]$ReleaseNotesSection, [string]$Version)
+    $firstLine = $ReleaseNotesSection -split "\r?\n" |
+        Where-Object { $_.Trim() -ne '' } |
+        Select-Object -First 1
+    return [bool]($firstLine -match "^\s*v$([regex]::Escape($Version)):")
+}
+
+function Get-ChangelogCheckResult {
+    # The gate's whole CHANGELOG verdict in one place: Passed, the Topmost version it found,
+    # and a Detail string. The verdict itself lives here (not inline at the call site) so a
+    # test can execute the actual pass/fail decision against fixtures, not merely grep that
+    # the gate calls a helper - a cross-engine review showed an inline "$hasEntry = $topmost
+    # -eq $version" could be mutated to "$hasEntry = $true" with every test still green.
+    #
+    # Passed is true only when the TOPMOST numbered release heading "## [X.Y]" - the first
+    # one, which Keep a Changelog places directly below the single "## [Unreleased]" - names
+    # this version. A version added below an older one, or missing, is caught. Non-version
+    # headings ("## [Unreleased]", "## [Deprecated]") do not match the numeric grammar and are
+    # passed over, so a prelude section does not block a valid release. A single-segment
+    # version ("3") is accepted; a v-prefix or pre-release heading is not (the project writes
+    # bare X.Y). This keys off the heading grammar alone - no markdown fence parsing: a
+    # version-like heading written inside the Unreleased notes (fenced or prose) is malformed
+    # input deliberately not modelled. Detail names which failure happened, because "missing"
+    # and "present but not at the top" look identical to someone grepping for the version.
+    param([string]$Changelog, [string]$Version)
+    $m = [regex]::Match($Changelog, '(?m)^##\s*\[(\d+(?:\.\d+)*)\]')
+    $topmost = if ($m.Success) { $m.Groups[1].Value } else { $null }
+    $passed = $topmost -eq $Version
+    $detail = if ($passed) { '' }
+        elseif ($null -eq $topmost) { 'в CHANGELOG нет ни одной записи вида ## [X.Y]' }
+        else { "верхняя версионная запись [$topmost], ожидалась [$Version] - новая запись не вверху" }
+    [pscustomobject]@{ Passed = $passed; Topmost = $topmost; Detail = $detail }
+}
+
 Write-Host ""
 Write-Host "WinClean release check" -ForegroundColor Cyan
 Write-Host "  repo: $repoRoot" -ForegroundColor DarkGray
@@ -84,7 +125,7 @@ if (-not $version) {
     $versionSites = @(
         @{ What = 'PSScriptInfo block is present'; Ok = [bool]$psScriptInfo }
         @{ What = 'PSScriptInfo .VERSION'; Ok = $psScriptInfo -match "(?m)^\.VERSION\s+$([regex]::Escape($version))\s*$" }
-        @{ What = '.RELEASENOTES first line'; Ok = $releaseNotes -match "(?m)^\s*v$([regex]::Escape($version)):" }
+        @{ What = '.RELEASENOTES first line'; Ok = Test-ReleaseNotesFirstLine -ReleaseNotesSection $releaseNotes -Version $version }
         @{ What = 'SYNOPSIS'; Ok = $scriptText -match "Maintenance Script v$([regex]::Escape($version))" }
         @{ What = 'NOTES Version'; Ok = $scriptText -match "(?m)^\s*Version:\s+$([regex]::Escape($version))\s*$" }
         @{ What = 'NOTES Changes in'; Ok = $scriptText -match "Changes in $([regex]::Escape($version)):" }
@@ -104,11 +145,11 @@ if (-not $version) {
         -Detail $(if ($missing) { "не совпадает: $($missing -join ', ')" } else { '' })
 }
 
-# --- 2. CHANGELOG has an entry for this version ------------------------------
+# --- 2. CHANGELOG entry for this version sits at the top (above only Unreleased) ----
 if ($version) {
     $changelog = Get-Content (Join-Path $repoRoot 'CHANGELOG.md') -Raw
-    $hasEntry = $changelog -match "(?m)^##\s*\[$([regex]::Escape($version))\]"
-    Add-Result -Name "CHANGELOG has a [$version] entry" -Passed $hasEntry
+    $changelogCheck = Get-ChangelogCheckResult -Changelog $changelog -Version $version
+    Add-Result -Name "CHANGELOG has a [$version] entry at the top" -Passed $changelogCheck.Passed -Detail $changelogCheck.Detail
 }
 
 # --- 3. No em/en dashes anywhere (absolute project rule) ---------------------
