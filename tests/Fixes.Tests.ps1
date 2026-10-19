@@ -1819,9 +1819,13 @@ Describe "v2.20 pre-release review: fixes to the fixes" -Tag "Fix", "V220R2" {
             # (the earlier grammar demanded at least X.Y and false-failed on a bare number).
             Test-ChangelogTopmostEntry -Changelog "# Changelog`n`n## [Unreleased]`n`n## [3] - 2026-01-01`n" -Version '3' |
                 Should -BeTrue -Because 'a single-segment version heading must match its version'
-            # A non-version heading on top is not this release and must fail closed.
-            Test-ChangelogTopmostEntry -Changelog "# Changelog`n`n## [Unreleased]`n`n## [YANKED]`n`n## [2.22]`n" -Version '2.22' |
-                Should -BeFalse -Because 'a non-version heading above the entry means it is not topmost'
+            # A non-version prelude heading above the entry (Unreleased, or e.g. Deprecated)
+            # is skipped by grammar, so a valid release that carries one is NOT blocked.
+            Test-ChangelogTopmostEntry -Changelog "# Changelog`n`n## [Unreleased]`n`n## [Deprecated]`n`n## [2.22]`n" -Version '2.22' |
+                Should -BeTrue -Because 'a non-version prelude heading must be skipped, not block a valid release'
+            # But an older NUMBERED version on top is a genuinely stale file and must fail.
+            Test-ChangelogTopmostEntry -Changelog "# Changelog`n`n## [Unreleased]`n`n## [2.23]`n`n## [2.22]`n" -Version '2.22' |
+                Should -BeFalse -Because 'an older numbered version on top means the entry is not topmost'
         }
 
         It "Resolve-PathThroughLinks stops the ancestor walk at the volume root" {

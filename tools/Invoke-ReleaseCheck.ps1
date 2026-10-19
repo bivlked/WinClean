@@ -70,26 +70,23 @@ function Test-ReleaseNotesFirstLine {
 }
 
 function Test-ChangelogTopmostEntry {
-    # True only when the TOPMOST "## [...]" heading other than "## [Unreleased]" names
-    # exactly this version. "## [Unreleased]" legitimately sits above the releases and is
-    # skipped; the first release heading below it must be the version being cut, or the new
-    # entry was added somewhere other than the top and a stale CHANGELOG slips through.
-    # The bracket text is compared to $Version verbatim, so whatever shape the version takes
-    # (the project uses X.Y) is matched without a grammar to drift from it.
-    # Lines inside ``` or ~~~ fences are skipped so an example heading in the Unreleased
-    # notes is not read as the real entry. Deliberately out of scope: a pathological nest of
-    # different-length fences could still mistrack - such a CHANGELOG is a maintainer error a
-    # human catches, and the common single-fence shapes are handled.
+    # True only when the TOPMOST numbered version heading "## [X.Y]" names exactly this
+    # version. Headings that are not a bare numeric version are skipped by the grammar, not
+    # by an explicit name list: "## [Unreleased]" and any other prelude a changelog may carry
+    # ("## [Deprecated]", "## [Planned]") fall through so the first REAL release heading below
+    # them is the one tested. If that heading is an older version, the new entry was added
+    # somewhere other than the top and a stale CHANGELOG would slip through. A single-segment
+    # version ("3") is accepted; a v-prefixed or pre-release heading is not (the project
+    # writes bare X.Y), which fails closed, stopping the release for a human rather than ever
+    # passing wrongly. Lines inside ``` or ~~~ fences are skipped so an example heading in the
+    # Unreleased notes is not read as the real entry; a pathological nest of different-length
+    # fences is out of scope - such a CHANGELOG is a maintainer error a human catches.
     param([string]$Changelog, [string]$Version)
     $inFence = $false
     foreach ($line in ($Changelog -split "\r?\n")) {
         if ($line -match '^\s*(```|~~~)') { $inFence = -not $inFence; continue }
         if ($inFence) { continue }
-        if ($line -match '^##\s*\[([^\]]+)\]') {
-            $label = $Matches[1].Trim()
-            if ($label -eq 'Unreleased') { continue }
-            return $label -eq $Version
-        }
+        if ($line -match '^##\s*\[(\d+(?:\.\d+)*)\]') { return $Matches[1] -eq $Version }
     }
     return $false
 }
